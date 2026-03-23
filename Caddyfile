@@ -1,0 +1,42 @@
+{
+	auto_https disable_redirects
+	https_port 8443
+}
+
+:8443 {
+	tls /Users/daichi/syutain_beta/certs/daichimac-mini.tail3d7a2e.ts.net+3.pem /Users/daichi/syutain_beta/certs/daichimac-mini.tail3d7a2e.ts.net+3-key.pem
+
+	handle /api/chat/ws {
+		reverse_proxy localhost:8000
+	}
+
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}
+
+:80 {
+	handle /api/chat/ws {
+		reverse_proxy localhost:8000
+	}
+
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

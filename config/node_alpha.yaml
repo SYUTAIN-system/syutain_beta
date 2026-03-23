@@ -1,0 +1,33 @@
+# ALPHA（Mac mini M4 Pro 16GB）— 司令塔
+node_name: alpha
+role: orchestrator
+os: macos
+process_manager: launchd
+
+# ネットワーク
+tailscale_ip: "100.70.34.67"
+nats_url: "nats://localhost:4222"
+api_port: 8000
+
+# ローカルLLM（オンデマンド起動）
+local_llm:
+  enabled: true
+  mode: on_demand  # BRAVO/CHARLIEが両方ビジー時のみロード
+  backend: mlx
+  model: "qwen3.5-9b-mlx"
+  max_memory_gb: 6.6
+
+# 常駐エージェント
+agents:
+  - os_kernel
+  - approval_manager
+  - proposal_engine
+  - web_ui_server
+  - chat_agent
+
+# サービス
+services:
+  - postgresql
+  - nats_server
+  - fastapi
+  - nextjs

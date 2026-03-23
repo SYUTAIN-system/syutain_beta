@@ -1,0 +1,25 @@
+# CHARLIE（Ryzen 9 + RTX 3080 10GB）— 推論エンジン
+node_name: charlie
+role: inference
+os: ubuntu
+process_manager: systemd
+
+# ネットワーク
+tailscale_ip: "100.70.161.106"
+nats_url: "nats://localhost:4222"
+
+# ローカルLLM
+local_llm:
+  enabled: true
+  mode: always
+  backend: ollama
+  model: "qwen3.5:9b"
+  ollama_url: "http://localhost:11434"
+
+# 常駐エージェント
+agents:
+  - inference_worker
+  - batch_processor
+
+# 注意: Win11とのデュアルブート。Win11起動中はエージェント停止
+# フォールバック: BRAVO + DELTA で推論継続

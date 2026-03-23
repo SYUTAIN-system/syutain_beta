@@ -1,0 +1,38 @@
+# BRAVO（Ryzen + RTX 5070 12GB）— 実行者（V25: Phase 1から完全稼働）
+node_name: bravo
+role: executor
+os: ubuntu
+process_manager: systemd
+
+# ネットワーク
+tailscale_ip: "100.75.146.9"
+nats_url: "nats://localhost:4222"
+
+# ローカルLLM
+local_llm:
+  enabled: true
+  mode: always
+  backend: ollama
+  model: "qwen3.5:9b"
+  ollama_url: "http://localhost:11434"
+
+# ブラウザ自動操作4層構成
+browser:
+  layer1_lightpanda:
+    enabled: true
+    cdp_port: 9222
+  layer2_stagehand:
+    enabled: true
+    env: LOCAL
+  layer3_chromium:
+    enabled: true
+    cdp_port: 9223
+  layer4_computer_use:
+    enabled: true
+    model: "gpt-5.4"
+
+# 常駐エージェント
+agents:
+  - computer_use_agent
+  - content_worker
+  - browser_agent

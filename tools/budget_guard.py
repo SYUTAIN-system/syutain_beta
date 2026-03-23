@@ -1,0 +1,300 @@
+"""
+SYUTAINβ V25 予算ガード（Budget Guard）
+設計書 第8章 Layer 6準拠
+
+日次/月次のAPI支出を追跡し、閾値でアラートを発行する。
+予算設定は .env から読み込み、ハードコードしない（CLAUDE.md ルール9）。
+"""
+
+import os
+import time
+import asyncio
+import logging
+from datetime import datetime, date
+from typing import Optional
+
+import asyncpg
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger("syutain.budget_guard")
+
+# ===== 予算設定（.envから読み込み）=====
+DAILY_BUDGET_JPY = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "80")))
+MONTHLY_BUDGET_JPY = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "1500")))
+MONTHLY_INFO_BUDGET_JPY = float(os.getenv("MONTHLY_INFO_BUDGET_JPY", "15000"))
+
+# アラート閾値
+ALERT_THRESHOLD_WARN = float(os.getenv("BUDGET_ALERT_WARN", "0.8"))    # 80%で警告
+ALERT_THRESHOLD_STOP = float(os.getenv("BUDGET_ALERT_STOP", "0.9"))    # 90%で停止（Emergency Kill条件）
+SINGLE_CALL_LIMIT_JPY = float(os.getenv("SINGLE_CALL_LIMIT_JPY", "500"))  # 1回の呼び出し上限
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
+
+
+class BudgetGuard:
+    """日次/月次API支出の追跡・アラート"""
+
+    def __init__(self):
+        self._pool: Optional[asyncpg.Pool] = None
+        # インメモリ集計（DB接続不可時のフォールバック）
+        self._daily_spend_jpy: float = 0.0
+        self._monthly_spend_jpy: float = 0.0
+        self._info_spend_jpy: float = 0.0
+        self._chat_spend_jpy: float = 0.0  # チャット経由のAPI支出
+        self._current_date: date = date.today()
+        self._current_month: int = date.today().month
+        self._initialized_from_db: bool = False
+
+    async def _get_pool(self) -> Optional[asyncpg.Pool]:
+        """PostgreSQL接続プールを取得"""
+        if self._pool is None:
+            try:
+                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+            except Exception as e:
+                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
+                return None
+        return self._pool
+
+    async def _load_from_db(self):
+        """起動時にDB（llm_cost_log）から当日/当月の支出を復元"""
+        if self._initialized_from_db:
+            return
+        self._initialized_from_db = True
+        try:
+            pool = await self._get_pool()
+            if not pool:
+                return
+            async with pool.acquire() as conn:
+                # 当日の支出合計
+                row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE recorded_at::date = CURRENT_DATE"
+                )
+                if row:
+                    self._daily_spend_jpy = float(row["total"])
+                # 当月の支出合計
+                row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE date_trunc('month', recorded_at) = date_trunc('month', CURRENT_DATE)"
+                )
+                if row:
+                    self._monthly_spend_jpy = float(row["total"])
+                # チャット支出（goal_id='chat'のもの）
+                row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE recorded_at::date = CURRENT_DATE AND goal_id = 'chat'"
+                )
+                if row:
+                    self._chat_spend_jpy = float(row["total"])
+                logger.info(f"DB復元: 日次¥{self._daily_spend_jpy:.1f}, 月次¥{self._monthly_spend_jpy:.1f}, チャット¥{self._chat_spend_jpy:.1f}")
+        except Exception as e:
+            logger.warning(f"DB復元失敗（インメモリで継続）: {e}")
+
+    async def _reset_if_new_day(self):
+        """日付が変わったら日次集計をリセット"""
+        today = date.today()
+        if today != self._current_date:
+            self._daily_spend_jpy = 0.0
+            self._chat_spend_jpy = 0.0
+            self._current_date = today
+            logger.info(f"日次予算リセット: {today}")
+        if today.month != self._current_month:
+            self._monthly_spend_jpy = 0.0
+            self._info_spend_jpy = 0.0
+            self._current_month = today.month
+            logger.info(f"月次予算リセット: {today.month}月")
+
+    async def record_spend(
+        self,
+        amount_jpy: float,
+        model: str,
+        tier: str,
+        is_info_collection: bool = False,
+        goal_id: str = "",
+    ) -> dict:
+        """
+        API支出を記録し、予算状態を返す。
+
+        Returns:
+            {
+                "allowed": bool,
+                "daily_remaining_jpy": float,
+                "monthly_remaining_jpy": float,
+                "alert_level": "ok" | "warn" | "stop",
+                "message": str,
+            }
+        """
+        await self._reset_if_new_day()
+
+        # 1回の呼び出し上限チェック
+        if amount_jpy > SINGLE_CALL_LIMIT_JPY:
+            logger.warning(f"単一呼び出し上限超過: {amount_jpy}円 > {SINGLE_CALL_LIMIT_JPY}円 ({model})")
+            return {
+                "allowed": False,
+                "daily_remaining_jpy": DAILY_BUDGET_JPY - self._daily_spend_jpy,
+                "monthly_remaining_jpy": MONTHLY_BUDGET_JPY - self._monthly_spend_jpy,
+                "alert_level": "stop",
+                "message": f"単一呼び出し上限超過: {amount_jpy}円 > {SINGLE_CALL_LIMIT_JPY}円",
+            }
+
+        # インメモリ集計更新
+        self._daily_spend_jpy += amount_jpy
+        self._monthly_spend_jpy += amount_jpy
+        if is_info_collection:
+            self._info_spend_jpy += amount_jpy
+
+        # DB記録（失敗しても処理は続行）
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
+                        VALUES ($1, $2, $3, $4, $5, NOW())
+                        """,
+                        model, tier, amount_jpy, goal_id, is_info_collection,
+                    )
+        except Exception as e:
+            # テーブルが存在しない場合もあるため警告のみ
+            logger.warning(f"予算記録DB保存失敗（インメモリで継続）: {e}")
+
+        # アラートレベル判定
+        daily_ratio = self._daily_spend_jpy / DAILY_BUDGET_JPY if DAILY_BUDGET_JPY > 0 else 0
+        monthly_ratio = self._monthly_spend_jpy / MONTHLY_BUDGET_JPY if MONTHLY_BUDGET_JPY > 0 else 0
+        max_ratio = max(daily_ratio, monthly_ratio)
+
+        if max_ratio >= ALERT_THRESHOLD_STOP:
+            alert_level = "stop"
+            msg = f"予算90%超過 - 即時停止: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{self._monthly_spend_jpy:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
+            logger.critical(msg)
+        elif max_ratio >= ALERT_THRESHOLD_WARN:
+            alert_level = "warn"
+            msg = f"予算80%警告: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{self._monthly_spend_jpy:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
+            logger.warning(msg)
+        else:
+            alert_level = "ok"
+            msg = f"予算正常: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円"
+
+        return {
+            "allowed": alert_level != "stop",
+            "daily_remaining_jpy": max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy),
+            "monthly_remaining_jpy": max(0, MONTHLY_BUDGET_JPY - self._monthly_spend_jpy),
+            "alert_level": alert_level,
+            "message": msg,
+        }
+
+    async def record_chat_spend(self, amount_jpy: float, model: str = ""):
+        """チャット経由のAPI支出を記録"""
+        self._chat_spend_jpy += amount_jpy
+        # DBにもchat固有マーカー付きで記録
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
+                        VALUES ($1, 'chat', $2, 'chat', FALSE, NOW())
+                        """,
+                        model, amount_jpy,
+                    )
+        except Exception as e:
+            logger.warning(f"チャット予算DB記録失敗: {e}")
+
+    async def check_before_call(self, estimated_cost_jpy: float) -> dict:
+        """
+        LLM呼び出し前に予算チェック。
+        推定コストを加算した場合に閾値を超えるかを事前判定する。
+        """
+        try:
+            await self._reset_if_new_day()
+
+            projected_daily = self._daily_spend_jpy + estimated_cost_jpy
+            projected_monthly = self._monthly_spend_jpy + estimated_cost_jpy
+
+            daily_ratio = projected_daily / DAILY_BUDGET_JPY if DAILY_BUDGET_JPY > 0 else 0
+            monthly_ratio = projected_monthly / MONTHLY_BUDGET_JPY if MONTHLY_BUDGET_JPY > 0 else 0
+            max_ratio = max(daily_ratio, monthly_ratio)
+
+            if max_ratio >= ALERT_THRESHOLD_STOP:
+                return {
+                    "allowed": False,
+                    "reason": f"推定コスト{estimated_cost_jpy}円を加算すると予算90%超過",
+                    "suggest_tier_downgrade": True,
+                }
+            elif max_ratio >= ALERT_THRESHOLD_WARN:
+                return {
+                    "allowed": True,
+                    "reason": f"予算80%警告圏内（推定{estimated_cost_jpy}円加算後）",
+                    "suggest_tier_downgrade": True,
+                }
+            else:
+                return {
+                    "allowed": True,
+                    "reason": "予算範囲内",
+                    "suggest_tier_downgrade": False,
+                }
+        except Exception as e:
+            logger.error(f"予算チェックエラー: {e}")
+            return {"allowed": True, "reason": f"予算チェックエラー: {e}", "suggest_tier_downgrade": False}
+
+    async def get_budget_status(self) -> dict:
+        """現在の予算状態を取得"""
+        try:
+            await self._load_from_db()
+            await self._reset_if_new_day()
+        except Exception as e:
+            logger.error(f"予算状態取得エラー: {e}")
+        return {
+            "daily_budget_jpy": DAILY_BUDGET_JPY,
+            "daily_spent_jpy": self._daily_spend_jpy,
+            "daily_remaining_jpy": max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy),
+            "daily_usage_pct": (self._daily_spend_jpy / DAILY_BUDGET_JPY * 100) if DAILY_BUDGET_JPY > 0 else 0,
+            "monthly_budget_jpy": MONTHLY_BUDGET_JPY,
+            "monthly_spent_jpy": self._monthly_spend_jpy,
+            "monthly_remaining_jpy": max(0, MONTHLY_BUDGET_JPY - self._monthly_spend_jpy),
+            "monthly_usage_pct": (self._monthly_spend_jpy / MONTHLY_BUDGET_JPY * 100) if MONTHLY_BUDGET_JPY > 0 else 0,
+            "info_budget_jpy": MONTHLY_INFO_BUDGET_JPY,
+            "info_spent_jpy": self._info_spend_jpy,
+            "chat_spent_jpy": self._chat_spend_jpy,
+            "budget_mode": self._get_budget_mode(),
+        }
+
+    def _get_budget_mode(self) -> str:
+        """予算モードを判定"""
+        daily_ratio = self._daily_spend_jpy / DAILY_BUDGET_JPY if DAILY_BUDGET_JPY > 0 else 0
+        monthly_ratio = self._monthly_spend_jpy / MONTHLY_BUDGET_JPY if MONTHLY_BUDGET_JPY > 0 else 0
+        max_ratio = max(daily_ratio, monthly_ratio)
+
+        if max_ratio >= ALERT_THRESHOLD_STOP:
+            return "emergency"
+        elif max_ratio >= ALERT_THRESHOLD_WARN:
+            return "constrained"
+        elif max_ratio >= 0.5:
+            return "moderate"
+        else:
+            return "normal"
+
+    def is_emergency_kill_triggered(self) -> bool:
+        """Emergency Kill条件: 日次予算の90%超過"""
+        return self._daily_spend_jpy >= (DAILY_BUDGET_JPY * ALERT_THRESHOLD_STOP)
+
+    async def close(self):
+        """接続プールを閉じる"""
+        if self._pool:
+            try:
+                await self._pool.close()
+            except Exception as e:
+                logger.error(f"接続プール終了エラー: {e}")
+
+
+# シングルトン
+_instance: Optional[BudgetGuard] = None
+
+
+def get_budget_guard() -> BudgetGuard:
+    """BudgetGuardのシングルトンを取得"""
+    global _instance
+    if _instance is None:
+        _instance = BudgetGuard()
+    return _instance

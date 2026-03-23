@@ -1,0 +1,33 @@
+# DELTA（Xeon E5 + GTX 980Ti 6GB + 48GB RAM）— 監視・補助
+node_name: delta
+role: monitor
+os: ubuntu
+process_manager: systemd
+
+# ネットワーク
+tailscale_ip: "100.82.81.105"
+nats_url: "nats://localhost:4222"
+
+# ローカルLLM
+local_llm:
+  enabled: true
+  mode: auto  # GPU優先、8 tok/s未満でCPUフォールバック
+  backend: ollama
+  model: "qwen3.5:4b"
+  ollama_url: "http://localhost:11434"
+  cpu_fallback:
+    enabled: true
+    backend: llama_cpp
+    binary: "/usr/local/bin/llama-cli"
+
+# 突然変異エンジン（DELTA専用）
+mutation_engine:
+  enabled: true
+  db_path: "data/mutation_engine.enc.db"
+  # パスフレーズは .env の SQLCIPHER_PASSPHRASE から読む
+
+# 常駐エージェント
+agents:
+  - monitor_agent
+  - info_collector
+  - health_checker

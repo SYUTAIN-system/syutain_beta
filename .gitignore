@@ -1,0 +1,51 @@
+# ===== 環境・秘匿情報 =====
+.env
+credentials.json
+token.json
+*.pem
+*.key
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ===== Node.js =====
+node_modules/
+web/node_modules/
+web/.next/
+web/out/
+.pnpm-store/
+
+# ===== データ・ログ =====
+data/*.db
+data/*.enc.db
+data/backup/
+logs/*.log
+!logs/.gitkeep
+!data/.gitkeep
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.code-workspace
+
+# ===== その他 =====
+*.bak
+*.tmp
+.cache/
