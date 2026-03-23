@@ -39,6 +39,8 @@ class MonitorAgent:
         # アラート重複抑制（同一アラートは5分間隔）
         self._alert_cooldown: dict[str, float] = {}
         self._alert_cooldown_sec = 300
+        # エスカレーション用: 同一エラー5分内3回検出
+        self._error_tracker: dict[str, list[float]] = {}
 
     async def start(self) -> None:
         """監視エージェントを起動"""
@@ -161,6 +163,18 @@ class MonitorAgent:
                 await self._send_alert("warning", f"RAM高使用: {node.upper()}", f"RAM使用率 {ram}%", node)
             if 0 < disk < 5:
                 await self._send_alert("critical", f"ディスク残量少: {node.upper()}", f"残り {disk:.1f}GB", node)
+
+        # 判断根拠トレース
+        try:
+            statuses = {n: self._node_states.get(n, {}).get("status", "unknown") for n in ["alpha", "bravo", "charlie", "delta"]}
+            await self._record_trace(
+                action="check_all_nodes",
+                reasoning=f"ノード状態確認完了: {statuses}",
+                confidence=1.0,
+                context={"node_statuses": statuses},
+            )
+        except Exception:
+            pass
 
     async def _reassign_tasks_from_down_node(self, down_node: str) -> None:
         """ダウンノードに割り当てられた実行中タスクを別ノードに再振替（接続#19）"""
@@ -305,6 +319,30 @@ class MonitorAgent:
 
         logger.warning(f"ALERT [{severity}] {title}: {message}")
 
+        # エスカレーション: 同一エラー5分内3回 → claude_code_queue
+        if severity in ("error", "critical"):
+            try:
+                now = time.time()
+                error_key = f"{node}:{title}"
+                self._error_tracker.setdefault(error_key, [])
+                self._error_tracker[error_key].append(now)
+                # 5分以内のみ保持
+                self._error_tracker[error_key] = [t for t in self._error_tracker[error_key] if now - t < 300]
+                if len(self._error_tracker[error_key]) >= 3:
+                    from brain_alpha.escalation import escalate_to_queue
+                    await escalate_to_queue(
+                        category="recurring_error",
+                        description=f"同一エラー5分内3回検出: {title} ({message[:100]})",
+                        priority="high",
+                        source_agent="monitor_agent",
+                        auto_solvable=False,
+                        context_files=[],
+                        suggested_prompt=f"event_logでエラー '{title}' を調査し、根本原因を修正してください",
+                    )
+                    self._error_tracker[error_key] = []  # リセット
+            except Exception as e:
+                logger.debug(f"エスカレーション失敗（無視）: {e}")
+
     async def _send_discord_alert(
         self,
         severity: str,
@@ -331,6 +369,27 @@ class MonitorAgent:
                     logger.warning(f"Discord Webhook応答: {resp.status_code}")
         except Exception as e:
             logger.error(f"Discord Webhook送信失敗: {e}")
+
+    # ===== 判断根拠トレース =====
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            import asyncpg
+            DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "MONITOR_AGENT", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
     # ===== ステータス取得 =====
 

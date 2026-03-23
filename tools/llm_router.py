@@ -126,6 +126,35 @@ def _pick_local_node(prefer_delta: bool = False) -> str:
     return "alpha"
 
 
+# ===== Nemotron-Nano-8B-v2-Japanese 設定 =====
+NEMOTRON_JP_ENABLED = os.getenv("NEMOTRON_JP_ENABLED", "false").lower() == "true"
+NEMOTRON_JP_NODES = [n.strip() for n in os.getenv("NEMOTRON_JP_NODES", "bravo,charlie").split(",")]
+NEMOTRON_JP_MODEL = "nemotron-jp"  # ollama内のモデル名
+
+# Nemotron優先タスク（日本語コンテンツ生成/チャット/Tool Calling）
+_NEMOTRON_PRIORITY_TASKS = {
+    "content", "sns_draft", "drafting", "note_article", "note_draft",
+    "product_desc", "booth_description", "chat", "persona_extraction",
+    "quality_scoring", "tool_calling", "intel_summary",
+}
+
+# Nemotron + /think 推奨タスク（品質検証・推論）
+_NEMOTRON_THINK_TASKS = {
+    "quality_verification", "content_refinement", "analysis",
+    "proposal_generation", "strategy",
+}
+
+
+def _pick_nemotron_node() -> Optional[str]:
+    """Nemotronが利用可能なノードを返す。なければNone"""
+    if not NEMOTRON_JP_ENABLED:
+        return None
+    for node in NEMOTRON_JP_NODES:
+        if not _node_load.get(node, {}).get("busy"):
+            return node
+    return None
+
+
 # ===== タスクタイプ→ノード/モデルのマッピング =====
 # 実データに基づく品質実績でローカル/APIを振り分け
 
@@ -242,6 +271,19 @@ def choose_best_model_v6(
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
         return {"provider": "local", "model": model, "tier": "L", "node": node,
                 "note": f"quality=low→ローカル強制({node})"}
+
+    # === Nemotron-JP 優先ルート（日本語コンテンツ/チャット） ===
+
+    if NEMOTRON_JP_ENABLED and local_available:
+        nemotron_node = _pick_nemotron_node()
+        if nemotron_node:
+            if task_type in _NEMOTRON_PRIORITY_TASKS:
+                return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
+                        "node": nemotron_node, "note": f"Nemotron JP優先({task_type})→{nemotron_node}"}
+            if task_type in _NEMOTRON_THINK_TASKS and quality in ("medium", "high"):
+                return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
+                        "node": nemotron_node, "think": True,
+                        "note": f"Nemotron JP /think({task_type})→{nemotron_node}"}
 
     # === 学習ループキャッシュ ===
 
@@ -388,6 +430,26 @@ async def call_llm(
         except Exception:
             pass
 
+        # agent_reasoning_trace: モデル選定根拠
+        try:
+            import asyncpg as _apg
+            _trace_conn = await _apg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
+            try:
+                await _trace_conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, action, reasoning, confidence, context)
+                       VALUES ('LLMRouter', 'model_selected', $1, 1.0, $2)""",
+                    model_selection.get("note", f"{model}@{node or provider}"),
+                    json.dumps({"model": model, "provider": provider, "tier": tier,
+                                "node": node, "task_type": kwargs.get("task_type", ""),
+                                "nemotron_enabled": NEMOTRON_JP_ENABLED},
+                               ensure_ascii=False),
+                )
+            finally:
+                await _trace_conn.close()
+        except Exception:
+            pass
+
         latency_ms = (time.time() - start_time) * 1000
         result["latency_ms"] = latency_ms
         result["model_used"] = model
@@ -488,13 +550,22 @@ async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str
     if not node or node == "auto" or node not in url_map:
         node = _pick_local_node()
     base_url = url_map.get(node, url_map["bravo"])
-    ollama_model = os.getenv(f"{node.upper()}_LOCAL_MODEL", model)
+    # Nemotronモデルの場合はモデル名をそのまま使用
+    if model == NEMOTRON_JP_MODEL:
+        ollama_model = NEMOTRON_JP_MODEL
+    else:
+        ollama_model = os.getenv(f"{node.upper()}_LOCAL_MODEL", model)
     logger.info(f"ローカルLLM呼び出し: node={node}, model={ollama_model}")
 
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
+
+    # Nemotron推論制御: /think or /no_think
+    think_mode = False
+    if ollama_model == NEMOTRON_JP_MODEL:
+        think_mode = True  # Nemotronはデフォルト推論ON
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
@@ -504,7 +575,7 @@ async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str
                     "model": ollama_model,
                     "messages": messages,
                     "stream": False,
-                    "think": False,  # Qwen3.5思考モード無効化（contentが空になる問題の回避）
+                    "think": think_mode,
                 },
             )
             resp.raise_for_status()

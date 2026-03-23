@@ -181,6 +181,18 @@ class CapabilityAudit:
         elapsed = time.time() - start_time
         logger.info(f"能力監査完了 ({elapsed:.1f}秒)")
 
+        # 判断根拠トレース
+        try:
+            node_statuses = {n: snapshot["nodes"].get(n, {}).get("status", "unknown") for n in NODE_DEFINITIONS}
+            await self._record_trace(
+                action="run_full_audit",
+                reasoning=f"全4ノード監査完了 ({elapsed:.1f}秒): {node_statuses}",
+                confidence=1.0,
+                context={"node_statuses": node_statuses, "diff_count": len(diff) if diff else 0, "elapsed_sec": round(elapsed, 1)},
+            )
+        except Exception:
+            pass
+
         self._last_snapshot = snapshot
         return snapshot
 
@@ -423,6 +435,22 @@ class CapabilityAudit:
             )
         except Exception as e:
             logger.warning(f"スナップショットNATSパブリッシュ失敗: {e}")
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "CAPABILITY_AUDIT", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+        except Exception:
+            pass
 
     async def close(self):
         """接続プールを閉じる"""

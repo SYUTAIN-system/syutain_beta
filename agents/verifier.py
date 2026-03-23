@@ -218,6 +218,13 @@ class Verifier:
             f"検証完了: {task_id} → status={result.status}, "
             f"progress={result.goal_progress:.2f}, quality={result.quality_score:.2f}"
         )
+
+        # 品質低下エスカレーション: 24h平均が7日平均-0.10
+        try:
+            await self._check_quality_decline()
+        except Exception:
+            pass
+
         return result
 
     async def _score_quality(self, output: dict, success_definition: list) -> float:
@@ -354,6 +361,37 @@ class Verifier:
             return "low"
         else:
             return "low"
+
+    async def _check_quality_decline(self):
+        """24h平均が7日平均を0.10以上下回っていたらエスカレーション"""
+        pool = await self._get_pool()
+        if not pool:
+            return
+        async with pool.acquire() as conn:
+            r = await conn.fetchrow(
+                """SELECT
+                     AVG(quality_score) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as avg_24h,
+                     AVG(quality_score) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') as avg_7d
+                   FROM model_quality_log
+                   WHERE quality_score > 0"""
+            )
+            if r and r["avg_24h"] is not None and r["avg_7d"] is not None:
+                delta = float(r["avg_24h"]) - float(r["avg_7d"])
+                if delta < -0.10:
+                    # 重複防止: 直近1日以内に同じエスカレーションがなければ
+                    existing = await conn.fetchval(
+                        """SELECT COUNT(*) FROM claude_code_queue
+                           WHERE category = 'quality_decline' AND created_at > NOW() - INTERVAL '24 hours'"""
+                    )
+                    if existing == 0:
+                        from brain_alpha.escalation import escalate_to_queue
+                        await escalate_to_queue(
+                            category="quality_decline",
+                            description=f"品質スコア低下: 24h平均={float(r['avg_24h']):.2f}, 7日平均={float(r['avg_7d']):.2f} (差={delta:.2f})",
+                            priority="high",
+                            source_agent="verifier",
+                            auto_solvable=False,
+                        )
 
     async def _record_trace(self, task_id: str, goal_id: str = None, action: str = "",
                            reasoning: str = "", confidence: float = None, context: dict = None):

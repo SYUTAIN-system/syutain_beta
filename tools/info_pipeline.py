@@ -497,7 +497,7 @@ class InfoPipeline:
                         item.get("category", "other"),
                     )
                     saved += 1
-                    # 高重要度（0.7以上）はDiscord通知（Q12修正）
+                    # 高重要度（0.7以上）はDiscord通知 + Brain-αハンドオフ
                     if item.get("importance_score", 0.0) >= 0.7:
                         try:
                             from tools.discord_notify import notify_discord
@@ -508,6 +508,17 @@ class InfoPipeline:
                                 f"重要度: {item.get('importance_score', 0):.2f}\n"
                                 f"カテゴリ: {item.get('category', '?')}\n"
                                 f"概要: {(item.get('summary', '') or '')[:150]}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            from brain_alpha.escalation import handoff_to_alpha
+                            await handoff_to_alpha(
+                                category="info",
+                                title=f"重要情報: {item.get('title', '?')[:80]}",
+                                detail=f"重要度{item.get('importance_score', 0):.2f} / {item.get('category', '')} / {(item.get('summary', '') or '')[:200]}",
+                                source_agent="info_pipeline",
+                                context={"source": item.get("source"), "url": item.get("url", ""), "score": item.get("importance_score", 0)},
                             )
                         except Exception:
                             pass

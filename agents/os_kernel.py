@@ -293,6 +293,20 @@ class OSKernel:
         gp_dict = goal_packet.to_dict()
 
         logger.info(f"=== 5段階自律ループ開始: {goal_packet.goal_id} ===")
+
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action="execute_goal:start",
+                reasoning=f"5段階自律ループ開始。目標: {raw_goal[:100]}。パース結果: {goal_packet.parsed_objective}",
+                confidence=1.0,
+                context={"parsed_objective": goal_packet.parsed_objective, "priority": goal_packet.priority,
+                         "max_steps": goal_packet.max_total_steps},
+                goal_id=goal_packet.goal_id,
+            )
+        except Exception:
+            pass
+
         all_results = []
         fallback_count = len(goal_packet.fallback_goals)
         current_plan_index = 0  # 0=主プラン, 1+=フォールバック
@@ -602,6 +616,22 @@ class OSKernel:
         goal_packet.status = "incomplete"
         await self._update_goal_status(goal_packet)
         return self._build_final_result(goal_packet, all_results, "incomplete")
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "OS_KERNEL", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+        except Exception:
+            pass
 
     async def _update_goal_status(self, gp: GoalPacket):
         """ゴールのステータスをDBに更新"""

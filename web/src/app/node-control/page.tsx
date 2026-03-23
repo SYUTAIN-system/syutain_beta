@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Server, Monitor, RefreshCw, History } from "lucide-react";
+import { Server, Monitor, RefreshCw, History, Wrench } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
 interface NodeState {
@@ -20,7 +20,9 @@ interface HistoryEntry {
 
 const stateConfig: Record<string, { label: string; color: string; bg: string; dot: string }> = {
   healthy: { label: "稼働中", color: "text-[var(--accent-green)]", bg: "bg-[var(--accent-green)]/10", dot: "bg-[var(--accent-green)]" },
+  degraded: { label: "一部異常", color: "text-[var(--accent-amber)]", bg: "bg-[var(--accent-amber)]/10", dot: "bg-[var(--accent-amber)]" },
   charlie_win11: { label: "Win11", color: "text-[var(--accent-amber)]", bg: "bg-[var(--accent-amber)]/10", dot: "bg-[var(--accent-amber)]" },
+  recovering: { label: "復旧中", color: "text-[var(--accent-blue)]", bg: "bg-[var(--accent-blue)]/10", dot: "bg-[var(--accent-blue)]" },
   down: { label: "停止", color: "text-[var(--accent-red)]", bg: "bg-[var(--accent-red)]/10", dot: "bg-[var(--accent-red)]" },
 };
 
@@ -32,9 +34,9 @@ const nodeRoles: Record<string, string> = {
 };
 
 const nodeModels: Record<string, string> = {
-  alpha: "なし（MLX廃止済み）",
-  bravo: "Qwen3.5-9B",
-  charlie: "Qwen3.5-9B",
+  alpha: "推論なし（Brain-α専用）",
+  bravo: "Nemotron 9B JP + Qwen3.5-9B",
+  charlie: "Nemotron 9B JP + Qwen3.5-9B",
   delta: "Qwen3.5-4B",
 };
 
@@ -45,13 +47,15 @@ export default function NodeControlPage() {
   const [switching, setSwitching] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [healStats, setHealStats] = useState<{total_24h: number; success_rate_24h: number; recent: {id: number; error_type: string; fix_strategy: string; fix_result: string; created_at: string}[]} | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const [stateRes, charlieRes, historyRes] = await Promise.all([
+      const [stateRes, charlieRes, historyRes, healRes] = await Promise.all([
         apiFetch("/api/nodes/state"),
         apiFetch("/api/nodes/charlie/mode"),
         apiFetch("/api/nodes/state/history?limit=20"),
+        apiFetch("/api/self-healing/stats").catch(() => null),
       ]);
       if (stateRes.ok) {
         const json = await stateRes.json();
@@ -64,6 +68,9 @@ export default function NodeControlPage() {
       if (historyRes.ok) {
         const json = await historyRes.json();
         setHistory(json.history || []);
+      }
+      if (healRes && healRes.ok) {
+        setHealStats(await healRes.json());
       }
     } catch {
       // ignore
@@ -203,6 +210,38 @@ export default function NodeControlPage() {
           </button>
         </div>
       </div>
+
+      {/* 自律修復 */}
+      {healStats && (
+        <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Wrench className="h-4 w-4 text-[var(--accent-blue)]" />
+            <h2 className="text-sm font-semibold">自律修復</h2>
+            <div className="ml-auto flex items-center gap-3 text-xs">
+              <span>24h: <span className="font-bold">{healStats.total_24h}</span>件</span>
+              <span>成功率: <span className={`font-bold ${healStats.success_rate_24h >= 80 ? "text-[var(--accent-green)]" : "text-[var(--accent-amber)]"}`}>{healStats.success_rate_24h}%</span></span>
+            </div>
+          </div>
+          {healStats.recent && healStats.recent.length > 0 ? (
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {healStats.recent.slice(0, 10).map((r) => (
+                <div key={r.id} className="flex items-center justify-between rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={`h-2 w-2 rounded-full flex-shrink-0 ${r.fix_result === "success" ? "bg-[var(--accent-green)]" : r.fix_result === "attempted" ? "bg-[var(--accent-amber)]" : "bg-[var(--accent-red)]"}`} />
+                    <span className="truncate">{r.error_type}</span>
+                    <span className="text-[var(--text-secondary)]">→ {r.fix_strategy}</span>
+                  </div>
+                  <span className="text-[var(--text-secondary)] flex-shrink-0 ml-2">
+                    {r.created_at ? new Date(r.created_at).toLocaleString("ja-JP") : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="py-3 text-center text-xs text-[var(--text-secondary)]">修復履歴なし</p>
+          )}
+        </div>
+      )}
 
       {/* 変更履歴 */}
       <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">

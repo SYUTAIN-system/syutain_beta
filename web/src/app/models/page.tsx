@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Cpu, Zap, Server, CircleDollarSign } from "lucide-react";
+import { Cpu, Zap, Server, CircleDollarSign, Scale } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
 interface BudgetStatus {
@@ -26,13 +26,16 @@ export default function ModelsPage() {
   const [budget, setBudget] = useState<BudgetStatus | null>(null);
   const [usage, setUsage] = useState<ModelUsageEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [crossEvals, setCrossEvals] = useState<any[]>([]);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [budgetRes, usageRes] = await Promise.all([
+        const [budgetRes, usageRes, evalRes] = await Promise.all([
           apiFetch("/api/budget/status").catch(() => null),
           apiFetch("/api/model-usage").catch(() => null),
+          apiFetch("/api/brain-alpha/cross-evaluations?limit=10").catch(() => null),
         ]);
 
         if (budgetRes && budgetRes.ok) {
@@ -54,6 +57,11 @@ export default function ModelsPage() {
             daily_percent: 0,
             monthly_percent: 0,
           });
+        }
+
+        if (evalRes && evalRes.ok) {
+          const ej = await evalRes.json();
+          setCrossEvals(ej.evaluations || []);
         }
 
         if (usageRes && usageRes.ok) {
@@ -235,6 +243,41 @@ export default function ModelsPage() {
           <p className="py-12 text-center text-[var(--text-secondary)]">モデル使用データはまだありません</p>
         )}
       </div>
+
+      {/* Brain-α品質修正履歴 */}
+      {crossEvals.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Scale className="h-5 w-5 text-[var(--accent-purple)]" />
+            <h2 className="text-lg font-semibold">Brain-&alpha; 品質修正検証</h2>
+          </div>
+          <div className="space-y-2">
+            {crossEvals.map((ev: {id: number; target_type: string; score: number; evaluation: string; recommendations: Record<string, unknown>; created_at: string}) => {
+              const s = ev.score ?? 0;
+              const color = s >= 0.7 ? "text-[var(--accent-green)]" : s >= 0.4 ? "text-[var(--accent-amber)]" : "text-[var(--accent-red)]";
+              return (
+                <div key={ev.id} className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium">{ev.target_type}</span>
+                    <span className={`text-sm font-bold ${color}`}>{(s * 100).toFixed(0)}%</span>
+                  </div>
+                  <p className="text-xs text-[var(--text-secondary)]">{ev.evaluation}</p>
+                  {ev.recommendations && (
+                    <div className="mt-1 flex gap-3 text-[10px] text-[var(--text-secondary)]">
+                      {ev.recommendations.quality_improvement != null && (
+                        <span>品質変化: {Number(ev.recommendations.quality_improvement) >= 0 ? "+" : ""}{Number(ev.recommendations.quality_improvement).toFixed(3)}</span>
+                      )}
+                      {ev.recommendations.error_improvement != null && (
+                        <span>エラー変化: {Number(ev.recommendations.error_improvement) >= 0 ? "-" : "+"}{Math.abs(Number(ev.recommendations.error_improvement))}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -10,10 +10,11 @@ load_dotenv()
 logger = logging.getLogger("syutain.discord")
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+BRAIN_WEBHOOK_URL = os.getenv("DISCORD_BRAIN_WEBHOOK_URL", "")
 
 
 async def notify_discord(content: str, username: str = "SYUTAINβ") -> bool:
-    """Discord Webhookに通知を送信"""
+    """Discord Webhookに通知を送信（メイン + Brain-αチャネル）"""
     if not WEBHOOK_URL:
         logger.warning("DISCORD_WEBHOOK_URL未設定")
         return False
@@ -23,12 +24,37 @@ async def notify_discord(content: str, username: str = "SYUTAINβ") -> bool:
                 "username": username,
                 "content": content,
             })
-            if resp.status_code in (200, 204):
-                return True
-            logger.error(f"Discord通知失敗: {resp.status_code} {resp.text[:100]}")
-            return False
+            ok = resp.status_code in (200, 204)
+            if not ok:
+                logger.error(f"Discord通知失敗: {resp.status_code} {resp.text[:100]}")
+
+            # Brain-αチャネルにも送信（設定されている場合のみ）
+            if BRAIN_WEBHOOK_URL:
+                try:
+                    await client.post(BRAIN_WEBHOOK_URL, json={
+                        "username": f"{username} → Brain-α",
+                        "content": content,
+                    })
+                except Exception:
+                    pass  # Brain通知失敗はメイン通知に影響させない
+
+            return ok
     except Exception as e:
         logger.error(f"Discord通知エラー: {e}")
+        return False
+
+
+async def notify_brain_only(content: str, username: str = "Brain-α") -> bool:
+    """Brain-αチャネルのみに通知（メインには送らない）"""
+    url = BRAIN_WEBHOOK_URL or WEBHOOK_URL
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json={"username": username, "content": content})
+            return resp.status_code in (200, 204)
+    except Exception as e:
+        logger.error(f"Brain通知エラー: {e}")
         return False
 
 

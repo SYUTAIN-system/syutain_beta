@@ -175,6 +175,38 @@ class BudgetGuard:
             alert_level = "ok"
             msg = f"予算正常: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円"
 
+        # コスト異常エスカレーション: 24hコスト > 7日平均 * 2
+        try:
+            if alert_level in ("warn", "stop"):
+                pool = await self._get_pool()
+                if pool:
+                    async with pool.acquire() as conn:
+                        r = await conn.fetchrow(
+                            """SELECT
+                                 COALESCE(SUM(amount_jpy) FILTER (WHERE recorded_at > NOW() - INTERVAL '24 hours'), 0) as cost_24h,
+                                 COALESCE(AVG(daily_total), 0) as avg_7d
+                               FROM (
+                                 SELECT DATE(recorded_at) as d, SUM(amount_jpy) as daily_total
+                                 FROM llm_cost_log
+                                 WHERE recorded_at > NOW() - INTERVAL '7 days'
+                                 GROUP BY DATE(recorded_at)
+                               ) sub"""
+                        )
+                        if r and float(r["avg_7d"]) > 0 and float(r["cost_24h"]) > float(r["avg_7d"]) * 2:
+                            existing = await conn.fetchval(
+                                "SELECT COUNT(*) FROM claude_code_queue WHERE category = 'cost_spike' AND created_at > NOW() - INTERVAL '24 hours'"
+                            )
+                            if existing == 0:
+                                from brain_alpha.escalation import escalate_to_queue
+                                await escalate_to_queue(
+                                    category="cost_spike",
+                                    description=f"APIコスト異常: 24h=¥{float(r['cost_24h']):.0f}, 7日平均=¥{float(r['avg_7d']):.0f} (2倍超過)",
+                                    priority="high",
+                                    source_agent="budget_guard",
+                                )
+        except Exception:
+            pass
+
         return {
             "allowed": alert_level != "stop",
             "daily_remaining_jpy": max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy),

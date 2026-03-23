@@ -29,13 +29,19 @@ logger = logging.getLogger("syutain.approval_manager")
 
 # ===== 承認Tier定義（設計書準拠）=====
 TIER_1_HUMAN_REQUIRED = [
-    "sns_posting",       # SNS投稿
     "product_publish",   # 商品公開
     "pricing",           # 価格設定
     "crypto_trading",    # 暗号通貨取引
     "account_change",    # 外部アカウント変更
     "billing",           # 課金発生
 ]
+
+# SNS投稿は品質スコアベースの自動承認に移行
+SNS_AUTO_APPROVE_TYPES = [
+    "sns_posting", "social_post", "bluesky_post", "x_post", "threads_post",
+]
+# 例外（手動維持）: 金銭言及、他者メンション、Brain-α要確認フラグ
+SNS_MANUAL_KEYWORDS = ["¥", "￥", "円", "万円", "price", "@", "メンション"]
 
 TIER_2_AUTO_WITH_NOTIFICATION = [
     "info_pipeline",     # 情報収集パイプライン
@@ -57,17 +63,32 @@ TIER_3_FULLY_AUTO = [
 APPROVAL_TIMEOUT_HOURS = 72
 
 
-def classify_tier(request_type: str) -> int:
+def classify_tier(request_type: str, request_data: dict = None) -> int:
     """リクエストタイプから承認Tierを判定"""
+    # SNS投稿: 品質スコアベースの自動承認
+    if request_type in SNS_AUTO_APPROVE_TYPES:
+        data = request_data or {}
+        content = data.get("content", "")
+        # 例外チェック: 金銭言及/他者メンション → 手動
+        if any(kw in content for kw in SNS_MANUAL_KEYWORDS):
+            return 1
+        if data.get("brain_alpha_review"):
+            return 1
+        quality = data.get("quality_score", 0.65)
+        if quality >= 0.65:
+            return 2  # 自動承認
+        elif quality >= 0.50:
+            return 2  # 自動承認+通知
+        else:
+            return 1  # 低品質は却下対象
     if request_type in TIER_1_HUMAN_REQUIRED:
         return 1
     if request_type in TIER_2_AUTO_WITH_NOTIFICATION:
         return 2
     if request_type in TIER_3_FULLY_AUTO:
         return 3
-    # 未分類はTier 1（安全側に倒す）
-    logger.warning(f"未分類のリクエストタイプ: {request_type} → Tier 1として処理")
-    return 1
+    # 未分類はTier 2（自動承認+通知）
+    return 2
 
 
 class ApprovalManager:
@@ -116,7 +137,7 @@ class ApprovalManager:
         - Tier 2: 自動承認してDiscord通知
         - Tier 3: 自動承認（通知なし）
         """
-        tier = classify_tier(request_type)
+        tier = classify_tier(request_type, request_data)
         now = datetime.now(timezone.utc)
 
         if tier == 3:
@@ -314,6 +335,17 @@ class ApprovalManager:
                     "reason": reason or "",
                 },
                 severity="info",
+            )
+        except Exception:
+            pass
+
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action=f"approval_respond:{status}",
+                reasoning=f"承認ID {approval_id} を {status} に変更。理由: {reason or 'なし'}",
+                confidence=1.0,
+                context={"approval_id": approval_id, "request_type": request_type, "status": status},
             )
         except Exception:
             pass
@@ -639,6 +671,35 @@ class ApprovalManager:
                 "requires_approval": True,
                 "risk_level": "unknown",
             }
+
+    # ========== 判断根拠トレース ==========
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            if self.pg_pool:
+                async with self.pg_pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+            else:
+                conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
+                try:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+                finally:
+                    await conn.close()
+        except Exception:
+            pass
 
     # ========== Discord通知 ==========
 

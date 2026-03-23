@@ -137,6 +137,16 @@ class ComputerUseAgent:
                 if result.get("completed", False):
                     logger.info(f"目標達成（ステップ {step+1}）")
                     history.append({"step": step + 1, "action": "completed", "result": result})
+                    # 判断根拠トレース
+                    try:
+                        await self._record_trace(
+                            action="execute_multi_step:completed",
+                            reasoning=f"目標達成（ステップ {step+1}）。ゴール: {goal[:80]}",
+                            confidence=0.9,
+                            context={"goal": goal[:200], "start_url": start_url, "steps_taken": step + 1, "success": True},
+                        )
+                    except Exception:
+                        pass
                     return {
                         "success": True,
                         "steps_taken": step + 1,
@@ -161,13 +171,44 @@ class ComputerUseAgent:
                 break
 
         # 最大ステップ到達
-        return {
+        result = {
             "success": False,
             "steps_taken": len(history),
             "final_url": await self._playwright.get_current_url() if self._playwright else None,
             "history": history,
             "error": f"最大ステップ数 ({steps}) に到達",
         }
+
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action="execute_multi_step:max_steps",
+                reasoning=f"目標未達成で最大ステップ({steps})に到達。ゴール: {goal[:80]}",
+                confidence=0.2,
+                context={"goal": goal[:200], "start_url": start_url, "steps_taken": len(history), "success": False},
+            )
+        except Exception:
+            pass
+
+        return result
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "COMPUTER_USE_AGENT", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
     async def _execute_action(self, action: dict):
         """単一アクションを実行"""

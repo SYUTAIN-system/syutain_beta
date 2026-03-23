@@ -190,6 +190,22 @@ class Planner:
         await self._save_tasks(task_graph)
 
         logger.info(f"タスク計画完了: {len(task_graph.nodes)}タスク生成")
+
+        # 判断根拠トレース
+        try:
+            task_types = [t.task_type for t in task_graph.nodes.values()]
+            assigned_nodes = [t.assigned_node for t in task_graph.nodes.values()]
+            await self._record_trace(
+                action="plan",
+                reasoning=f"{len(task_graph.nodes)}タスク生成。種別: {task_types}。ノード: {assigned_nodes}",
+                confidence=1.0 if task_graph.nodes else 0.3,
+                context={"task_count": len(task_graph.nodes), "task_types": task_types, "assigned_nodes": assigned_nodes,
+                         "total_estimated_cost": sum(t.estimated_cost_jpy for t in task_graph.nodes.values())},
+                goal_id=goal_id,
+            )
+        except Exception:
+            pass
+
         return task_graph
 
     def _build_plan_prompt(self, goal_packet: dict, capability: dict, budget: dict) -> str:
@@ -369,6 +385,22 @@ class Planner:
             logger.info(f"タスク{len(graph.nodes)}件をPostgreSQLに保存")
         except Exception as e:
             logger.error(f"タスク保存失敗: {e}")
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "PLANNER", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+        except Exception:
+            pass
 
     async def replan(self, goal_packet: dict, perception: dict, failure_context: dict) -> TaskGraph:
         """

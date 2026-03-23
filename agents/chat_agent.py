@@ -74,6 +74,35 @@ class ChatAgent:
         if self.pg_pool:
             await self.pg_pool.close()
 
+    # ========== 判断根拠トレース ==========
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            if self.pg_pool:
+                async with self.pg_pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "CHAT_AGENT", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+            else:
+                conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
+                try:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "CHAT_AGENT", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+                finally:
+                    await conn.close()
+        except Exception:
+            pass
+
     # ========== メッセージ送受信 ==========
 
     async def process_message(
@@ -95,6 +124,17 @@ class ChatAgent:
 
         # メッセージの意図を分析
         intent = await self._classify_intent(user_message)
+
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action=f"classify_intent:{intent}",
+                reasoning=f"メッセージ意図を '{intent}' に分類。入力: {user_message[:100]}",
+                confidence=0.9,
+                context={"session_id": session_id, "intent": intent, "message_length": len(user_message)},
+            )
+        except Exception:
+            pass
 
         # 意図に応じた処理
         if intent == "goal_input":

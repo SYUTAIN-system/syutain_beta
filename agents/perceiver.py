@@ -179,11 +179,39 @@ class Perceiver:
 
         perception["checklist"]["goal_received"] = True
 
-        logger.info(
-            f"認識完了: {sum(1 for v in perception['checklist'].values() if v)}"
-            f"/{len(perception['checklist'])} チェック項目OK"
-        )
+        ok_count = sum(1 for v in perception['checklist'].values() if v)
+        total_count = len(perception['checklist'])
+        logger.info(f"認識完了: {ok_count}/{total_count} チェック項目OK")
+
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action="perceive",
+                reasoning=f"認識完了: {ok_count}/{total_count} チェック項目OK。ゴール: {raw_goal[:80]}",
+                confidence=ok_count / max(total_count, 1),
+                context={"checklist": perception["checklist"], "goal_id": goal_id},
+                goal_id=goal_id,
+            )
+        except Exception:
+            pass
+
         return perception
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            pool = await self._get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """INSERT INTO agent_reasoning_trace
+                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "PERCEIVER", goal_id, task_id, action, reasoning,
+                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                    )
+        except Exception:
+            pass
 
     async def _load_strategy_files(self) -> dict:
         """戦略ファイル（strategy/）を読み込む"""

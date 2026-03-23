@@ -2424,6 +2424,375 @@ async def websocket_chat(ws: WebSocket):
         logger.error(f"WebSocketエラー: {e}")
 
 
+# ===== Brain-α 精査レポート API =====
+
+@app.get("/api/brain-alpha/latest-report")
+async def get_latest_brain_alpha_report(user: dict = Depends(get_current_user)):
+    """最新のBrain-α精査レポートを取得"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT id, reasoning as summary, decision as actions, evidence as report,
+                          created_at
+                   FROM brain_alpha_reasoning
+                   WHERE category = 'startup_review'
+                   ORDER BY created_at DESC LIMIT 1"""
+            )
+            if not row:
+                return {"report": None}
+            report_data = json.loads(row["report"]) if isinstance(row["report"], str) else row["report"]
+            actions = json.loads(row["actions"]) if isinstance(row["actions"], str) else row["actions"]
+            return {
+                "report": {
+                    "id": row["id"],
+                    "summary": row["summary"],
+                    "recommended_actions": actions,
+                    "phases": report_data.get("phases", {}),
+                    "warnings": report_data.get("warnings", []),
+                    "generated_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+            }
+    except Exception as e:
+        logger.error(f"Brain-αレポート取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/reports")
+async def get_brain_alpha_reports(
+    limit: int = Query(default=10, le=50),
+    user: dict = Depends(get_current_user),
+):
+    """過去のBrain-α精査レポート一覧"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, reasoning as summary, decision as actions, created_at
+                   FROM brain_alpha_reasoning
+                   WHERE category = 'startup_review'
+                   ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+            return {
+                "reports": [
+                    {
+                        "id": r["id"],
+                        "summary": r["summary"],
+                        "actions": json.loads(r["actions"]) if isinstance(r["actions"], str) else r["actions"],
+                        "generated_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"Brain-αレポート一覧取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/brain-alpha/run-review")
+async def run_brain_alpha_review(user: dict = Depends(get_current_user)):
+    """Brain-α精査サイクルを手動実行"""
+    try:
+        from brain_alpha.startup_review import run_startup_review, format_discord_report
+        report = await run_startup_review()
+        # Discord投稿
+        try:
+            discord_md = format_discord_report(report)
+            await notify_discord(discord_md)
+        except Exception:
+            pass
+        return {"status": "ok", "report": report}
+    except Exception as e:
+        logger.error(f"Brain-α精査実行エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/sessions")
+async def get_brain_alpha_sessions(
+    limit: int = Query(default=10, le=50),
+    user: dict = Depends(get_current_user),
+):
+    """Brain-αセッション記憶一覧"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, session_id, started_at, ended_at, summary,
+                          key_decisions, unresolved_issues, daichi_interactions, created_at
+                   FROM brain_alpha_session
+                   ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+            return {
+                "sessions": [
+                    {
+                        "id": r["id"],
+                        "session_id": r["session_id"],
+                        "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                        "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
+                        "summary": r["summary"],
+                        "key_decisions": json.loads(r["key_decisions"]) if isinstance(r["key_decisions"], str) else r["key_decisions"],
+                        "unresolved_issues": json.loads(r["unresolved_issues"]) if isinstance(r["unresolved_issues"], str) else r["unresolved_issues"],
+                        "daichi_interactions": r["daichi_interactions"] or 0,
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"セッション一覧取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/persona-stats")
+async def get_persona_stats(user: dict = Depends(get_current_user)):
+    """persona_memoryカテゴリ別統計"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT category, COUNT(*) as count,
+                          COUNT(*) FILTER (WHERE embedding IS NOT NULL) as embedded
+                   FROM persona_memory
+                   GROUP BY category ORDER BY count DESC"""
+            )
+            total = await conn.fetchval("SELECT COUNT(*) FROM persona_memory")
+            return {
+                "total": total or 0,
+                "categories": [
+                    {"category": r["category"], "count": r["count"], "embedded": r["embedded"]}
+                    for r in rows
+                ],
+            }
+    except Exception as e:
+        logger.error(f"persona統計取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/handoffs")
+async def get_brain_handoffs(
+    direction: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """brain_handoffを取得"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            conditions = []
+            args = []
+            idx = 1
+            if direction:
+                conditions.append(f"direction = ${idx}")
+                args.append(direction)
+                idx += 1
+            if status:
+                conditions.append(f"status = ${idx}")
+                args.append(status)
+                idx += 1
+            where = "WHERE " + " AND ".join(conditions) if conditions else ""
+            args.append(limit)
+            rows = await conn.fetch(
+                f"""SELECT id, direction, category, source_agent, title, detail,
+                          context, status, created_at
+                   FROM brain_handoff
+                   {where}
+                   ORDER BY created_at DESC LIMIT ${idx}""",
+                *args,
+            )
+            return {
+                "handoffs": [
+                    {
+                        "id": r["id"],
+                        "direction": r["direction"],
+                        "category": r["category"],
+                        "source_agent": r["source_agent"],
+                        "title": r["title"],
+                        "detail": r["detail"],
+                        "context": json.loads(r["context"]) if isinstance(r["context"], str) else r["context"],
+                        "status": r["status"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"handoff取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/queue")
+async def get_brain_queue(
+    status: str = Query(default="pending"),
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """claude_code_queueを取得"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, priority, category, description, auto_solvable,
+                          source_agent, status, created_at
+                   FROM claude_code_queue
+                   WHERE status = $1
+                   ORDER BY
+                     CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                     created_at ASC
+                   LIMIT $2""",
+                status, limit,
+            )
+            return {
+                "queue": [
+                    {
+                        "id": r["id"],
+                        "priority": r["priority"],
+                        "category": r["category"],
+                        "description": r["description"],
+                        "auto_solvable": r["auto_solvable"],
+                        "source_agent": r["source_agent"],
+                        "status": r["status"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"queue取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/cross-evaluations")
+async def get_cross_evaluations(
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """相互評価結果を取得"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, evaluator, evaluated_agent, target_id, target_type,
+                          score, evaluation, recommendations, created_at
+                   FROM brain_cross_evaluation
+                   ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+            return {
+                "evaluations": [
+                    {
+                        "id": r["id"],
+                        "evaluator": r["evaluator"],
+                        "evaluated_agent": r["evaluated_agent"],
+                        "target_id": r["target_id"],
+                        "target_type": r["target_type"],
+                        "score": float(r["score"]) if r["score"] else None,
+                        "evaluation": r["evaluation"],
+                        "recommendations": json.loads(r["recommendations"]) if isinstance(r["recommendations"], str) else r["recommendations"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"相互評価取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/dialogues")
+async def get_brain_alpha_dialogues(
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """Daichi対話ログを取得"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, channel, daichi_message, system_response,
+                          extracted_philosophy, context_level, session_id, created_at
+                   FROM daichi_dialogue_log ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+            return {
+                "dialogues": [
+                    {
+                        "id": r["id"],
+                        "channel": r["channel"],
+                        "daichi_message": r["daichi_message"],
+                        "system_response": (r["system_response"] or "")[:200],
+                        "extracted_philosophy": json.loads(r["extracted_philosophy"]) if isinstance(r["extracted_philosophy"], str) else r["extracted_philosophy"],
+                        "session_id": r["session_id"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"対話ログ取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/brain-alpha/personality")
+async def get_personality(user: dict = Depends(get_current_user)):
+    """人格サマリーを取得"""
+    try:
+        from brain_alpha.persona_bridge import get_personality_summary
+        return await get_personality_summary()
+    except Exception as e:
+        logger.error(f"人格サマリー取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== 自律修復 API =====
+
+@app.get("/api/self-healing/log")
+async def get_self_healing_log(
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """自律修復ログ"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, error_type, error_detail, fix_strategy, fix_result, files_modified, created_at
+                   FROM auto_fix_log ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+            return {
+                "log": [
+                    {
+                        "id": r["id"],
+                        "error_type": r["error_type"],
+                        "error_detail": r["error_detail"],
+                        "fix_strategy": r["fix_strategy"],
+                        "fix_result": r["fix_result"],
+                        "files_modified": json.loads(r["files_modified"]) if isinstance(r["files_modified"], str) else r["files_modified"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception as e:
+        logger.error(f"修復ログ取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/self-healing/stats")
+async def get_self_healing_stats(user: dict = Depends(get_current_user)):
+    """自律修復統計"""
+    try:
+        from brain_alpha.self_healer import get_healing_stats
+        stats = await get_healing_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"修復統計取得エラー: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ===== 判断根拠トレース API =====
 
 @app.get("/api/traces")

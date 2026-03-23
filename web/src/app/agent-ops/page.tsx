@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bot, Wifi, WifiOff, Activity, Monitor, Power, XCircle, CheckCircle2, Loader2, Clock, AlertCircle, ScrollText, Filter } from "lucide-react";
+import { Bot, Wifi, WifiOff, Activity, Monitor, Power, XCircle, CheckCircle2, Loader2, Clock, AlertCircle, ScrollText, Filter, Brain } from "lucide-react";
 import NodeStatusPanel from "@/components/NodeStatusPanel";
 import { apiFetch } from "@/lib/api";
 
@@ -76,6 +76,8 @@ export default function AgentOpsPage() {
   const [loading, setLoading] = useState(true);
   const [charlieShuttingDown, setCharlieShuttingDown] = useState(false);
   const [events, setEvents] = useState<EventLogEntry[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [brainPhases, setBrainPhases] = useState<Record<string, any> | null>(null);
   const [eventCategory, setEventCategory] = useState("");
   const [goalDetail, setGoalDetail] = useState<{
     goal: Record<string, unknown>;
@@ -88,10 +90,11 @@ export default function AgentOpsPage() {
     const fetchData = async () => {
       try {
         const catParam = eventCategory ? `&category=${eventCategory}` : "";
-        const [nodesRes, opsRes, eventsRes] = await Promise.all([
+        const [nodesRes, opsRes, eventsRes, brainRes] = await Promise.all([
           apiFetch("/api/nodes/status"),
           apiFetch("/api/agent-ops/status").catch(() => null),
           apiFetch(`/api/events?limit=30${catParam}`).catch(() => null),
+          apiFetch("/api/brain-alpha/latest-report").catch(() => null),
         ]);
         const nodesJson = nodesRes.ok ? await nodesRes.json() : null;
         const opsJson = opsRes && opsRes.ok ? await opsRes.json() : null;
@@ -117,6 +120,12 @@ export default function AgentOpsPage() {
         const charlieStatus = nodeList.find((n) => n.name === "CHARLIE");
         if (charlieStatus?.status === "offline") {
           setCharlieShuttingDown(false);
+        }
+
+        // Brain-αレポート
+        if (brainRes && brainRes.ok) {
+          const brJson = await brainRes.json();
+          if (brJson.report?.phases) setBrainPhases(brJson.report.phases);
         }
 
         // イベントログ
@@ -311,6 +320,47 @@ export default function AgentOpsPage() {
 
       {/* Nodes */}
       {d.nodes.length > 0 && <NodeStatusPanel nodes={d.nodes} />}
+
+      {/* Brain-α 精査Phase */}
+      {brainPhases && (
+        <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Brain className="h-5 w-5 text-[var(--accent-purple)]" />
+            <h2 className="text-lg font-semibold">Brain-&alpha; 精査サイクル</h2>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              { key: "1_session_restore", label: "1.セッション", icon: "🧠" },
+              { key: "2_daichi_thoughts", label: "2.Daichi思考", icon: "💭" },
+              { key: "3_intel_review", label: "3.情報収集", icon: "📡" },
+              { key: "4_artifacts", label: "4.成果物", icon: "📦" },
+              { key: "5_quality_trend", label: "5.品質推移", icon: "📊" },
+              { key: "6_errors", label: "6.エラー", icon: "⚠️" },
+              { key: "7_revenue", label: "7.収益", icon: "💰" },
+              { key: "8_trace_queue", label: "8.キュー", icon: "📋" },
+            ].map((phase) => {
+              const data = brainPhases[phase.key];
+              const hasError = data?.error;
+              const hasData = data && !hasError;
+              return (
+                <div key={phase.key} className={`rounded-md border px-3 py-2 text-xs ${
+                  hasError ? "border-[var(--accent-red)]/30 bg-[var(--accent-red)]/5" :
+                  hasData ? "border-[var(--accent-green)]/30 bg-[var(--accent-green)]/5" :
+                  "border-[var(--border-color)] bg-[var(--bg-primary)]"
+                }`}>
+                  <div className="flex items-center gap-1">
+                    <span>{phase.icon}</span>
+                    <span className="font-medium">{phase.label}</span>
+                  </div>
+                  <span className={`text-[10px] ${hasError ? "text-[var(--accent-red)]" : hasData ? "text-[var(--accent-green)]" : "text-[var(--text-secondary)]"}`}>
+                    {hasError ? "エラー" : hasData ? "完了" : "未実行"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Active Goals */}
       <div>

@@ -24,3 +24,7 @@
 20. MCPサーバー接続は動的に確認し、接続不可時は代替手段で処理を継続する
 21. 4台のPC（ALPHA/BRAVO/CHARLIE/DELTA）をPhase 1から全て稼働させる。BRAVOをPhase 2に先送りしない
 22. 突然変異エンジン（第24章）は設計書の仕様に厳密に従い実装する。変異の発生をログに記録しない。変異パラメータをUIに表示しない。Capability Auditに含めない。9層ループ防止壁・承認フロー・Emergency Killのコードには一切干渉させない。変異エンジン自体のバグで全体が止まらないようtry-exceptで完全に隔離する
+23. Brain-αはpersona_memoryの価値観を参照してから判断・生成を行うこと
+24. 新しい判断基準はdaichi_dialogue_logに記録すること
+25. セッション終了時にmemory_manager.save_session_memory()を必ず実行すること
+26. 島原大知のtabooカテゴリ（persona_memory category='taboo'）は絶対に違反しないこと

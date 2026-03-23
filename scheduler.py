@@ -155,39 +155,33 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # Bluesky自動投稿ドラフト生成（6時間間隔、1日4投稿）
+            # SNS投稿49件/日 分割生成（4バッチ）
             self._scheduler.add_job(
-                self.bluesky_auto_draft,
-                IntervalTrigger(hours=6),
-                id="bluesky_auto_draft",
-                name="Bluesky投稿ドラフト生成（6時間）",
+                self.night_batch_sns_1,
+                CronTrigger(hour=22, minute=0, timezone=JST),
+                id="night_batch_sns_1",
+                name="SNS生成1: X島原+SYUTAIN 10件（22:00）",
                 replace_existing=True,
             )
-
-            # X投稿ドラフト生成 SYUTAINβアカウント（8時間間隔、1日3投稿）
             self._scheduler.add_job(
-                self.x_auto_draft_syutain,
-                IntervalTrigger(hours=8),
-                id="x_auto_draft_syutain",
-                name="X投稿ドラフト生成 SYUTAINβ（8時間）",
+                self.night_batch_sns_2,
+                CronTrigger(hour=22, minute=30, timezone=JST),
+                id="night_batch_sns_2",
+                name="SNS生成2: Bluesky前半13件（22:30）",
                 replace_existing=True,
             )
-
-            # X投稿ドラフト生成 島原アカウント（12時間間隔、1日2投稿）
             self._scheduler.add_job(
-                self.x_auto_draft_shimahara,
-                IntervalTrigger(hours=12),
-                id="x_auto_draft_shimahara",
-                name="X投稿ドラフト生成 島原（12時間）",
+                self.night_batch_sns_3,
+                CronTrigger(hour=23, minute=0, timezone=JST),
+                id="night_batch_sns_3",
+                name="SNS生成3: Bluesky後半13件（23:00）",
                 replace_existing=True,
             )
-
-            # Threads投稿ドラフト生成（8時間間隔、1日3投稿）
             self._scheduler.add_job(
-                self.threads_auto_draft,
-                IntervalTrigger(hours=8),
-                id="threads_auto_draft",
-                name="Threads投稿ドラフト生成（8時間）",
+                self.night_batch_sns_4,
+                CronTrigger(hour=23, minute=30, timezone=JST),
+                id="night_batch_sns_4",
+                name="SNS生成4: Threads13件（23:30）",
                 replace_existing=True,
             )
 
@@ -350,6 +344,60 @@ class SyutainScheduler:
                 IntervalTrigger(hours=1),
                 id="approval_timeout",
                 name="承認タイムアウトチェック（1時間）",
+                replace_existing=True,
+            )
+
+            # brain_handoff期限切れ処理（日次）
+            self._scheduler.add_job(
+                self.expire_old_handoffs,
+                IntervalTrigger(hours=24),
+                id="expire_handoffs",
+                name="brain_handoff期限切れ処理（日次）",
+                replace_existing=True,
+            )
+
+            # posting_queue自動投稿（毎分）
+            self._scheduler.add_job(
+                self.posting_queue_process,
+                IntervalTrigger(minutes=1),
+                id="posting_queue_process",
+                name="posting_queue自動投稿（毎分）",
+                replace_existing=True,
+            )
+
+            # Brain-α相互評価（毎日06:00）
+            self._scheduler.add_job(
+                self.brain_cross_evaluate,
+                CronTrigger(hour=6, minute=0, timezone=JST),
+                id="brain_cross_evaluate",
+                name="Brain-α相互評価（毎日06:00）",
+                replace_existing=True,
+            )
+
+            # 自律修復チェック（5分間隔）
+            self._scheduler.add_job(
+                self.self_heal_check,
+                IntervalTrigger(minutes=5),
+                id="self_heal_check",
+                name="自律修復チェック（5分）",
+                replace_existing=True,
+            )
+
+            # データ整合性チェック（毎日04:00）
+            self._scheduler.add_job(
+                self.data_integrity_check,
+                CronTrigger(hour=4, minute=0, timezone=JST),
+                id="data_integrity_check",
+                name="データ整合性チェック（毎日04:00）",
+                replace_existing=True,
+            )
+
+            # Brain-αセッション監視（10分間隔）
+            self._scheduler.add_job(
+                self.brain_alpha_health,
+                IntervalTrigger(minutes=10),
+                id="brain_alpha_health",
+                name="Brain-αセッション監視（10分）",
                 replace_existing=True,
             )
 
@@ -2142,6 +2190,162 @@ class SyutainScheduler:
                 return f.read()
         except Exception:
             return ""
+
+    async def _run_sns_batch(self, batch_num: int):
+        """SNS分割バッチ共通実行"""
+        from brain_alpha.sns_batch import generate_batch, BATCH_1_SCHEDULE, BATCH_2_SCHEDULE, BATCH_3_SCHEDULE, BATCH_4_SCHEDULE
+        batches = {
+            1: ("X島原+SYUTAIN", BATCH_1_SCHEDULE),
+            2: ("Bluesky前半", BATCH_2_SCHEDULE),
+            3: ("Bluesky後半", BATCH_3_SCHEDULE),
+            4: ("Threads", BATCH_4_SCHEDULE),
+        }
+        name, schedule = batches[batch_num]
+        try:
+            result = await generate_batch(f"batch{batch_num}", schedule)
+            logger.info(f"SNS生成{batch_num} [{name}]: {result.get('inserted', 0)}/{result.get('total', 0)}件")
+            if batch_num == 4:  # 最終バッチ後にDiscord通知
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(f"📝 SNS生成バッチ{batch_num} [{name}] 完了: {result.get('inserted', 0)}件")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"SNS生成{batch_num} [{name}] 失敗: {e}")
+
+    async def night_batch_sns_1(self):
+        await self._run_sns_batch(1)
+
+    async def night_batch_sns_2(self):
+        await self._run_sns_batch(2)
+
+    async def night_batch_sns_3(self):
+        await self._run_sns_batch(3)
+
+    async def night_batch_sns_4(self):
+        await self._run_sns_batch(4)
+
+    async def posting_queue_process(self):
+        """毎分: posting_queueからscheduled_at<=NOWの投稿を実行"""
+        try:
+            import asyncpg
+            import json
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                rows = await conn.fetch(
+                    """SELECT id, platform, account, content
+                       FROM posting_queue
+                       WHERE status = 'pending' AND scheduled_at <= NOW()
+                       ORDER BY scheduled_at ASC LIMIT 3"""
+                )
+                for row in rows:
+                    platform = row["platform"]
+                    account = row["account"]
+                    content = row["content"]
+                    post_id = row["id"]
+
+                    try:
+                        result = {}
+                        if platform == "bluesky":
+                            from tools.social_tools import execute_approved_bluesky
+                            result = await execute_approved_bluesky(content)
+                        elif platform == "x":
+                            from tools.social_tools import execute_approved_x
+                            result = await execute_approved_x(content, account=account)
+                        elif platform == "threads":
+                            from tools.social_tools import execute_approved_threads
+                            result = await execute_approved_threads(content)
+
+                        if result.get("success"):
+                            await conn.execute(
+                                """UPDATE posting_queue SET status='posted', post_url=$1, posted_at=NOW()
+                                   WHERE id=$2""",
+                                result.get("url") or result.get("uri") or "", post_id,
+                            )
+                            logger.info(f"posting_queue#{post_id} → {platform} 投稿成功")
+                        else:
+                            # リトライ: 3回まで
+                            retry_count = await conn.fetchval(
+                                "SELECT COUNT(*) FROM event_log WHERE payload->>'posting_queue_id' = $1 AND event_type = 'sns.post_retry'",
+                                str(post_id),
+                            )
+                            if retry_count and retry_count >= 3:
+                                await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+                                from tools.discord_notify import notify_discord
+                                await notify_discord(f"❌ 投稿失敗(3回リトライ後): {platform}/{account} — {content[:60]}")
+                            else:
+                                from tools.event_logger import log_event
+                                await log_event("sns.post_retry", "sns", {
+                                    "posting_queue_id": str(post_id), "platform": platform,
+                                    "retry": (retry_count or 0) + 1, "error": result.get("reason", "")[:100],
+                                }, severity="warning")
+                    except Exception as e:
+                        logger.error(f"posting_queue#{post_id} 投稿エラー: {e}")
+                        await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(f"posting_queue処理エラー: {e}")
+
+    async def self_heal_check(self):
+        """5分間隔で全ノードサービス確認 + 自動修復"""
+        try:
+            from brain_alpha.self_healer import self_heal_check
+            result = await self_heal_check()
+            fixes = result.get("fixes", [])
+            if fixes:
+                logger.info(f"自律修復: {fixes}")
+        except Exception as e:
+            logger.error(f"自律修復チェック失敗: {e}")
+
+    async def data_integrity_check(self):
+        """毎日04:00 データ整合性チェック"""
+        try:
+            from brain_alpha.self_healer import data_integrity_check
+            result = await data_integrity_check()
+            if result.get("fixes"):
+                logger.info(f"データ整合性修復: {result['fixes']}")
+        except Exception as e:
+            logger.error(f"データ整合性チェック失敗: {e}")
+
+    async def brain_alpha_health(self):
+        """10分間隔 Brain-αセッション監視"""
+        try:
+            from brain_alpha.self_healer import brain_alpha_health_check
+            await brain_alpha_health_check()
+        except Exception as e:
+            logger.error(f"Brain-αヘルスチェック失敗: {e}")
+
+    async def brain_cross_evaluate(self):
+        """Brain-αの修正/レビュー効果を後追い検証"""
+        try:
+            from brain_alpha.cross_evaluator import schedule_evaluations
+            result = await schedule_evaluations()
+            total = result.get("fixes_evaluated", 0) + result.get("reviews_evaluated", 0)
+            if total > 0:
+                logger.info(f"Brain-α相互評価: {total}件評価完了")
+        except Exception as e:
+            logger.error(f"Brain-α相互評価失敗: {e}")
+
+    async def expire_old_handoffs(self):
+        """7日超過のpending brain_handoffをexpiredに更新"""
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                result = await conn.execute(
+                    """UPDATE brain_handoff
+                       SET status = 'expired'
+                       WHERE status = 'pending'
+                         AND created_at < NOW() - INTERVAL '7 days'"""
+                )
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    logger.info(f"brain_handoff expired: {count}件")
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(f"handoff期限切れ処理失敗: {e}")
 
     def stop(self):
         """スケジューラーを停止"""

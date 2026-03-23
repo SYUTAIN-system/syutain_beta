@@ -351,6 +351,22 @@ class LearningManager:
                 },
             )
 
+            # モデル品質低下エスカレーション
+            try:
+                for stat in model_stats:
+                    if isinstance(stat, dict) and stat.get("avg_quality") is not None:
+                        avg_q = float(stat["avg_quality"])
+                        if avg_q < 0.5 and stat.get("call_count", 0) >= 5:
+                            from brain_alpha.escalation import escalate_to_queue
+                            await escalate_to_queue(
+                                category="model_quality_decline",
+                                description=f"モデル品質低下: {stat.get('model_used', '?')} task={stat.get('task_type', '?')} avg={avg_q:.2f} (calls={stat.get('call_count', 0)})",
+                                priority="medium",
+                                source_agent="learning_manager",
+                            )
+            except Exception:
+                pass
+
             return report
 
         except Exception as e:

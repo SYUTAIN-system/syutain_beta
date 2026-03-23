@@ -57,10 +57,10 @@ interface NodeConfig {
 /* ── Constants ── */
 
 const DEFAULT_NODES: NodeConfig[] = [
-  { name: "ALPHA", model: "Qwen3.5-9B (MLX)", role: "司令塔 / オンデマンド推論", browser_layer: false },
-  { name: "BRAVO", model: "Qwen3.5-9B", role: "推論 + ブラウザ操作", browser_layer: true },
-  { name: "CHARLIE", model: "Qwen3.5-9B", role: "推論ノード", browser_layer: false },
-  { name: "DELTA", model: "Qwen3.5-4B", role: "軽量タスク", browser_layer: false },
+  { name: "ALPHA", model: "推論なし（Brain-α専用）", role: "Brain-α + Brain-βインフラ", browser_layer: false },
+  { name: "BRAVO", model: "Nemotron 9B JP + Qwen3.5-9B", role: "LLM主力 + ブラウザ操作", browser_layer: true },
+  { name: "CHARLIE", model: "Nemotron 9B JP + Qwen3.5-9B", role: "副推論 + コンテンツ生成", browser_layer: false },
+  { name: "DELTA", model: "Qwen3.5-4B", role: "監視 + 軽量タスク", browser_layer: false },
 ];
 
 const CHAT_MODEL_OPTIONS: { value: ChatModel; label: string; description: string }[] = [

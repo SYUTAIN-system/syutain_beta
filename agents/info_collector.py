@@ -86,6 +86,18 @@ class InfoCollector:
                 await self._publish_important_items(result)
 
                 logger.info(f"フルパイプライン完了: {result.get('total_saved', 0)}件")
+
+                # 判断根拠トレース
+                try:
+                    await self._record_trace(
+                        action="full_pipeline_run",
+                        reasoning=f"フルパイプライン完了: {result.get('total_saved', 0)}件保存",
+                        confidence=1.0,
+                        context={"total_saved": result.get("total_saved", 0), "sources": list(result.keys())},
+                    )
+                except Exception:
+                    pass
+
                 await pipeline.close()
             except Exception as e:
                 logger.error(f"フルパイプラインエラー: {e}")
@@ -243,6 +255,26 @@ class InfoCollector:
             )
         except Exception as e:
             logger.error(f"新着通知失敗: {e}")
+
+    # ===== 判断根拠トレース =====
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "INFO_COLLECTOR", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
     # ===== ステータス =====
 

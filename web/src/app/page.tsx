@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, DollarSign, CheckCircle, AlertTriangle, CircleDollarSign, Send, Zap, Monitor } from "lucide-react";
+import { Activity, DollarSign, CheckCircle, AlertTriangle, CircleDollarSign, Send, Zap, Monitor, Brain, Wrench } from "lucide-react";
 import NodeStatusPanel from "@/components/NodeStatusPanel";
 import { apiFetch } from "@/lib/api";
 
@@ -48,9 +48,9 @@ interface DashboardData {
 }
 
 const NODE_MODELS: Record<string, { model: string; browser_layer: boolean }> = {
-  alpha: { model: "Qwen3.5-9B (MLX)", browser_layer: false },
-  bravo: { model: "Qwen3.5-9B", browser_layer: true },
-  charlie: { model: "Qwen3.5-9B", browser_layer: false },
+  alpha: { model: "推論なし（Brain-α専用）", browser_layer: false },
+  bravo: { model: "Nemotron 9B JP + Qwen3.5-9B", browser_layer: true },
+  charlie: { model: "Nemotron 9B JP + Qwen3.5-9B", browser_layer: false },
   delta: { model: "Qwen3.5-4B", browser_layer: false },
 };
 
@@ -65,6 +65,9 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [nodeStates, setNodeStates] = useState<NodeStateInfo[]>([]);
   const [charlieSwitching, setCharlieSwitching] = useState(false);
+  const [brainReport, setBrainReport] = useState<{summary: string; recommended_actions: string[]; warnings: string[]} | null>(null);
+  const [pendingEscalations, setPendingEscalations] = useState(0);
+  const [healStats, setHealStats] = useState<{total_24h: number; success_rate_24h: number} | null>(null);
   const [quickGoal, setQuickGoal] = useState("");
   const [goalSending, setGoalSending] = useState(false);
   const [goalSent, setGoalSent] = useState(false);
@@ -72,12 +75,15 @@ export default function DashboardPage() {
   useEffect(() => {
     const fetchDashboard = async () => {
       try {
-        const [dashRes, nodesRes, budgetRes, revenueRes, nodeStateRes] = await Promise.all([
+        const [dashRes, nodesRes, budgetRes, revenueRes, nodeStateRes, brainRes, queueRes, healRes] = await Promise.all([
           apiFetch("/api/dashboard"),
           apiFetch("/api/nodes/status"),
           apiFetch("/api/budget/status").catch(() => null),
           apiFetch("/api/revenue").catch(() => null),
           apiFetch("/api/nodes/state").catch(() => null),
+          apiFetch("/api/brain-alpha/latest-report").catch(() => null),
+          apiFetch("/api/brain-alpha/queue?status=pending").catch(() => null),
+          apiFetch("/api/self-healing/stats").catch(() => null),
         ]);
 
         if (!dashRes.ok) throw new Error("Dashboard API error");
@@ -121,6 +127,18 @@ export default function DashboardPage() {
         if (nodeStateRes && nodeStateRes.ok) {
           const nsJson = await nodeStateRes.json();
           setNodeStates(nsJson.nodes || []);
+        }
+        if (brainRes && brainRes.ok) {
+          const brJson = await brainRes.json();
+          if (brJson.report) setBrainReport(brJson.report);
+        }
+        if (queueRes && queueRes.ok) {
+          const qJson = await queueRes.json();
+          setPendingEscalations(qJson.queue?.length || 0);
+        }
+        if (healRes && healRes.ok) {
+          const hJson = await healRes.json();
+          setHealStats({total_24h: hJson.total_24h || 0, success_rate_24h: hJson.success_rate_24h || 0});
         }
       } catch {
         setError("API接続エラー");
@@ -290,6 +308,51 @@ export default function DashboardPage() {
           <p className="mt-0.5 text-[10px] text-[var(--text-secondary)]">日次 &yen;{d.daily_budget} / 月次 &yen;{d.monthly_cost.toFixed(0)}/{d.monthly_budget}</p>
         </div>
       </div>
+
+      {/* Brain-α 精査サマリー */}
+      {brainReport && (
+        <a href="/brain-alpha" className="block rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4 hover:border-[var(--accent-purple)]/50 transition-colors">
+          <div className="flex items-center gap-2 mb-2">
+            <Brain className="h-4 w-4 text-[var(--accent-purple)]" />
+            <h2 className="text-sm font-semibold">Brain-&alpha; 精査</h2>
+            {pendingEscalations > 0 && (
+              <span className="rounded-full bg-[var(--accent-red)]/20 px-2 py-0.5 text-[10px] text-[var(--accent-red)]">
+                {pendingEscalations}件未処理
+              </span>
+            )}
+            <span className="ml-auto text-[10px] text-[var(--text-secondary)]">{brainReport.summary}</span>
+          </div>
+          {brainReport.warnings.length > 0 && (
+            <div className="mb-2">
+              {brainReport.warnings.slice(0, 2).map((w, i) => (
+                <p key={i} className="text-xs text-[var(--accent-amber)] flex items-center gap-1">
+                  <AlertTriangle className="h-3 w-3 flex-shrink-0" /> {w}
+                </p>
+              ))}
+            </div>
+          )}
+          {brainReport.recommended_actions.length > 0 && (
+            <div className="space-y-1">
+              {brainReport.recommended_actions.slice(0, 3).map((a, i) => (
+                <p key={i} className="text-xs text-[var(--text-secondary)]">
+                  <span className="text-[var(--accent-purple)] font-bold">{i + 1}.</span> {a}
+                </p>
+              ))}
+            </div>
+          )}
+        </a>
+      )}
+
+      {/* 修復ステータスカード */}
+      {healStats && healStats.total_24h > 0 && (
+        <a href="/node-control" className="flex items-center gap-3 rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-3 hover:border-[var(--accent-blue)]/50 transition-colors">
+          <Wrench className="h-5 w-5 text-[var(--accent-blue)]" />
+          <div>
+            <p className="text-xs text-[var(--text-secondary)]">自律修復 (24h)</p>
+            <p className="text-sm font-bold">{healStats.total_24h}件 / 成功率 <span className={healStats.success_rate_24h >= 80 ? "text-[var(--accent-green)]" : "text-[var(--accent-amber)]"}>{healStats.success_rate_24h}%</span></p>
+          </div>
+        </a>
+      )}
 
       {/* Node State Badges + CHARLIE Toggle */}
       {nodeStates.length > 0 && (

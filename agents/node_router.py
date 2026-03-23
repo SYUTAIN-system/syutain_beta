@@ -63,6 +63,7 @@ class NodeRouter:
         }
         self._task_handlers: dict[str, Callable] = {}
         self._running = False
+        self._charlie_win11 = False  # node_state参照用
 
     async def start(self) -> None:
         """ルーターを起動しNATS購読を開始"""
@@ -162,6 +163,19 @@ class NodeRouter:
         task_data["task_type"] = task_type
         task_data["routed_at"] = time.time()
 
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action=f"dispatch_task:{task_type}",
+                reasoning=f"タスク種別 '{task_type}' をノード '{target}' にルーティング (prefer={prefer_node})",
+                confidence=1.0,
+                context={"task_type": task_type, "target_node": target, "prefer_node": prefer_node},
+                task_id=task_data.get("task_id"),
+                goal_id=task_data.get("goal_id"),
+            )
+        except Exception:
+            pass
+
         try:
             if self._nats_client:
                 return await self._nats_client.publish(
@@ -238,9 +252,33 @@ class NodeRouter:
         except Exception as e:
             logger.error(f"ハートビート処理エラー: {e}")
 
+    # ===== 判断根拠トレース =====
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            import asyncpg
+            DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "NODE_ROUTER", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
+
     # ===== ヘルパー =====
 
     def _is_node_available(self, name: str) -> bool:
+        # node_stateがcharlie_win11の場合はCHARLIEにタスクを振らない
+        if name == "charlie" and getattr(self, '_charlie_win11', False):
+            return False
         load = self._node_loads.get(name, {})
         last_seen = load.get("last_seen", 0)
         return (time.time() - last_seen) < 90 if last_seen > 0 else True  # 初期状態は利用可能と仮定

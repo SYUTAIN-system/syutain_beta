@@ -242,6 +242,17 @@ class BrowserAgent:
             error_message=result.get("error"),
         )
 
+        # 判断根拠トレース
+        try:
+            await self._record_trace(
+                action=f"browser_execute:{action_type}",
+                reasoning=f"レイヤー選択: {chosen} → 使用: {result.get('layer_used', 'none')}, フォールバック: {result.get('fallback_from')}",
+                confidence=1.0 if result.get("success") else 0.3,
+                context={"url": url, "layer_used": result.get("layer_used"), "success": result.get("success"), "chosen_layer": chosen},
+            )
+        except Exception:
+            pass
+
         # NATS結果通知
         await self._publish_result(action_id, result)
 
@@ -394,6 +405,23 @@ class BrowserAgent:
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "BROWSER_AGENT", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
     async def _log_action(
         self,

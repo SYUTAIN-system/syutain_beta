@@ -7,6 +7,7 @@ LoopGuardと連携して9層の防御壁を通過させる。
 """
 
 import os
+import json
 import logging
 from typing import Optional
 
@@ -167,10 +168,26 @@ class StopDecider:
             logger.error(f"LoopGuardチェックエラー: {e}")
             # LoopGuardエラー時も処理を続行可能にする
 
+        # 判断根拠トレースの準備（最終的な判断をトレース）
+        async def _trace_decision(decision_val, reason_val):
+            try:
+                await self._record_trace(
+                    action=f"decide:{decision_val}",
+                    reasoning=f"停止判断: {decision_val}。理由: {reason_val}",
+                    confidence=goal_progress,
+                    context={"status": status, "goal_progress": goal_progress, "remaining_tasks": remaining_task_count,
+                             "fallback_remaining": fallback_plans_remaining, "error_class": error_class},
+                    goal_id=goal_id,
+                    task_id=action_key or None,
+                )
+            except Exception:
+                pass
+
         # 2. 設計書 stop_decision_tree に基づく判断
 
         # ゴール完了
         if goal_progress >= 1.0:
+            await _trace_decision(DECISION_COMPLETE, "ゴール達成（progress=1.0）")
             await self._notify_stop(goal_id, DECISION_COMPLETE, "ゴール達成")
             return StopDecision(
                 decision=DECISION_COMPLETE,
@@ -205,6 +222,7 @@ class StopDecider:
 
         # 失敗 & フォールバックなし → エスカレーション
         if status == "failure":
+            await _trace_decision(DECISION_ESCALATE, f"全プラン失敗 (error={error_class})")
             await self._notify_stop(goal_id, DECISION_ESCALATE, f"全プラン失敗 (error={error_class})")
             return StopDecision(
                 decision=DECISION_ESCALATE,
@@ -221,10 +239,29 @@ class StopDecider:
                 remaining_steps=remaining_task_count,
             )
 
+        await _trace_decision(DECISION_COMPLETE, "全タスク完了")
         return StopDecision(
             decision=DECISION_COMPLETE,
             reason="全タスク完了",
         )
+
+    async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
+        """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
+            try:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "STOP_DECIDER", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
     async def _notify_stop(self, goal_id: str, decision: str, reason: str):
         """停止/完了をNATS + Web UIに通知（CLAUDE.md ルール12）"""
