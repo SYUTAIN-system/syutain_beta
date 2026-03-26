@@ -4,7 +4,7 @@ APScheduler ベースのタスクスケジューリング
 
 - ハートビート: 30秒間隔
 - Capability Audit: 1時間間隔
-- 情報収集パイプライン: 6時間間隔
+- 情報収集パイプライン: 12時間間隔
 - 週次提案生成: 毎週月曜 09:00 JST
 - 週次学習レポート: 毎週日曜 21:00 JST
 """
@@ -13,7 +13,7 @@ import os
 import sys
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 
@@ -35,6 +35,13 @@ logger = logging.getLogger("syutain.scheduler")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
+
+# リモートノードIPマッピング（一元管理）
+REMOTE_NODES = {
+    "bravo": os.getenv("BRAVO_IP", "100.75.146.9"),
+    "charlie": os.getenv("CHARLIE_IP", "100.70.161.106"),
+    "delta": os.getenv("DELTA_IP", "100.82.81.105"),
+}
 
 # 時間帯別パワーモード
 _current_power_mode = "day"  # "day" or "night"
@@ -116,6 +123,14 @@ class SyutainScheduler:
             )
 
             self._scheduler.add_job(
+                self.auto_review_intel,
+                IntervalTrigger(hours=6),
+                id="auto_review_intel",
+                name="intel_items自動レビュー（6時間）",
+                replace_existing=True,
+            )
+
+            self._scheduler.add_job(
                 self.daily_proposal,
                 CronTrigger(hour=7, minute=0),
                 id="daily_proposal",
@@ -158,30 +173,39 @@ class SyutainScheduler:
             # SNS投稿49件/日 分割生成（4バッチ）
             self._scheduler.add_job(
                 self.night_batch_sns_1,
-                CronTrigger(hour=22, minute=0, timezone=JST),
+                CronTrigger(hour=22, minute=0, timezone="Asia/Tokyo"),
                 id="night_batch_sns_1",
                 name="SNS生成1: X島原+SYUTAIN 10件（22:00）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
                 self.night_batch_sns_2,
-                CronTrigger(hour=22, minute=30, timezone=JST),
+                CronTrigger(hour=22, minute=30, timezone="Asia/Tokyo"),
                 id="night_batch_sns_2",
                 name="SNS生成2: Bluesky前半13件（22:30）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
                 self.night_batch_sns_3,
-                CronTrigger(hour=23, minute=0, timezone=JST),
+                CronTrigger(hour=23, minute=0, timezone="Asia/Tokyo"),
                 id="night_batch_sns_3",
                 name="SNS生成3: Bluesky後半13件（23:00）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
                 self.night_batch_sns_4,
-                CronTrigger(hour=23, minute=30, timezone=JST),
+                CronTrigger(hour=23, minute=30, timezone="Asia/Tokyo"),
                 id="night_batch_sns_4",
                 name="SNS生成4: Threads13件（23:30）",
+                replace_existing=True,
+            )
+
+            # 日次コンテンツ生成（09:30 JST）
+            self._scheduler.add_job(
+                self.generate_daily_content,
+                CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
+                id="daily_content",
+                name="日次コンテンツ生成（09:30）",
                 replace_existing=True,
             )
 
@@ -230,40 +254,43 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # Blueskyエンゲージメント取得（12時間間隔）
+            # エンゲージメント取得（12時間間隔、起動5分後に初回実行）
+            _eng_first_run = datetime.now() + timedelta(minutes=5)
             self._scheduler.add_job(
                 self.bluesky_engagement_check,
                 IntervalTrigger(hours=12),
                 id="bluesky_engagement",
                 name="Blueskyエンゲージメント取得（12時間）",
                 replace_existing=True,
+                next_run_time=_eng_first_run,
             )
 
-            # Xエンゲージメント取得（12時間間隔）
             self._scheduler.add_job(
                 self.x_engagement_check,
                 IntervalTrigger(hours=12),
                 id="x_engagement",
                 name="Xエンゲージメント取得（12時間）",
                 replace_existing=True,
+                next_run_time=_eng_first_run + timedelta(minutes=1),
             )
 
-            # Threadsエンゲージメント取得（12時間間隔）
             self._scheduler.add_job(
                 self.threads_engagement_check,
                 IntervalTrigger(hours=12),
                 id="threads_engagement",
                 name="Threadsエンゲージメント取得（12時間）",
                 replace_existing=True,
+                next_run_time=_eng_first_run + timedelta(minutes=2),
             )
 
-            # モデル品質キャッシュ更新（1時間間隔）
+            # モデル品質キャッシュ更新（1時間間隔、起動1分後に初回実行）
             self._scheduler.add_job(
                 self.refresh_model_quality,
                 IntervalTrigger(hours=1),
                 id="model_quality_refresh",
                 name="モデル品質キャッシュ更新（1時間）",
                 replace_existing=True,
+                next_run_time=datetime.now() + timedelta(minutes=1),
             )
 
             # SQLiteバックアップ rsync集約（毎日 03:30 JST）
@@ -347,6 +374,15 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # 提案自動承認→ゴール変換（30分間隔）
+            self._scheduler.add_job(
+                self.process_approved_proposals,
+                IntervalTrigger(minutes=30),
+                id="process_proposals",
+                name="提案自動承認→ゴール変換（30分）",
+                replace_existing=True,
+            )
+
             # brain_handoff期限切れ処理（日次）
             self._scheduler.add_job(
                 self.expire_old_handoffs,
@@ -368,7 +404,7 @@ class SyutainScheduler:
             # Brain-α相互評価（毎日06:00）
             self._scheduler.add_job(
                 self.brain_cross_evaluate,
-                CronTrigger(hour=6, minute=0, timezone=JST),
+                CronTrigger(hour=6, minute=0, timezone="Asia/Tokyo"),
                 id="brain_cross_evaluate",
                 name="Brain-α相互評価（毎日06:00）",
                 replace_existing=True,
@@ -386,7 +422,7 @@ class SyutainScheduler:
             # データ整合性チェック（毎日04:00）
             self._scheduler.add_job(
                 self.data_integrity_check,
-                CronTrigger(hour=4, minute=0, timezone=JST),
+                CronTrigger(hour=4, minute=0, timezone="Asia/Tokyo"),
                 id="data_integrity_check",
                 name="データ整合性チェック（毎日04:00）",
                 replace_existing=True,
@@ -419,6 +455,42 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # 動的キーワード更新（毎日06:00 JST）
+            self._scheduler.add_job(
+                self.dynamic_keyword_update,
+                CronTrigger(hour=6, minute=0, timezone="Asia/Tokyo"),
+                id="dynamic_keyword_update",
+                name="動的キーワード更新（毎日06:00）",
+                replace_existing=True,
+            )
+
+            # intel_digest生成（毎日07:00 JST）
+            self._scheduler.add_job(
+                self.generate_intel_digest,
+                CronTrigger(hour=7, minute=0, timezone="Asia/Tokyo"),
+                id="generate_intel_digest",
+                name="intel_digest生成（毎日07:00）",
+                replace_existing=True,
+            )
+
+            # 深掘り記事取得バッチ（毎日12:00 JST）
+            self._scheduler.add_job(
+                self.deep_article_scrape_batch,
+                CronTrigger(hour=12, minute=0, timezone="Asia/Tokyo"),
+                id="deep_article_scrape",
+                name="深掘り記事取得バッチ（毎日12:00）",
+                replace_existing=True,
+            )
+
+            # 対話学習（1時間間隔）
+            self._scheduler.add_job(
+                self.chat_learning_job,
+                IntervalTrigger(hours=1),
+                id="chat_learning",
+                name="対話学習（1時間）",
+                replace_existing=True,
+            )
+
             self._scheduler.start()
             logger.info("スケジューラー起動完了")
 
@@ -443,7 +515,7 @@ class SyutainScheduler:
                         "role": "orchestrator",
                         "cpu_percent": psutil.cpu_percent(interval=None),
                         "memory_percent": psutil.virtual_memory().percent,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
                 )
         except Exception as e:
@@ -454,7 +526,7 @@ class SyutainScheduler:
         logger.info("Capability Audit開始")
         try:
             snapshot = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "nodes": {},
             }
 
@@ -494,6 +566,74 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"Capability Audit失敗: {e}")
 
+    async def auto_review_intel(self):
+        """intel_items自動レビュー（重要度スコアで振り分け）"""
+        try:
+            from tools.intel_reviewer import auto_review_intel
+            result = await auto_review_intel()
+            if result.get("actionable", 0) > 0:
+                from tools.discord_notify import notify_discord
+                await notify_discord(
+                    f"\U0001f4ca 情報レビュー: actionable {result['actionable']}件"
+                    f" / reviewed {result['reviewed']}件"
+                    f" / archived {result['archived']}件"
+                )
+        except Exception as e:
+            logger.error(f"auto_review_intelエラー: {e}")
+
+    async def dynamic_keyword_update(self):
+        """動的キーワード更新: persona_memory + intel_itemsから検索キーワードを生成"""
+        try:
+            from tools.keyword_generator import generate_search_keywords
+            from tools.event_logger import log_event
+            keywords = await generate_search_keywords()
+            logger.info(f"動的キーワード更新完了: {len(keywords)}件")
+            await log_event("keyword.updated", "system", {
+                "count": len(keywords), "keywords": keywords[:5],
+            })
+        except Exception as e:
+            logger.error(f"動的キーワード更新失敗: {e}")
+
+    async def generate_intel_digest(self):
+        """intel_digest生成: 直近24時間の情報をエージェント向けに要約"""
+        try:
+            from tools.intel_digest import generate_intel_digest
+            from tools.event_logger import log_event
+            result = await generate_intel_digest()
+            logger.info(f"intel_digest生成完了: {result.get('items_count', 0)}件")
+            await log_event("intel.digest_generated", "system", {
+                "items_count": result.get("items_count", 0),
+            })
+        except Exception as e:
+            logger.error(f"intel_digest生成失敗: {e}")
+
+    async def deep_article_scrape_batch(self):
+        """未処理のactionableアイテムの全文をJina/ブラウザで取得"""
+        try:
+            from tools.browser_ops import scrape_page
+            from tools.db_pool import get_connection
+            import json
+            async with get_connection() as conn:
+                rows = await conn.fetch("""
+                    SELECT id, url FROM intel_items
+                    WHERE review_flag = 'actionable' AND url IS NOT NULL
+                    AND (metadata IS NULL OR metadata::text NOT LIKE '%full_text%')
+                    LIMIT 10
+                """)
+                for row in rows:
+                    if not row["url"]:
+                        continue
+                    result = await scrape_page(row["url"])
+                    if result.get("text"):
+                        # metadata が存在しない可能性あるのでsummaryを更新
+                        await conn.execute(
+                            "UPDATE intel_items SET summary = LEFT($1, 500) WHERE id = $2",
+                            result["text"], row["id"],
+                        )
+                        logger.info(f"深掘り取得: id={row['id']} {len(result['text'])}文字")
+        except Exception as e:
+            logger.error(f"深掘りバッチ失敗: {e}")
+
     async def info_pipeline(self):
         """情報収集パイプライン: DELTAに指示、またはALPHAで直接実行"""
         logger.info("情報収集パイプライン開始")
@@ -506,7 +646,7 @@ class SyutainScheduler:
                     "intel.collect.delta",
                     {
                         "type": "scheduled_collection",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "sources": ["tavily", "jina", "rss", "youtube"],
                     },
                 )
@@ -614,13 +754,35 @@ class SyutainScheduler:
             import json
             conn = await asyncpg.connect(DATABASE_URL)
             try:
-                # 30分以上前に作成されてpendingのままのタスクを取得
+                # 48時間以上前のpendingタスクは stale に移行（永久放置防止）
+                stale_count = await conn.execute(
+                    """UPDATE tasks SET status = 'stale'
+                       WHERE status = 'pending'
+                       AND created_at < NOW() - INTERVAL '48 hours'"""
+                )
+                if stale_count and stale_count != "UPDATE 0":
+                    logger.info(f"古い孤立タスクを stale に移行: {stale_count}")
+
+                # 終了済みゴールの子タスクも stale に移行（孤児タスク防止）
+                orphan_count = await conn.execute(
+                    """UPDATE tasks SET status = 'stale'
+                       WHERE status IN ('pending', 'dispatched')
+                       AND SPLIT_PART(id, '-t', 1) IN (
+                         SELECT goal_id FROM goal_packets
+                         WHERE status IN ('emergency_stopped', 'escalated', 'completed')
+                       )"""
+                )
+                if orphan_count and orphan_count != "UPDATE 0":
+                    logger.info(f"終了済みゴールの孤児タスクを stale に移行: {orphan_count}")
+
+                # 30分-48時間前のpendingタスクを取得
                 rows = await conn.fetch(
                     """
                     SELECT id, type, assigned_node, input_data::text as input_text
                     FROM tasks
                     WHERE status = 'pending'
                       AND created_at < NOW() - INTERVAL '30 minutes'
+                      AND created_at > NOW() - INTERVAL '48 hours'
                     ORDER BY created_at ASC
                     LIMIT 10
                     """
@@ -656,6 +818,9 @@ class SyutainScheduler:
                                 logger.debug(f"approval_request {task_id}: 既にpending承認あり、スキップ")
                                 continue
                             input_data = json.loads(row["input_text"]) if row["input_text"] else {}
+                            # titleがなければdescriptionをtitleに設定（Web UI表示用）
+                            if "title" not in input_data and "description" in input_data:
+                                input_data["title"] = input_data["description"][:80]
                             await conn.execute(
                                 """
                                 INSERT INTO approval_queue (request_type, request_data, status, requested_at)
@@ -684,6 +849,11 @@ class SyutainScheduler:
                                     "action": "redispatch",
                                 },
                             )
+                            # ステータスを dispatched に更新（再取得防止）
+                            await conn.execute(
+                                "UPDATE tasks SET status = 'dispatched' WHERE id = $1 AND status = 'pending'",
+                                row["id"],
+                            )
                             logger.info(f"タスク {task_id} ({task_type}) → {node} に再ディスパッチ")
                         except Exception as e:
                             logger.error(f"タスク再ディスパッチ失敗: {e}")
@@ -697,11 +867,16 @@ class SyutainScheduler:
         logger.info("週次学習レポート生成開始")
         try:
             from agents.learning_manager import LearningManager
+            from tools.event_logger import log_event
             lm = LearningManager()
             await lm.initialize()
             report = await lm.generate_weekly_report()
             if report and "error" not in report:
                 logger.info("週次学習レポート生成完了")
+                await log_event("learning.weekly_report", "system", {
+                    "status": "completed",
+                    "summary": str(report.get("summary", ""))[:200],
+                })
             else:
                 logger.warning(f"週次学習レポート生成に問題: {report.get('error', 'unknown')}")
         except Exception as e:
@@ -812,117 +987,93 @@ class SyutainScheduler:
     async def bluesky_engagement_check(self):
         """12時間間隔でBluesky投稿のエンゲージメント取得"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
-                # sns.postedイベントからURIを取得（直近72時間）
+            from tools.db_pool import get_connection
+            from tools.social_tools import get_bluesky_engagement
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
                 rows = await conn.fetch("""
-                    SELECT payload->>'uri' as uri
-                    FROM event_log
-                    WHERE event_type = 'sns.posted'
-                    AND payload->>'platform' = 'bluesky'
-                    AND created_at > NOW() - INTERVAL '72 hours'
+                    SELECT id, post_url FROM posting_queue
+                    WHERE platform = 'bluesky' AND status = 'posted' AND post_url IS NOT NULL
+                    AND posted_at > NOW() - INTERVAL '72 hours'
                     LIMIT 10
                 """)
-                if not rows:
-                    return
-
-                from tools.social_tools import get_bluesky_engagement
-                from tools.event_logger import log_event
-
                 for row in rows:
-                    uri = row["uri"]
+                    uri = row["post_url"]
                     if not uri:
                         continue
                     engagement = await get_bluesky_engagement(uri)
                     if not engagement.get("error"):
-                        await log_event("sns.engagement", "sns", engagement)
+                        await conn.execute(
+                            "UPDATE posting_queue SET engagement_data = $1 WHERE id = $2",
+                            json.dumps(engagement, ensure_ascii=False), row["id"],
+                        )
+                        await log_event("sns.engagement", "sns", {**engagement, "platform": "bluesky"})
                         logger.info(f"Blueskyエンゲージメント: likes={engagement.get('like_count',0)}")
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"Blueskyエンゲージメント取得失敗: {e}")
 
     async def x_engagement_check(self):
-        """12時間間隔でX投稿のエンゲージメント取得
-
-        注意: X API Free tierではツイート取得不可。403が返る場合はログのみ。
-        """
+        """12時間間隔でX投稿のエンゲージメント取得（Free tierでは取得不可の場合あり）"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
-                # sns.postedイベントからpost_idを取得（直近7日）
+            from tools.db_pool import get_connection
+            from tools.social_tools import get_x_engagement
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
                 rows = await conn.fetch("""
-                    SELECT payload->>'post_id' as post_id,
-                           COALESCE(payload->>'account', 'syutain') as account
-                    FROM event_log
-                    WHERE event_type = 'sns.posted'
-                    AND payload->>'platform' = 'x'
-                    AND payload->>'post_id' IS NOT NULL
-                    AND created_at > NOW() - INTERVAL '7 days'
+                    SELECT id, account, post_url FROM posting_queue
+                    WHERE platform = 'x' AND status = 'posted' AND post_url IS NOT NULL
+                    AND posted_at > NOW() - INTERVAL '7 days'
                     LIMIT 20
                 """)
-                if not rows:
-                    return
-
-                from tools.social_tools import get_x_engagement
-                from tools.event_logger import log_event
-
                 for row in rows:
-                    post_id = row["post_id"]
-                    account = row["account"] or "syutain"
+                    post_url = row["post_url"] or ""
+                    post_id = post_url.split("/")[-1] if "/" in post_url else ""
                     if not post_id:
                         continue
-                    engagement = await get_x_engagement(post_id, account=account)
+                    engagement = await get_x_engagement(post_id, account=row["account"] or "syutain")
                     if engagement.get("error") == "free_tier_limitation":
                         logger.info("Xエンゲージメント: Free tierのため取得不可。スキップ。")
-                        return  # Free tierなら全件スキップ
+                        return
                     if not engagement.get("error"):
-                        engagement["platform"] = "x"
-                        await log_event("sns.engagement", "sns", engagement)
-                        logger.info(f"Xエンゲージメント: likes={engagement.get('like_count',0)} post_id={post_id}")
-            finally:
-                await conn.close()
+                        await conn.execute(
+                            "UPDATE posting_queue SET engagement_data = $1 WHERE id = $2",
+                            json.dumps(engagement, ensure_ascii=False), row["id"],
+                        )
+                        await log_event("sns.engagement", "sns", {**engagement, "platform": "x"})
         except Exception as e:
             logger.error(f"Xエンゲージメント取得失敗: {e}")
 
     async def threads_engagement_check(self):
         """12時間間隔でThreads投稿のエンゲージメント取得"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
-                # sns.postedイベントからpost_idを取得（直近7日）
+            from tools.db_pool import get_connection
+            from tools.social_tools import get_threads_engagement
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
                 rows = await conn.fetch("""
-                    SELECT payload->>'post_id' as post_id
-                    FROM event_log
-                    WHERE event_type = 'sns.posted'
-                    AND payload->>'platform' = 'threads'
-                    AND payload->>'post_id' IS NOT NULL
-                    AND created_at > NOW() - INTERVAL '7 days'
+                    SELECT id, post_url FROM posting_queue
+                    WHERE platform = 'threads' AND status = 'posted' AND post_url IS NOT NULL
+                    AND posted_at > NOW() - INTERVAL '7 days'
                     LIMIT 20
                 """)
-                if not rows:
-                    return
-
-                from tools.social_tools import get_threads_engagement
-                from tools.event_logger import log_event
-
                 for row in rows:
-                    post_id = row["post_id"]
+                    post_url = row["post_url"] or ""
+                    post_id = post_url.split("/")[-1] if "/" in post_url else ""
                     if not post_id:
                         continue
                     engagement = await get_threads_engagement(post_id)
                     if not engagement.get("error"):
-                        engagement["platform"] = "threads"
-                        await log_event("sns.engagement", "sns", engagement)
-                        logger.info(f"Threadsエンゲージメント: likes={engagement.get('like_count',0)} views={engagement.get('view_count',0)} post_id={post_id}")
-            finally:
-                await conn.close()
+                        await conn.execute(
+                            "UPDATE posting_queue SET engagement_data = $1 WHERE id = $2",
+                            json.dumps(engagement, ensure_ascii=False), row["id"],
+                        )
+                        await log_event("sns.engagement", "sns", {**engagement, "platform": "threads"})
         except Exception as e:
             logger.error(f"Threadsエンゲージメント取得失敗: {e}")
 
@@ -973,11 +1124,7 @@ class SyutainScheduler:
             backup_dir = os.path.join(os.path.dirname(__file__), "data", "backup", "nodes")
             os.makedirs(backup_dir, exist_ok=True)
 
-            nodes = {
-                "bravo": "100.75.146.9",
-                "charlie": "100.70.161.106",
-                "delta": "100.82.81.105",
-            }
+            nodes = REMOTE_NODES
             results = []
             for node, ip in nodes.items():
                 try:
@@ -1345,6 +1492,91 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"承認タイムアウトチェック失敗: {e}")
 
+    async def process_approved_proposals(self):
+        """提案自動承認→ゴール変換（30分間隔）
+        品質スコア≧65の未レビュー提案を自動承認し、ゴールに変換する。
+        直近1時間にemergency_stoppedが3件以上あればクールダウン（暴走防止）。
+        """
+        try:
+            from tools.db_pool import get_connection
+            from agents.os_kernel import get_os_kernel
+            import asyncio
+
+            async with get_connection() as conn:
+                # クールダウン: 直近1時間のemergency_stopped件数を確認
+                stopped_count = await conn.fetchval(
+                    """SELECT COUNT(*) FROM goal_packets
+                       WHERE status = 'emergency_stopped'
+                       AND created_at > NOW() - INTERVAL '1 hour'"""
+                )
+                if stopped_count and stopped_count >= 3:
+                    logger.warning(
+                        f"提案自動承認クールダウン: 直近1時間にemergency_stopped {stopped_count}件 → スキップ"
+                    )
+                    return
+
+                # 現在実行中（active）のゴールが多すぎる場合もスキップ
+                active_goals = await conn.fetchval(
+                    """SELECT COUNT(*) FROM goal_packets
+                       WHERE status IN ('active', 'running')
+                       AND created_at > NOW() - INTERVAL '2 hours'"""
+                )
+                if active_goals and active_goals >= 3:
+                    logger.info(f"提案自動承認: 実行中ゴール{active_goals}件 → 待機")
+                    return
+
+                # 品質スコア≧65のpending_review提案を取得（暴走防止: 1件ずつ）
+                proposals = await conn.fetch(
+                    """SELECT id, proposal_id, title, score, proposal_data
+                       FROM proposal_history
+                       WHERE review_flag = 'pending_review'
+                       AND score >= 65
+                       ORDER BY score DESC LIMIT 1"""
+                )
+
+                if not proposals:
+                    return
+
+                for p in proposals:
+                    try:
+                        # 提案をapprovedに更新
+                        await conn.execute(
+                            "UPDATE proposal_history SET review_flag = 'approved', adopted = TRUE WHERE id = $1",
+                            p["id"],
+                        )
+
+                        # ゴール作成とOSKernel実行をバックグラウンドで起動
+                        title = p["title"] or "自動承認提案"
+                        # proposal_dataからobjective/why_nowを抽出してゴールのコンテキストにする
+                        pdata = p["proposal_data"] or {}
+                        if isinstance(pdata, str):
+                            import json as _json
+                            pdata = _json.loads(pdata)
+                        objective = pdata.get("objective", "")
+                        why_now = pdata.get("why_now", [])
+                        context = f" ({objective})" if objective else ""
+                        if why_now and isinstance(why_now, list):
+                            context += f" 理由: {why_now[0][:200]}"
+                        raw_goal = f"{title}{context}"
+
+                        kernel = get_os_kernel()
+                        asyncio.create_task(kernel.execute_goal(raw_goal))
+
+                        logger.info(f"提案自動承認→ゴール起動: {title} (score={p['score']})")
+
+                        # Discord通知
+                        try:
+                            from tools.discord_notify import notify_discord
+                            await notify_discord(f"✅ 提案自動承認: {title} (スコア: {p['score']})")
+                        except Exception:
+                            pass
+
+                    except Exception as e:
+                        logger.error(f"提案→ゴール変換失敗: {e}")
+
+        except Exception as e:
+            logger.error(f"提案自動承認処理失敗: {e}")
+
     async def node_health_check(self):
         """5分間隔でノードのヘルスチェックを実行しevent_logに記録"""
         try:
@@ -1354,13 +1586,7 @@ class SyutainScheduler:
 
             from tools.event_logger import log_event
 
-            NODE_IPS = {
-                "bravo": "100.75.146.9",
-                "charlie": "100.70.161.106",
-                "delta": "100.82.81.105",
-            }
-
-            for node, ip in NODE_IPS.items():
+            for node, ip in REMOTE_NODES.items():
                 health = {"node": node, "ip": ip, "status": "unknown"}
 
                 # Ollama応答確認
@@ -1443,6 +1669,16 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"ノードヘルスチェック失敗: {e}")
 
+    async def chat_learning_job(self):
+        """対話学習: 1時間おきに直近対話を分析しpersona_memoryに蓄積"""
+        try:
+            from bots.bot_learning import run_chat_learning
+            result = await run_chat_learning(hours=1)
+            if result.get("saved", 0) > 0:
+                logger.info(f"対話学習: {result['saved']}件保存")
+        except Exception as e:
+            logger.error(f"対話学習ジョブ失敗: {e}")
+
     async def anomaly_detection(self):
         """5分間隔で異常検知 → Discord通知"""
         try:
@@ -1510,7 +1746,7 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"異常検知処理失敗: {e}")
 
-    async def _check_bluesky_duplicate(self, draft: str) -> bool:
+    async def _check_post_duplicate(self, draft: str) -> bool:
         """Bluesky投稿の重複チェック。N-gram類似度0.5以上なら棄却。"""
         try:
             import asyncpg
@@ -1697,7 +1933,7 @@ class SyutainScheduler:
                 logger.warning(f"NGワードチェック失敗（続行）: {e}")
 
             # 重複チェック
-            if await self._check_bluesky_duplicate(draft):
+            if await self._check_post_duplicate(draft):
                 logger.info("Blueskyドラフト: 重複のため棄却。次回サイクルで再生成")
                 return
 
@@ -1731,12 +1967,7 @@ class SyutainScheduler:
             except Exception:
                 pass
 
-            logger.info(f"Blueskyドラフト生成→承認キュー投入: {draft[:50]}...")
-            try:
-                from tools.discord_notify import notify_discord
-                await notify_discord(f"📝 Bluesky投稿ドラフト生成（承認待ち）: {draft[:100]}...")
-            except Exception:
-                pass
+            logger.info(f"Blueskyドラフト生成→承認キュー投入")
         except Exception as e:
             logger.error(f"Blueskyドラフト生成失敗: {e}")
 
@@ -1870,7 +2101,7 @@ class SyutainScheduler:
                 pass
 
             # 重複チェック（N-gram）
-            if await self._check_bluesky_duplicate(draft):
+            if await self._check_post_duplicate(draft):
                 logger.info("Xドラフト: 重複のため棄却")
                 return
 
@@ -1902,12 +2133,7 @@ class SyutainScheduler:
             except Exception:
                 pass
 
-            logger.info(f"Xドラフト生成→承認キュー投入: {draft[:50]}...")
-            try:
-                from tools.discord_notify import notify_discord
-                await notify_discord(f"📝 X投稿ドラフト生成（SYUTAINβ、承認待ち）: {draft[:100]}...")
-            except Exception:
-                pass
+            logger.info(f"Xドラフト生成→承認キュー投入 (SYUTAINβ)")
         except Exception as e:
             logger.error(f"Xドラフト生成失敗: {e}")
 
@@ -2004,7 +2230,7 @@ class SyutainScheduler:
             except Exception:
                 pass
 
-            if await self._check_bluesky_duplicate(draft):
+            if await self._check_post_duplicate(draft):
                 logger.info("島原Xドラフト: 重複のため棄却")
                 return
 
@@ -2035,12 +2261,7 @@ class SyutainScheduler:
             except Exception:
                 pass
 
-            logger.info(f"島原Xドラフト生成→承認キュー投入: {draft[:50]}...")
-            try:
-                from tools.discord_notify import notify_discord
-                await notify_discord(f"📝 X投稿ドラフト生成（島原、承認待ち）: {draft[:100]}...")
-            except Exception:
-                pass
+            logger.info(f"島原Xドラフト生成→承認キュー投入")
         except Exception as e:
             logger.error(f"島原Xドラフト生成失敗: {e}")
 
@@ -2143,7 +2364,7 @@ class SyutainScheduler:
                 pass
 
             # 重複チェック
-            if await self._check_bluesky_duplicate(draft):
+            if await self._check_post_duplicate(draft):
                 logger.info("Threadsドラフト: 重複のため棄却")
                 return
 
@@ -2174,12 +2395,7 @@ class SyutainScheduler:
             except Exception:
                 pass
 
-            logger.info(f"Threadsドラフト生成→承認キュー投入: {draft[:50]}...")
-            try:
-                from tools.discord_notify import notify_discord
-                await notify_discord(f"📝 Threads投稿ドラフト生成（承認待ち）: {draft[:100]}...")
-            except Exception:
-                pass
+            logger.info(f"Threadsドラフト生成→承認キュー投入")
         except Exception as e:
             logger.error(f"Threadsドラフト生成失敗: {e}")
 
@@ -2225,6 +2441,26 @@ class SyutainScheduler:
     async def night_batch_sns_4(self):
         await self._run_sns_batch(4)
 
+    async def generate_daily_content(self):
+        """日次コンテンツ生成: 5段パイプラインでnote記事候補を1本生成"""
+        try:
+            from brain_alpha.content_pipeline import generate_publishable_content
+            result = await generate_publishable_content(content_type="note_article", target_length=3000)
+            if result.get("quality_score", 0) >= 0.65:
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"📝 コンテンツ生成完了: {result.get('title', '無題')} (品質: {result['quality_score']:.2f})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Discord通知失敗: {e}")
+            logger.info(
+                f"日次コンテンツ生成完了: {result.get('title', '無題')} "
+                f"(品質: {result.get('quality_score', 0):.2f})"
+            )
+        except Exception as e:
+            logger.error(f"日次コンテンツ生成失敗: {e}")
+
     async def posting_queue_process(self):
         """毎分: posting_queueからscheduled_at<=NOWの投稿を実行"""
         try:
@@ -2244,6 +2480,33 @@ class SyutainScheduler:
                     content = row["content"]
                     post_id = row["id"]
 
+                    # === 投稿前 最終品質ゲート ===
+                    try:
+                        from tools.platform_ng_check import check_platform_ng
+                        ng_check = check_platform_ng(content, platform)
+                        if not ng_check["passed"]:
+                            logger.warning(f"posting_queue#{post_id} 最終NGチェック不合格: {ng_check['violations']}")
+                            await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+                            continue
+                    except Exception:
+                        pass  # NGチェック失敗時は投稿を続行
+
+                    # 重複チェック: 同じ日に同じ先頭30文字の投稿が既にpostedなら拒否
+                    try:
+                        dup = await conn.fetchval(
+                            """SELECT COUNT(*) FROM posting_queue
+                               WHERE status='posted' AND platform=$1
+                               AND LEFT(content, 30) = LEFT($2, 30)
+                               AND posted_at::date = CURRENT_DATE""",
+                            platform, content,
+                        )
+                        if dup and dup > 0:
+                            logger.warning(f"posting_queue#{post_id} 重複投稿検知→スキップ")
+                            await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+                            continue
+                    except Exception:
+                        pass
+
                     try:
                         result = {}
                         if platform == "bluesky":
@@ -2255,6 +2518,14 @@ class SyutainScheduler:
                         elif platform == "threads":
                             from tools.social_tools import execute_approved_threads
                             result = await execute_approved_threads(content)
+                        elif platform == "reminder":
+                            # リマインダー: Discord通知のみ
+                            try:
+                                from tools.discord_notify import notify_discord
+                                await notify_discord(content)
+                            except Exception:
+                                pass
+                            result = {"success": True, "post_url": "reminder"}
 
                         if result.get("success"):
                             await conn.execute(
@@ -2272,7 +2543,7 @@ class SyutainScheduler:
                             if retry_count and retry_count >= 3:
                                 await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
                                 from tools.discord_notify import notify_discord
-                                await notify_discord(f"❌ 投稿失敗(3回リトライ後): {platform}/{account} — {content[:60]}")
+                                await notify_discord(f"❌ 投稿失敗(3回リトライ後): {platform}/{account} (ID: {post_id})")
                             else:
                                 from tools.event_logger import log_event
                                 await log_event("sns.post_retry", "sns", {

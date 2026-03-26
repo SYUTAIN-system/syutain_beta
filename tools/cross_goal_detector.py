@@ -8,6 +8,7 @@ V25新規機能。
 """
 
 import os
+import time
 import logging
 from datetime import datetime
 from typing import Optional
@@ -35,6 +36,9 @@ class CrossGoalDetector:
         # アクティブゴールのリソース使用状況をインメモリ追跡
         self._goal_resources: dict[str, dict] = {}
         # goal_id -> { api_calls: {api: count}, nodes_used: {node: cpu_pct}, budget_used_jpy: float, actions: [str] }
+        # api_callsカウンターの時間ベースリセット（1時間ごと）
+        self._last_reset_time: float = time.monotonic()
+        self._RESET_INTERVAL_SEC: float = 3600.0  # 1時間
 
     async def _get_pool(self) -> Optional[asyncpg.Pool]:
         """PostgreSQL接続プールを取得"""
@@ -64,8 +68,18 @@ class CrossGoalDetector:
         """ゴール完了時に登録解除"""
         self._goal_resources.pop(goal_id, None)
 
+    def _maybe_reset_counters(self):
+        """1時間以上経過していたらapi_callsカウンターをリセット"""
+        now = time.monotonic()
+        if now - self._last_reset_time >= self._RESET_INTERVAL_SEC:
+            for res in self._goal_resources.values():
+                res["api_calls"] = {}
+            self._last_reset_time = now
+            logger.debug("api_callsカウンターを時間ベースでリセット")
+
     def record_api_call(self, goal_id: str, api_name: str):
         """APIコールを記録"""
+        self._maybe_reset_counters()
         if goal_id not in self._goal_resources:
             self.register_goal(goal_id)
         calls = self._goal_resources[goal_id]["api_calls"]

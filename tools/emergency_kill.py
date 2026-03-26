@@ -64,8 +64,8 @@ class EmergencyKill:
     """Emergency Kill（最終防衛線）"""
 
     def __init__(self):
-        self._killed = False
-        self._kill_reason: Optional[str] = None
+        self._killed_goals: set[str] = set()  # Kill発動済みゴールID
+        self._kill_reasons: dict[str, str] = {}  # goal_id -> reason
         # ゴール別のエラーカウント
         self._error_counts: dict[str, dict[str, int]] = {}  # goal_id -> {error_class: count}
 
@@ -89,10 +89,10 @@ class EmergencyKill:
                 "condition": str | None,
             }
         """
-        if self._killed:
+        if goal_id in self._killed_goals:
             return {
                 "kill": True,
-                "reason": self._kill_reason,
+                "reason": self._kill_reasons.get(goal_id, "already_killed"),
                 "condition": "already_killed",
             }
 
@@ -141,13 +141,13 @@ class EmergencyKill:
                     {"elapsed_minutes": elapsed_minutes, "max_minutes": MAX_ELAPSED_MINUTES},
                 )
 
-            # 条件5: セマンティックループ検知
-            if semantic_loop_detected:
+            # 条件5: セマンティックループ検知（step_count >= 3でのみ発動、1-2ステップは誤検知）
+            if semantic_loop_detected and step_count >= 3:
                 return self._trigger_kill(
                     goal_id,
                     "セマンティックループ検知による停止",
                     "semantic_loop",
-                    {},
+                    {"step_count": step_count},
                 )
 
             # 条件6: Cross-Goal干渉検知
@@ -175,9 +175,9 @@ class EmergencyKill:
             }
 
     def _trigger_kill(self, goal_id: str, reason: str, condition: str, details: dict) -> dict:
-        """Killを発動し、ログに記録"""
-        self._killed = True
-        self._kill_reason = reason
+        """Killを発動し、ログに記録（ゴール単位）"""
+        self._killed_goals.add(goal_id)
+        self._kill_reasons[goal_id] = reason
 
         full_details = {
             "goal_id": goal_id,
@@ -205,22 +205,30 @@ class EmergencyKill:
         return self._error_counts.get(goal_id, {}).get(error_class, 0)
 
     def reset_goal(self, goal_id: str):
-        """ゴール完了時にエラーカウントをリセット"""
+        """ゴール完了時にエラーカウントとKillフラグをリセット"""
         self._error_counts.pop(goal_id, None)
+        self._killed_goals.discard(goal_id)
+        self._kill_reasons.pop(goal_id, None)
 
     def reset(self):
         """全状態をリセット"""
-        self._killed = False
-        self._kill_reason = None
+        self._killed_goals.clear()
+        self._kill_reasons.clear()
         self._error_counts.clear()
 
     @property
     def is_killed(self) -> bool:
-        return self._killed
+        return len(self._killed_goals) > 0
 
     @property
     def kill_reason(self) -> Optional[str]:
-        return self._kill_reason
+        if self._kill_reasons:
+            return next(iter(self._kill_reasons.values()))
+        return None
+
+    def is_goal_killed(self, goal_id: str) -> bool:
+        """特定ゴールがKill済みか"""
+        return goal_id in self._killed_goals
 
 
 # シングルトン

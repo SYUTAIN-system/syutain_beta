@@ -95,7 +95,7 @@ class LoopGuard:
         goal_id: str,
         action_key: str = "",
         error_class: Optional[str] = None,
-        value_justification: str = "",
+        value_justification: Optional[str] = None,
         is_approval_waiting: bool = False,
         task_cost_jpy: float = 0.0,
         token_count: int = 0,
@@ -251,14 +251,20 @@ class LoopGuard:
         return {"allowed": True}
 
     def _check_layer4(self, value_justification: str) -> dict:
-        """Layer 4: Value Guard（価値のない再試行禁止）"""
-        if not value_justification or value_justification.strip() == "":
+        """Layer 4: Value Guard（価値のない再試行禁止）
+        value_justificationが未提供の場合はパススルー（ブロックしない）。
+        明示的に空文字列で呼ばれた場合のみ、呼び出し元が意図的に価値根拠を宣言していない。
+        """
+        if value_justification is None:
+            # 未提供: Layer 4チェックをスキップ
+            return {"allowed": True}
+        if value_justification.strip() == "":
             return {
                 "allowed": False,
                 "layer_triggered": 4,
                 "layer_name": "value_guard",
                 "action": "SKIP",
-                "details": "この行動の価値根拠（value_justification）が未宣言→SKIP",
+                "details": "この行動の価値根拠（value_justification）が空→SKIP",
             }
         return {"allowed": True}
 

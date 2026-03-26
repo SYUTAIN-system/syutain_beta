@@ -294,6 +294,13 @@ class OSKernel:
 
         logger.info(f"=== 5段階自律ループ開始: {goal_packet.goal_id} ===")
 
+        # 新ゴール開始時にSemanticLoopDetectorをリセット（前ゴールの履歴が残ると誤検知する）
+        try:
+            from tools.semantic_loop_detector import get_semantic_loop_detector
+            get_semantic_loop_detector().reset()
+        except Exception:
+            pass
+
         # 判断根拠トレース
         try:
             await self._record_trace(
@@ -335,6 +342,7 @@ class OSKernel:
             # ③ 行動（Act）& ④ 検証（Verify）& ⑤ 停止判断
             completed_count = 0
             total_count = len(task_graph.nodes)
+            decision = None  # デフォルト値（ready_tasksが空の場合のスコープ漏洩防止）
 
             while True:
                 # 実行可能タスクを取得
@@ -348,6 +356,24 @@ class OSKernel:
 
                 for task_node in ready_tasks:
                     task_dict = task_node.to_dict()
+
+                    # 突然変異注入（設計書第24章 — try-exceptで完全隔離）
+                    try:
+                        from agents.mutation_engine import should_mutate, apply_deviation, mutate_text_style
+                        if should_mutate():
+                            _action_id = f"dispatch_{task_dict.get('task_id', '')}"
+                            # タスク優先度に微小な逸脱を加える
+                            if "priority" in task_dict and isinstance(task_dict["priority"], (int, float)):
+                                task_dict["priority"] = apply_deviation(
+                                    float(task_dict["priority"]), f"{_action_id}_priority"
+                                )
+                            # 文体パラメータがあれば変異
+                            if "style_params" in task_dict and isinstance(task_dict["style_params"], dict):
+                                task_dict["style_params"] = mutate_text_style(
+                                    task_dict["style_params"], _action_id
+                                )
+                    except Exception:
+                        pass  # 変異エンジンのバグで処理を止めない
 
                     # ③ 行動（Act）
                     logger.info(f"--- ③ 行動（Act）: {task_node.task_id} ---")
@@ -500,6 +526,8 @@ class OSKernel:
                         stop_decision = type("SD", (), {
                             "decision": DECISION_CONTINUE,
                             "reason": f"停止判断エラー: {e}",
+                            "remaining_steps": remaining,
+                            "fallback_available": remaining_fallbacks > 0,
                         })()
 
                     decision = stop_decision.decision
@@ -528,8 +556,9 @@ class OSKernel:
                             "loopguard.triggered", "system",
                             {"decision": decision, "reason": stop_decision.reason,
                              "step_count": goal_packet.total_steps,
-                             "cost_jpy": goal_packet.total_cost_jpy},
-                            severity="critical",
+                             "cost_jpy": goal_packet.total_cost_jpy,
+                             "layer_name": decision.lower().replace("_", " ")},
+                            severity="warning",
                             goal_id=goal_packet.goal_id,
                         ))
                         # CLAUDE.md ルール12: 重要判断はDiscord + Web UIで通知
@@ -538,7 +567,7 @@ class OSKernel:
                             await notify_emergency_kill(
                                 reason=f"{decision}: {stop_decision.reason}",
                                 goal_id=goal_packet.goal_id,
-                                step_count=step_count,
+                                step_count=goal_packet.total_steps,
                                 cost_jpy=goal_packet.total_cost_jpy,
                             )
                         except Exception:
@@ -663,6 +692,13 @@ class OSKernel:
         try:
             lg = get_loop_guard()
             lg.reset_goal(gp.goal_id)
+        except Exception:
+            pass
+
+        # SemanticLoopDetectorリセット
+        try:
+            from tools.semantic_loop_detector import get_semantic_loop_detector
+            get_semantic_loop_detector().reset()
         except Exception:
             pass
 
