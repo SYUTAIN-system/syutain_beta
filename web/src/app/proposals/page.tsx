@@ -252,7 +252,7 @@ export default function ProposalsPage() {
           </p>
         ) : (
           taskApprovals.map((a) => (
-            <div key={a.approval_id} className="rounded-lg border border-[var(--border)]/30 bg-[var(--bg-card)] p-4">
+            <div key={a.approval_id} className="rounded-lg border border-[var(--border-color)]/30 bg-[var(--bg-card)] p-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 mb-1">

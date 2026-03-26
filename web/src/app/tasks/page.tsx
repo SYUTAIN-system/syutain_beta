@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ListChecks, Clock, CheckCircle2, AlertCircle, Loader2, XCircle, ShieldAlert, Copy, Check, Brain } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -92,7 +92,7 @@ const statusConfig: Record<string, { icon: typeof Clock; color: string; bg: stri
   failed: { icon: AlertCircle, color: "text-[var(--accent-red)]", bg: "bg-[var(--accent-red)]/10", label: "失敗" },
 };
 
-export default function TasksPage() {
+function TasksPageInner() {
   const searchParams = useSearchParams();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -392,5 +392,13 @@ export default function TasksPage() {
         );
       })()}
     </div>
+  );
+}
+
+export default function TasksPage() {
+  return (
+    <Suspense fallback={<div className="flex h-[60vh] items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent-purple)] border-t-transparent" /></div>}>
+      <TasksPageInner />
+    </Suspense>
   );
 }

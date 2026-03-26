@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, DollarSign, CheckCircle, AlertTriangle, CircleDollarSign, Send, Zap, Monitor, Brain, Wrench } from "lucide-react";
+import { Activity, DollarSign, CheckCircle, AlertTriangle, CircleDollarSign, Send, Zap, Monitor, Brain, Wrench, X, Download } from "lucide-react";
 import NodeStatusPanel from "@/components/NodeStatusPanel";
 import { apiFetch } from "@/lib/api";
 
@@ -47,12 +47,7 @@ interface DashboardData {
   recent_artifacts: RecentArtifact[];
 }
 
-const NODE_MODELS: Record<string, { model: string; browser_layer: boolean }> = {
-  alpha: { model: "推論なし（Brain-α専用）", browser_layer: false },
-  bravo: { model: "Nemotron 9B JP + Qwen3.5-9B", browser_layer: true },
-  charlie: { model: "Nemotron 9B JP + Qwen3.5-9B", browser_layer: false },
-  delta: { model: "Qwen3.5-4B", browser_layer: false },
-};
+import { NODE_MODELS } from "@/lib/constants";
 
 interface NodeStateInfo {
   node_name: string;
@@ -71,6 +66,11 @@ export default function DashboardPage() {
   const [quickGoal, setQuickGoal] = useState("");
   const [goalSending, setGoalSending] = useState(false);
   const [goalSent, setGoalSent] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<any>(null);
+  const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+  const [snsPosted, setSnsPosted] = useState(0);
+  const [snsPending, setSnsPending] = useState(0);
+  const [errorCount, setErrorCount] = useState(0);
 
   useEffect(() => {
     const fetchDashboard = async () => {
@@ -140,6 +140,11 @@ export default function DashboardPage() {
           const hJson = await healRes.json();
           setHealStats({total_24h: hJson.total_24h || 0, success_rate_24h: hJson.success_rate_24h || 0});
         }
+
+        // SNS & error counts from dashboard data
+        setSnsPosted(dashJson.sns_posted_today ?? 0);
+        setSnsPending(dashJson.sns_pending_today ?? 0);
+        setErrorCount(dashJson.error_count_today ?? 0);
       } catch {
         setError("API接続エラー");
         if (!data) {
@@ -191,6 +196,21 @@ export default function DashboardPage() {
     }
   };
 
+  const openTaskDetail = async (taskId: string) => {
+    setTaskDetailLoading(true);
+    try {
+      const res = await apiFetch(`/api/tasks/${taskId}`);
+      if (res.ok) {
+        const detail = await res.json();
+        setSelectedTask(detail);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setTaskDetailLoading(false);
+    }
+  };
+
   const charlieState = nodeStates.find((n) => n.node_name === "charlie");
   const isCharlieWin11 = charlieState?.state === "charlie_win11";
 
@@ -210,6 +230,22 @@ export default function DashboardPage() {
     }
   };
 
+  const downloadArtifact = async (id: string, type: string) => {
+    try {
+      const res = await apiFetch(`/api/artifacts/${id}/download`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${type}_${id.slice(0, 8)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  };
+
   if (loading) {
     return (
       <div className="flex h-[60vh] items-center justify-center">
@@ -219,19 +255,56 @@ export default function DashboardPage() {
   }
 
   const d = data!;
-  const dailyPct = d.daily_budget > 0 ? Math.min((d.daily_cost / d.daily_budget) * 100, 100) : 0;
-  const monthlyPct = d.monthly_budget > 0 ? Math.min((d.monthly_cost / d.monthly_budget) * 100, 100) : 0;
+  // APIレスポンスの欠落フィールドに安全なデフォルト値を設定
+  const safeNodes: NodeInfo[] = Array.isArray(d.nodes) ? d.nodes : [];
+  const dailyCost = d.daily_cost ?? 0;
+  const dailyBudget = d.daily_budget ?? 80;
+  const monthlyCost = d.monthly_cost ?? 0;
+  const monthlyBudget = d.monthly_budget ?? 1500;
+  const safeProposals = Array.isArray(d.recent_proposals) ? d.recent_proposals : [];
+  const safeArtifacts = Array.isArray(d.recent_artifacts) ? d.recent_artifacts : [];
+  const dailyPct = dailyBudget > 0 ? Math.min((dailyCost / dailyBudget) * 100, 100) : 0;
+  const monthlyPct = monthlyBudget > 0 ? Math.min((monthlyCost / monthlyBudget) * 100, 100) : 0;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">ダッシュボード</h1>
+        <h1 className="text-xl sm:text-2xl font-bold">ダッシュボード</h1>
         {error && (
           <span className="flex items-center gap-1 rounded-full bg-[var(--accent-amber)]/10 px-3 py-1 text-xs text-[var(--accent-amber)]">
             <AlertTriangle className="h-3 w-3" />
             {error}
           </span>
         )}
+      </div>
+
+      {/* Mobile Status Bar */}
+      <div className="flex items-center gap-3 overflow-x-auto rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-3 py-2 text-xs sm:text-sm">
+        {/* Node status dots */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {safeNodes.map((n) => (
+            <span key={n.name} className="flex items-center gap-1" title={n.name}>
+              <span className={`h-2 w-2 rounded-full ${n.status === "online" ? "bg-[var(--accent-green)]" : n.status === "busy" ? "bg-[var(--accent-amber)]" : "bg-[var(--accent-red)]"}`} />
+              <span className="hidden sm:inline text-[var(--text-secondary)]">{n.name}</span>
+            </span>
+          ))}
+        </div>
+        <span className="h-4 w-px bg-[var(--border-color)] flex-shrink-0" />
+        {/* SNS counts */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <Send className="h-3 w-3 text-[var(--accent-blue)]" />
+          <span className="text-[var(--text-secondary)]">{snsPosted}/{snsPosted + snsPending}</span>
+        </div>
+        <span className="h-4 w-px bg-[var(--border-color)] flex-shrink-0" />
+        {/* Error count */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <AlertTriangle className="h-3 w-3 text-[var(--text-secondary)]" />
+          {errorCount > 0 ? (
+            <span className="rounded-full bg-[var(--accent-red)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent-red)]">{errorCount}</span>
+          ) : (
+            <span className="text-[var(--text-secondary)]">0</span>
+          )}
+        </div>
       </div>
 
       {/* Quick Goal Input */}
@@ -298,14 +371,14 @@ export default function DashboardPage() {
             <CircleDollarSign className="h-4 w-4 text-[var(--accent-purple)]" />
             <p className="text-xs text-[var(--text-secondary)]">APIコスト</p>
           </div>
-          <p className="mt-1 text-lg font-bold">&yen;{d.daily_cost < 10 ? d.daily_cost.toFixed(1) : d.daily_cost.toFixed(0)}</p>
+          <p className="mt-1 text-lg font-bold">&yen;{dailyCost < 10 ? dailyCost.toFixed(1) : dailyCost.toFixed(0)}</p>
           <div className="mt-1 h-1.5 w-full rounded-full bg-[var(--bg-primary)]">
             <div
               className={`h-1.5 rounded-full transition-all ${dailyPct > 80 ? "bg-[var(--accent-red)]" : "bg-[var(--accent-green)]"}`}
               style={{ width: `${dailyPct}%` }}
             />
           </div>
-          <p className="mt-0.5 text-[10px] text-[var(--text-secondary)]">日次 &yen;{d.daily_budget} / 月次 &yen;{d.monthly_cost.toFixed(0)}/{d.monthly_budget}</p>
+          <p className="mt-0.5 text-[10px] text-[var(--text-secondary)]">日次 &yen;{dailyBudget} / 月次 &yen;{monthlyCost.toFixed(0)}/{monthlyBudget}</p>
         </div>
       </div>
 
@@ -380,8 +453,8 @@ export default function DashboardPage() {
       )}
 
       {/* Node Status */}
-      {d.nodes.length > 0 ? (
-        <NodeStatusPanel nodes={d.nodes} />
+      {safeNodes.length > 0 ? (
+        <NodeStatusPanel nodes={safeNodes} />
       ) : (
         <p className="py-4 text-center text-[var(--text-secondary)]">データなし</p>
       )}
@@ -390,10 +463,10 @@ export default function DashboardPage() {
       <div>
         <h2 className="mb-3 text-lg font-semibold">最近の提案</h2>
         <div className="space-y-2">
-          {d.recent_proposals.map((p: Record<string, unknown>) => (
+          {safeProposals.map((p: Record<string, unknown>) => (
             <div
               key={String(p.proposal_id ?? p.id ?? p.title)}
-              className="flex items-center justify-between rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3"
+              className="flex items-center justify-between rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3 min-h-12"
             >
               <div className="min-w-0">
                 <p className="font-medium truncate">{String(p.title ?? "提案")}</p>
@@ -414,28 +487,31 @@ export default function DashboardPage() {
               </span>
             </div>
           ))}
-          {d.recent_proposals.length === 0 && (
+          {safeProposals.length === 0 && (
             <p className="py-8 text-center text-[var(--text-secondary)]">提案はまだありません</p>
           )}
         </div>
       </div>
 
       {/* Recent Artifacts */}
-      {d.recent_artifacts.length > 0 && (
+      {safeArtifacts.length > 0 && (
         <div>
-          <h2 className="mb-3 text-lg font-semibold">最近の成果物</h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">最近の成果物</h2>
+            <a href="/artifacts" className="text-xs text-[var(--accent-purple)] hover:underline">全て見る &rarr;</a>
+          </div>
           <div className="space-y-2">
-            {d.recent_artifacts.map((a) => {
+            {safeArtifacts.map((a) => {
               const TASK_TYPE_JP: Record<string, string> = {
                 content: "コンテンツ生成", research: "調査", analysis: "分析",
                 pricing: "価格設定", coding: "コード作成", drafting: "下書き",
                 browser_action: "ブラウザ操作", strategy: "戦略分析",
               };
               return (
-                <a
+                <button
                   key={a.task_id}
-                  href={`/tasks?detail=${a.task_id}`}
-                  className="block rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3 hover:border-[var(--accent-purple)]/50 transition-colors"
+                  onClick={() => openTaskDetail(a.task_id)}
+                  className="w-full text-left block rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3 min-h-12 hover:border-[var(--accent-purple)]/50 active:bg-[var(--bg-primary)] transition-colors"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
@@ -447,7 +523,7 @@ export default function DashboardPage() {
                         {a.cost_jpy > 0 ? ` · ¥${a.cost_jpy.toFixed(2)}` : ""}
                       </p>
                       {a.output_preview && (
-                        <p className="mt-1 text-xs text-[var(--text-secondary)] line-clamp-2">
+                        <p className="mt-1 text-xs sm:text-sm text-[var(--text-secondary)] line-clamp-2">
                           {a.output_preview}
                         </p>
                       )}
@@ -456,10 +532,96 @@ export default function DashboardPage() {
                       完了
                     </span>
                   </div>
-                </a>
+                </button>
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Task Detail Modal */}
+      {selectedTask && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop (desktop only) */}
+          <div
+            className="hidden md:block fixed inset-0 bg-black/60"
+            onClick={() => setSelectedTask(null)}
+          />
+          {/* Modal content */}
+          <div className="fixed inset-0 z-50 bg-[var(--bg)] overflow-y-auto md:static md:inset-auto md:z-auto md:w-full md:max-w-2xl md:max-h-[80vh] md:rounded-xl md:border md:border-[var(--border-color)] md:bg-[var(--bg-card)] md:overflow-y-auto md:shadow-2xl">
+            {/* Header */}
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--border-color)] bg-[var(--bg)] px-4 py-3 md:bg-[var(--bg-card)] md:rounded-t-xl">
+              <h2 className="text-lg font-bold truncate">
+                {selectedTask.type || "タスク"} 詳細
+              </h2>
+              <button
+                onClick={() => setSelectedTask(null)}
+                className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--bg-primary)] transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            {/* Body */}
+            <div className="p-4 space-y-4">
+              {/* Meta info */}
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">タイプ</p>
+                  <p className="font-medium">{selectedTask.type || "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">モデル</p>
+                  <p className="font-medium">{selectedTask.model_used || "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">ノード</p>
+                  <p className="font-medium">{selectedTask.assigned_node || "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">コスト</p>
+                  <p className="font-medium">{selectedTask.cost_jpy != null ? `¥${Number(selectedTask.cost_jpy).toFixed(2)}` : "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">品質スコア</p>
+                  <p className="font-medium">{selectedTask.quality_score != null ? selectedTask.quality_score : "-"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-[var(--text-secondary)]">作成日時</p>
+                  <p className="font-medium">{selectedTask.created_at ? new Date(selectedTask.created_at).toLocaleString("ja-JP") : "-"}</p>
+                </div>
+              </div>
+
+              {/* Output content */}
+              <div>
+                <p className="text-xs text-[var(--text-secondary)] mb-2">出力内容</p>
+                <div className="max-h-96 overflow-y-auto rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] p-3">
+                  <pre className="text-xs sm:text-sm whitespace-pre-wrap break-words text-[var(--text-primary)]">
+                    {typeof selectedTask.output_data === "string"
+                      ? selectedTask.output_data
+                      : selectedTask.output_data
+                      ? JSON.stringify(selectedTask.output_data, null, 2)
+                      : "(出力データなし)"}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Download button */}
+              <button
+                onClick={() => downloadArtifact(selectedTask.id, selectedTask.type || "artifact")}
+                className="flex items-center justify-center gap-2 rounded-lg bg-[var(--accent-purple)] px-4 py-3 min-h-12 text-sm font-medium text-white hover:bg-[var(--accent-purple)]/80 active:bg-[var(--accent-purple)]/60 transition-colors w-full"
+              >
+                <Download className="h-4 w-4" />
+                成果物をダウンロード
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loading overlay for task detail */}
+      {taskDetailLoading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent-purple)] border-t-transparent" />
         </div>
       )}
     </div>

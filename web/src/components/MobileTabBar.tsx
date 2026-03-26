@@ -7,6 +7,7 @@ import {
   MessageCircle,
   ListChecks,
   FileStack,
+  FileText,
   MoreHorizontal,
   Bot,
   Brain,
@@ -25,6 +26,7 @@ const mainTabs = [
 ];
 
 const moreTabs = [
+  { href: "/artifacts", label: "成果物", icon: FileText },
   { href: "/agent-ops", label: "Agent Ops", icon: Bot },
   { href: "/brain-alpha", label: "Brain-α", icon: Brain },
   { href: "/node-control", label: "ノード", icon: Server },
@@ -42,13 +44,17 @@ export default function MobileTabBar() {
   // 外側タップで閉じる
   useEffect(() => {
     if (!moreOpen) return;
-    const handleClick = (e: MouseEvent) => {
+    const handleClick = (e: Event) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMoreOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("touchstart", handleClick);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("touchstart", handleClick);
+    };
   }, [moreOpen]);
 
   // ページ遷移で閉じる

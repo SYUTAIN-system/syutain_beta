@@ -54,6 +54,7 @@ export default function RootLayout({
               <a href="/node-control" className="text-[var(--text-secondary)] hover:text-white transition-colors">ノード</a>
               <a href="/revenue" className="text-[var(--text-secondary)] hover:text-white transition-colors">収益</a>
               <a href="/models" className="text-[var(--text-secondary)] hover:text-white transition-colors">モデル</a>
+              <a href="/artifacts" className="text-[var(--text-secondary)] hover:text-white transition-colors">成果物</a>
               <a href="/intel" className="text-[var(--text-secondary)] hover:text-white transition-colors">情報収集</a>
               <a href="/settings" className="text-[var(--text-secondary)] hover:text-white transition-colors">設定</a>
             </div>

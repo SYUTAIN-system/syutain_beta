@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { GitBranch, Target, Cpu, AlertTriangle, CheckCircle2, XCircle, Clock, ChevronDown } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -31,7 +31,7 @@ interface TimelineData {
   };
 }
 
-export default function TimelinePage() {
+function TimelinePageInner() {
   const searchParams = useSearchParams();
   const goalIdParam = searchParams.get("goal_id");
 
@@ -119,7 +119,7 @@ export default function TimelinePage() {
         <select
           value={selectedGoalId}
           onChange={(e) => setSelectedGoalId(e.target.value)}
-          className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-4 py-2.5 text-sm appearance-none pr-10"
+          className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-2.5 text-sm appearance-none pr-10"
         >
           <option value="">ゴールを選択...</option>
           {goals.map((g) => (
@@ -148,7 +148,7 @@ export default function TimelinePage() {
               { label: "コスト", value: `¥${timeline.summary.total_cost_jpy.toFixed(1)}` },
               { label: "ステータス", value: timeline.goal.status },
             ].map((item) => (
-              <div key={item.label} className="rounded-lg border border-[var(--border)]/30 bg-[var(--bg-card)] p-3 text-center">
+              <div key={item.label} className="rounded-lg border border-[var(--border-color)]/30 bg-[var(--bg-card)] p-3 text-center">
                 <p className="text-xs text-[var(--text-secondary)]">{item.label}</p>
                 <p className="text-lg font-bold">{item.value}</p>
               </div>
@@ -158,7 +158,7 @@ export default function TimelinePage() {
           {/* タイムライン */}
           <div className="space-y-0">
             {timeline.timeline.map((entry, i) => (
-              <div key={i} className="flex gap-3 border-l-2 border-[var(--border)]/30 pb-4 pl-4 relative">
+              <div key={i} className="flex gap-3 border-l-2 border-[var(--border-color)]/30 pb-4 pl-4 relative">
                 <div className="absolute -left-[9px] top-1 rounded-full bg-[var(--bg-main)] p-0.5">
                   {typeIcon(entry.type)}
                 </div>
@@ -210,5 +210,13 @@ export default function TimelinePage() {
         <p className="py-8 text-center text-[var(--text-secondary)]">タイムラインを読み込めませんでした</p>
       )}
     </div>
+  );
+}
+
+export default function TimelinePage() {
+  return (
+    <Suspense fallback={<div className="flex h-[60vh] items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent-purple)] border-t-transparent" /></div>}>
+      <TimelinePageInner />
+    </Suspense>
   );
 }

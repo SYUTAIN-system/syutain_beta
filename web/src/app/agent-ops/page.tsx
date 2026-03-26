@@ -30,12 +30,7 @@ interface AgentOpsData {
   }[];
 }
 
-const NODE_MODELS: Record<string, { model: string; browser_layer: boolean }> = {
-  alpha: { model: "Qwen3.5-9B (MLX)", browser_layer: false },
-  bravo: { model: "Qwen3.5-9B", browser_layer: true },
-  charlie: { model: "Qwen3.5-9B", browser_layer: false },
-  delta: { model: "Qwen3.5-4B", browser_layer: false },
-};
+import { NODE_MODELS } from "@/lib/constants";
 
 function TaskOutputPreview({ data }: { data: unknown }) {
   let preview = "";
@@ -174,7 +169,7 @@ export default function AgentOpsPage() {
     setGoalLoading(true);
     try {
       // goal_idの先頭12文字しかないので、DBから完全なIDを検索
-      const res = await fetch(`/api/goals/${goalIdShort}`);
+      const res = await apiFetch(`/api/goals/${goalIdShort}`);
       if (res.ok) {
         const detail = await res.json();
         setGoalDetail(detail);
