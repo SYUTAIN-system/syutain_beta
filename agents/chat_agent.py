@@ -18,6 +18,7 @@ from typing import Optional, AsyncIterator
 
 import asyncpg
 from dotenv import load_dotenv
+from tools.db_pool import get_connection
 
 from tools.llm_router import choose_best_model_v6, call_llm, call_llm_stream
 from tools.budget_guard import get_budget_guard
@@ -89,8 +90,7 @@ class ChatAgent:
                         confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                     )
             else:
-                conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
-                try:
+                async with get_connection() as conn:
                     await conn.execute(
                         """INSERT INTO agent_reasoning_trace
                            (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -98,8 +98,6 @@ class ChatAgent:
                         "CHAT_AGENT", goal_id, task_id, action, reasoning,
                         confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                     )
-                finally:
-                    await conn.close()
         except Exception:
             pass
 
@@ -462,9 +460,7 @@ class ChatAgent:
     async def _handle_intel_query(self, session_id: str, message: str) -> dict:
         """最新ニュース・情報収集結果を返す"""
         try:
-            import asyncpg
-            conn = await asyncpg.connect(os.getenv("DATABASE_URL", ""))
-            try:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """SELECT source, title, summary, importance_score, category, created_at
                     FROM intel_items
@@ -474,8 +470,6 @@ class ChatAgent:
                 )
                 total = await conn.fetchval("SELECT COUNT(*) FROM intel_items")
                 high = await conn.fetchval("SELECT COUNT(*) FROM intel_items WHERE importance_score >= 0.7")
-            finally:
-                await conn.close()
             if not rows:
                 text = "直近の情報収集データはありません。"
             else:
