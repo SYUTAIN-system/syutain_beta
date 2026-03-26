@@ -6,7 +6,7 @@ Tier 1（人間承認必須）: SNS投稿, 商品公開, 価格設定, 暗号通
 Tier 2（自動＋通知）: 情報パイプライン, モデル切替, タスクリスケジュール
 Tier 3（完全自動）: ヘルスチェック, ログローテーション
 
-24時間タイムアウト → 自動却下
+72時間タイムアウト → 自動却下
 却下時: 却下理由を推測して代替案を提案
 """
 
@@ -19,6 +19,7 @@ from typing import Optional
 import asyncpg
 import httpx
 from dotenv import load_dotenv
+from tools.db_pool import get_connection
 
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
@@ -156,6 +157,10 @@ class ApprovalManager:
             approval_id = await self._queue_request(
                 request_type, request_data, "auto_approved"
             )
+            if approval_id is None:
+                logger.error(f"Tier 2 承認キュー登録失敗: {request_type}")
+                return {"status": "error", "tier": 2, "request_type": request_type,
+                        "message": "承認キュー登録失敗（DB未接続）"}
             await self._notify_discord(
                 f"🔔 **自動承認 (Tier 2)**: {request_type}\n"
                 f"内容: {json.dumps(request_data, ensure_ascii=False)[:500]}",
@@ -177,6 +182,10 @@ class ApprovalManager:
             approval_id = await self._queue_request(
                 request_type, request_data, "auto_approved"
             )
+            if approval_id is None:
+                logger.error(f"自動承認キュー登録失敗: {request_type}")
+                return {"status": "error", "tier": 1, "request_type": request_type,
+                        "message": "承認キュー登録失敗（DB未接続）"}
             await self._notify_discord(
                 f"🤖 **自動承認**: {request_type}\n"
                 f"理由: 過去の承認パターンと類似 (類似度: {auto_result['similarity']:.2f})\n"
@@ -211,6 +220,10 @@ class ApprovalManager:
         approval_id = await self._queue_request(
             request_type, request_data, "pending"
         )
+        if approval_id is None:
+            logger.error(f"Tier 1 承認キュー登録失敗: {request_type}")
+            return {"status": "error", "tier": 1, "request_type": request_type,
+                    "message": "承認キュー登録失敗（DB未接続）"}
         await self._notify_discord(
             f"🚨 **承認待ち (Tier 1)**: {request_type}\n"
             f"ID: {approval_id}\n"
@@ -687,8 +700,7 @@ class ApprovalManager:
                         confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                     )
             else:
-                conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
-                try:
+                async with get_connection() as conn:
                     await conn.execute(
                         """INSERT INTO agent_reasoning_trace
                            (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -696,8 +708,6 @@ class ApprovalManager:
                         "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
                         confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                     )
-                finally:
-                    await conn.close()
         except Exception:
             pass
 

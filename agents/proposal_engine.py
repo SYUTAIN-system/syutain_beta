@@ -324,6 +324,7 @@ class ProposalEngine:
             "scoring": scoring,
             "total_score": total_score,
             "is_auto_recommendable": is_auto_recommendable,
+            "intel_items_used": len(intel_context.split("\n")) if intel_context and intel_context != "（直近48時間の情報収集データなし）" else 0,
             "status": "proposed",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }

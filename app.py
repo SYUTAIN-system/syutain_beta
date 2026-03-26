@@ -9,6 +9,7 @@ ALPHA上で動作するメインAPIサーバー
 - PostgreSQL + NATS 接続管理
 """
 
+import io
 import os
 import json
 import uuid
@@ -23,7 +24,7 @@ import asyncpg
 import jwt
 from fastapi import FastAPI, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -45,7 +46,9 @@ logging.basicConfig(
 
 # ===== 設定（.envから読み込み、ハードコードしない）=====
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
-APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "syutain-dev-key-change-in-production")
+APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "")
+if not APP_SECRET_KEY:
+    raise RuntimeError("APP_SECRET_KEY が .env に設定されていません。起動を中止します。")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 THIS_NODE = os.getenv("THIS_NODE", "alpha")
@@ -265,6 +268,13 @@ async def lifespan(app: FastAPI):
     """FastAPIライフスパン: 起動時にDB・NATS初期化、終了時にクリーンアップ"""
     logger.info("SYUTAINβ FastAPI 起動開始...")
 
+    # グローバルDB接続プール初期化
+    try:
+        from tools.db_pool import init_pool as _init_db_pool
+        await _init_db_pool(min_size=2, max_size=10)
+    except Exception as e:
+        logger.error(f"DB接続プール初期化エラー: {e}")
+
     # PostgreSQL初期化
     try:
         pg_ok = await init_postgresql()
@@ -429,6 +439,13 @@ async def lifespan(app: FastAPI):
         await _pg_pool.close()
         _pg_pool = None
 
+    # グローバルDB接続プール終了
+    try:
+        from tools.db_pool import close_pool as _close_db_pool
+        await _close_db_pool()
+    except Exception:
+        pass
+
     logger.info("SYUTAINβ FastAPI シャットダウン完了")
 
 
@@ -441,10 +458,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS設定（Next.jsフロントエンド連携）
+# CORS設定（許可オリジンを限定 — Tailscale VPN内のみ）
+_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "https://localhost:8443",
+    "https://100.70.34.67:8443",
+]
+# .envで追加オリジンを設定可能
+_extra = os.getenv("CORS_EXTRA_ORIGINS", "")
+if _extra:
+    _CORS_ORIGINS.extend(o.strip() for o in _extra.split(",") if o.strip())
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -609,6 +636,7 @@ async def get_tasks(
     status: Optional[str] = None,
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
+    user: dict = Depends(get_current_user),
 ):
     """タスク一覧を取得"""
     try:
@@ -678,6 +706,230 @@ async def get_task_detail(task_id: str, user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"タスク詳細取得エラー: {e}")
         raise HTTPException(status_code=500, detail="タスク詳細取得エラー")
+
+
+# ===== 成果物 =====
+
+# 商品化可能なタスクタイプ（内部分析・調査・SNS投稿・モニタリングは除外）
+PUBLISHABLE_TASK_TYPES = ["content", "drafting", "review", "coding", "analysis", "note_article", "booth_product", "x_thread"]
+
+
+@app.get("/api/artifacts")
+async def get_artifacts(
+    type: Optional[str] = None,
+    quality_min: float = Query(default=0.0, ge=0.0, le=1.0),
+    sort: str = Query(default="newest"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, le=100),
+    search: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """商品化可能な成果物の一覧（内部処理結果は除外）"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            # フィルタ構築
+            types_filter = [type] if type and type in PUBLISHABLE_TASK_TYPES else PUBLISHABLE_TASK_TYPES
+            conditions = ["type = ANY($1::text[])", "output_data IS NOT NULL", "status IN ('completed','success')"]
+            params: list = [types_filter]
+            idx = 2
+
+            if quality_min > 0:
+                conditions.append(f"quality_score >= ${idx}")
+                params.append(quality_min)
+                idx += 1
+
+            if search:
+                conditions.append(f"output_data::text ILIKE '%' || ${idx} || '%'")
+                params.append(search)
+                idx += 1
+
+            where = " AND ".join(conditions)
+            order = {
+                "newest": "created_at DESC",
+                "oldest": "created_at ASC",
+                "quality_desc": "quality_score DESC NULLS LAST",
+                "quality_asc": "quality_score ASC NULLS LAST",
+            }.get(sort, "created_at DESC")
+
+            # 総件数
+            total = await conn.fetchval(f"SELECT COUNT(*) FROM tasks WHERE {where}", *params)
+
+            # データ取得
+            offset = (page - 1) * per_page
+            rows = await conn.fetch(
+                f"""SELECT id, type, quality_score, model_used, assigned_node, cost_jpy,
+                           output_data, created_at
+                    FROM tasks WHERE {where}
+                    ORDER BY {order}
+                    LIMIT ${idx} OFFSET ${idx + 1}""",
+                *params, per_page, offset,
+            )
+
+            items = []
+            for r in rows:
+                od = r["output_data"]
+                text = ""
+                title = ""
+                if isinstance(od, dict):
+                    text = od.get("text", "") or od.get("content", "") or ""
+                    title = od.get("title", "") or text[:50]
+                elif isinstance(od, str):
+                    text = od
+                    title = text[:50]
+                else:
+                    text = str(od) if od else ""
+                    title = text[:50]
+
+                items.append({
+                    "id": r["id"],
+                    "type": r["type"],
+                    "title": title.strip().split("\n")[0][:80] if title else r["type"],
+                    "content_preview": text[:200] if text else "",
+                    "quality_score": float(r["quality_score"]) if r["quality_score"] else None,
+                    "model": r["model_used"],
+                    "node": r["assigned_node"],
+                    "cost_jpy": float(r["cost_jpy"]) if r["cost_jpy"] else 0,
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    "word_count": len(text),
+                })
+
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page if total else 0,
+                "publishable_types": PUBLISHABLE_TASK_TYPES,
+            }
+    except Exception as e:
+        logger.error(f"成果物一覧エラー: {e}")
+        raise HTTPException(status_code=500, detail="成果物一覧取得エラー")
+
+
+@app.get("/api/artifacts/stats")
+async def get_artifact_stats(user: dict = Depends(get_current_user)):
+    """成果物の統計サマリー"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT
+                    COUNT(*) as total,
+                    ROUND(AVG(quality_score)::numeric, 2) as avg_quality,
+                    ROUND(SUM(cost_jpy)::numeric, 2) as total_cost,
+                    COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) as today_count,
+                    COUNT(*) FILTER (WHERE quality_score >= 0.65) as high_quality,
+                    COUNT(*) FILTER (WHERE quality_score >= 0.50 AND quality_score < 0.65) as medium_quality,
+                    COUNT(*) FILTER (WHERE quality_score < 0.50 OR quality_score IS NULL) as low_quality
+                FROM tasks
+                WHERE type = ANY($1::text[])
+                AND output_data IS NOT NULL
+                AND status IN ('completed','success')""",
+                PUBLISHABLE_TASK_TYPES,
+            )
+            # タイプ別件数
+            type_rows = await conn.fetch(
+                """SELECT type, COUNT(*) as count
+                FROM tasks
+                WHERE type = ANY($1::text[]) AND output_data IS NOT NULL AND status IN ('completed','success')
+                GROUP BY type ORDER BY count DESC""",
+                PUBLISHABLE_TASK_TYPES,
+            )
+            return {
+                "total": row["total"] or 0,
+                "avg_quality": float(row["avg_quality"]) if row["avg_quality"] else 0,
+                "total_cost_jpy": float(row["total_cost"]) if row["total_cost"] else 0,
+                "today_count": row["today_count"] or 0,
+                "by_quality": {
+                    "high": row["high_quality"] or 0,
+                    "medium": row["medium_quality"] or 0,
+                    "low": row["low_quality"] or 0,
+                },
+                "by_type": {r["type"]: r["count"] for r in type_rows},
+                "publishable_types": PUBLISHABLE_TASK_TYPES,
+            }
+    except Exception as e:
+        logger.error(f"成果物統計エラー: {e}")
+        raise HTTPException(status_code=500, detail="成果物統計エラー")
+
+
+# ===== 成果物ダウンロード =====
+
+@app.get("/api/artifacts/{task_id}/download")
+async def download_artifact(task_id: str, user: dict = Depends(get_current_user)):
+    """成果物をファイルとしてダウンロード"""
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, type, output_data, created_at FROM tasks WHERE id = $1",
+                task_id,
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="Task not found")
+
+            task_type = row["type"] or "task"
+            task_id_short = task_id[:8]
+            created_at = row["created_at"]
+            date_str = created_at.strftime("%Y%m%d") if created_at else "unknown"
+            filename = f"{task_type}_{task_id_short}_{date_str}.md"
+
+            output_data = row["output_data"]
+
+            # output_data が文字列の場合はJSONパースを試みる
+            if isinstance(output_data, str):
+                try:
+                    output_data = json.loads(output_data)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # file_path キーがあればそのファイルを返す
+            if isinstance(output_data, dict) and output_data.get("file_path"):
+                file_path = output_data["file_path"]
+                if os.path.isfile(file_path):
+                    return FileResponse(
+                        path=file_path,
+                        filename=os.path.basename(file_path),
+                        media_type="application/octet-stream",
+                    )
+
+            # テキスト/JSONの場合はMarkdownを動的生成
+            md_lines = [
+                f"# {task_type} - {task_id_short}",
+                f"",
+                f"- **Task ID**: {task_id}",
+                f"- **Type**: {task_type}",
+                f"- **Created**: {created_at.isoformat() if created_at else 'N/A'}",
+                f"",
+                f"## Output",
+                f"",
+            ]
+            if isinstance(output_data, dict):
+                md_lines.append("```json")
+                md_lines.append(json.dumps(output_data, ensure_ascii=False, indent=2))
+                md_lines.append("```")
+            elif output_data:
+                md_lines.append(str(output_data))
+            else:
+                md_lines.append("(出力データなし)")
+
+            content = "\n".join(md_lines)
+            buffer = io.BytesIO(content.encode("utf-8"))
+
+            return StreamingResponse(
+                buffer,
+                media_type="text/markdown; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                },
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"成果物ダウンロードエラー: {e}")
+        raise HTTPException(status_code=500, detail="成果物ダウンロードエラー")
 
 
 @app.get("/api/goals/{goal_id}")
@@ -813,7 +1065,7 @@ async def get_pending_approvals_public(
 
 @app.post("/api/pending-approvals/{approval_id}/respond")
 async def respond_pending_approval(approval_id: int, body: ApprovalResponse, user: dict = Depends(get_current_user)):
-    """承認リクエストに応答（認証不要 — Web UI用）"""
+    """承認リクエストに応答（認証必須 — Web UI用）"""
     try:
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
@@ -931,22 +1183,29 @@ async def respond_pending_approval(approval_id: int, body: ApprovalResponse, use
                 rd_pm = row["request_data"] if row else {}
                 if isinstance(rd_pm, str):
                     rd_pm = json.loads(rd_pm)
-                content_preview = (rd_pm.get("content", "") or rd_pm.get("title", ""))[:100]
-                action_str = "承認" if body.approved else "却下"
-                reason_str = f"理由: {body.reason}" if body.reason else ""
-                persona_text = f"DAICHIは{req_type or 'unknown'}の{action_str}を行った。内容: {content_preview}。{reason_str}"
-                new_id = await conn_pm.fetchval(
-                    """INSERT INTO persona_memory (category, context, content, reasoning, emotion, source, session_id)
-                    VALUES ('approval_pattern', $1, $2, $3, '', 'approval_manager', 'system')
-                    RETURNING id""",
-                    f"{req_type or 'unknown'}の{action_str}",
-                    persona_text,
-                    body.reason or "",
-                )
-                if new_id:
-                    from tools.embedding_tools import embed_and_store_persona
-                    import asyncio
-                    asyncio.create_task(embed_and_store_persona(new_id, persona_text))
+                content_preview = (
+                    rd_pm.get("content", "") or rd_pm.get("title", "")
+                    or rd_pm.get("description", "") or json.dumps(rd_pm, ensure_ascii=False)[:100]
+                )[:100]
+                if not content_preview or content_preview.strip() in ("", "{}"):
+                    # persona_memoryに有意義な情報がないのでスキップ
+                    logger.debug(f"persona_memory: 空content、記録スキップ ({req_type})")
+                else:
+                    action_str = "承認" if body.approved else "却下"
+                    reason_str = f" 理由: {body.reason}" if body.reason else ""
+                    persona_text = f"DAICHIは{req_type or 'unknown'}の{action_str}を行った。内容: {content_preview}。{reason_str}"
+                    new_id = await conn_pm.fetchval(
+                        """INSERT INTO persona_memory (category, context, content, reasoning, emotion, source, session_id)
+                        VALUES ('approval_pattern', $1, $2, $3, '', 'approval_manager', 'system')
+                        RETURNING id""",
+                        f"{req_type or 'unknown'}の{action_str}",
+                        persona_text,
+                        body.reason or "",
+                    )
+                    if new_id:
+                        from tools.embedding_tools import embed_and_store_persona
+                        import asyncio
+                        asyncio.create_task(embed_and_store_persona(new_id, persona_text))
         except Exception as e:
             logger.warning(f"persona_memory記録エラー: {e}")
 
@@ -1113,7 +1372,7 @@ async def get_chat_history(
     limit: int = Query(default=50, le=200),
     user: dict = Depends(get_current_user),
 ):
-    """チャット履歴をPostgreSQLから取得（認証不要 — フロント初期化用）"""
+    """チャット履歴をPostgreSQLから取得（認証必須 — フロント初期化用）"""
     try:
         pool = await get_pg_pool()
         rows = await pool.fetch(
@@ -1144,7 +1403,7 @@ async def get_chat_history(
 
 @app.post("/api/chat/send")
 async def send_chat_message(req: ChatSendRequest, user: dict = Depends(get_current_user)):
-    """チャットメッセージを送信（認証不要 — WebSocketフォールバック用）"""
+    """チャットメッセージを送信（認証必須 — WebSocketフォールバック用）"""
     session_id = req.session_id or "default"
 
     try:
@@ -1209,7 +1468,7 @@ async def _wait_charlie_shutdown(proc):
 
 @app.get("/api/agent-ops/status")
 async def get_agent_ops_status(user: dict = Depends(get_current_user)):
-    """Agent Ops画面用ステータス（認証不要）"""
+    """Agent Ops画面用ステータス（認証必須）"""
     try:
         from tools.budget_guard import get_budget_guard
         bg = get_budget_guard()
@@ -1413,7 +1672,7 @@ async def get_model_usage_alias(user: dict = Depends(get_current_user)):
 
 @app.get("/api/budget/status")
 async def get_budget_status_api(user: dict = Depends(get_current_user)):
-    """予算状態を取得（認証不要）"""
+    """予算状態を取得（認証必須）"""
     try:
         from tools.budget_guard import get_budget_guard
         bg = get_budget_guard()
@@ -1459,7 +1718,7 @@ async def get_budget_status_api(user: dict = Depends(get_current_user)):
 
 @app.get("/api/revenue")
 async def get_revenue(user: dict = Depends(get_current_user)):
-    """収益データを取得（認証不要）"""
+    """収益データを取得（認証必須）"""
     data = {"today_revenue": 0, "monthly_revenue": 0, "entries": []}
     try:
         pool = await get_pg_pool()
@@ -1800,7 +2059,7 @@ async def get_edit_stats_api(
 
 @app.get("/api/intel")
 async def get_intel(user: dict = Depends(get_current_user)):
-    """収集した情報を取得（認証不要）"""
+    """収集した情報を取得（認証必須）"""
     items = []
     try:
         pool = await get_pg_pool()

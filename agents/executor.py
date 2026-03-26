@@ -129,7 +129,7 @@ class Executor:
             if task_type in ["drafting", "content", "analysis", "coding", "research"]:
                 result = await self._execute_llm_task(task, goal_packet)
             elif task_type == "browser_action":
-                result = await self._execute_browser_task(task)
+                result = await self._execute_browser_task(task, goal_packet)
             elif task_type == "computer_use":
                 result = await self._execute_computer_use_task(task)
             elif task_type == "data_extraction":
@@ -253,6 +253,7 @@ class Executor:
                     "text": llm_result.get("text", ""),
                     "model_used": llm_result.get("model_used", ""),
                     "tokens": prompt_tokens + completion_tokens,
+                    "model_selection": model_sel,  # verifier品質ログ用
                 },
                 artifacts=[{"type": "text", "content": llm_result.get("text", "")}],
                 cost_jpy=cost,
@@ -261,7 +262,7 @@ class Executor:
         except Exception as e:
             raise
 
-    async def _execute_browser_task(self, task: dict) -> ExecutionResult:
+    async def _execute_browser_task(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
         """ブラウザタスクの実行（BRAVO 4層構成: V25）
 
         URLが指定されている場合はBRAVOにブラウザ操作をディスパッチ。
@@ -291,7 +292,7 @@ class Executor:
                 **task,
                 "task_type": "research",
                 "description": f"以下のブラウザ操作タスクをWeb検索なしで実行してください: {description}",
-            })
+            }, goal_packet or {"goal_id": "", "raw_goal": ""})
 
         # NATSでBRAVOにブラウザ操作をディスパッチ
         try:
@@ -323,14 +324,14 @@ class Executor:
                     **task,
                     "task_type": "research",
                     "description": f"以下のブラウザ操作タスクを調査で代替してください（URL: {url}）: {description}",
-                })
+                }, goal_packet or {"goal_id": "", "raw_goal": ""})
         except Exception as e:
             logger.warning(f"NATS通信失敗: {e}。LLM代替にフォールバック")
             return await self._execute_llm_task({
                 **task,
                 "task_type": "research",
                 "description": f"以下のブラウザ操作タスクを調査で代替してください: {description}",
-            })
+            }, goal_packet or {"goal_id": "", "raw_goal": ""})
 
     async def _execute_computer_use_task(self, task: dict) -> ExecutionResult:
         """Computer Useタスクの実行（V25: GPT-5.4）"""
@@ -414,17 +415,23 @@ class Executor:
     async def _request_approval(self, task: dict) -> dict:
         """ApprovalManager経由で承認を取得（CLAUDE.md ルール11）"""
         try:
-            nats_client = await get_nats_client()
-            response = await nats_client.request(
-                "approval.request",
-                {
+            from agents.approval_manager import ApprovalManager
+            am = ApprovalManager()
+            await am.initialize()
+            response = await am.request_approval(
+                request_type=task.get("task_type", "unknown"),
+                request_data={
                     "task_id": task.get("task_id"),
-                    "task_type": task.get("task_type"),
-                    "description": task.get("description"),
+                    "description": task.get("description", ""),
                 },
-                timeout=5.0,
             )
-            return response or {"approved": False}
+            await am.close()
+            # ApprovalManagerのレスポンス: status="approved"(Tier2/3) or "pending"(Tier1)
+            if response.get("status") in ("approved", "auto_approved"):
+                return {"approved": True, "approval_id": response.get("approval_id")}
+            else:
+                return {"approved": False, "approval_id": response.get("approval_id"),
+                        "status": response.get("status", "pending")}
         except Exception as e:
             logger.warning(f"承認リクエスト失敗: {e}")
             return {"approved": False, "error": str(e)}

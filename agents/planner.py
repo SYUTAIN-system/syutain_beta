@@ -283,8 +283,11 @@ class Planner:
             task_id = f"{goal_id}-t{i+1:03d}-{uuid.uuid4().hex[:6]}"
             task_ids.append(task_id)
 
-            # ノード割り当て最適化
+            # ノード割り当て最適化（有効なノード名のみ許可）
+            valid_nodes = {"alpha", "bravo", "charlie", "delta", "auto"}
             assigned = td.get("assigned_node", "auto")
+            if assigned not in valid_nodes:
+                assigned = "auto"
             if assigned == "auto":
                 assigned = self._assign_node(td.get("task_type", ""), capability)
 
@@ -300,13 +303,15 @@ class Planner:
                 needs_computer_use=needs_cu,
             )
 
-            # 依存関係の解決
+            # 依存関係の解決（前方参照・自己参照・範囲外を安全に無視）
             depends_raw = td.get("depends_on", [])
             depends = []
             for dep in depends_raw:
-                if isinstance(dep, int) and dep < len(task_ids):
-                    depends.append(task_ids[dep])
-                elif isinstance(dep, str) and dep in task_ids:
+                if isinstance(dep, int) and 0 <= dep < len(task_ids):
+                    dep_id = task_ids[dep]
+                    if dep_id != task_id:  # 自己参照を除外
+                        depends.append(dep_id)
+                elif isinstance(dep, str) and dep in task_ids and dep != task_id:
                     depends.append(dep)
 
             node = TaskNode(
