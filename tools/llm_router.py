@@ -24,12 +24,20 @@ from tools.budget_guard import get_budget_guard
 from tools.discord_notify import notify_discord
 
 # モデル別コスト概算（1Kトークンあたり、円）
+# コストレート: model_registry.py の $/1M を ¥/1K に変換 (×150/1000)
 _COST_RATES_JPY_PER_1K = {
-    "gpt-5.4":            {"input": 0.375, "output": 2.25},
-    "claude-sonnet-4-6":  {"input": 0.45,  "output": 2.25},
-    "claude-opus-4-6":    {"input": 0.45,  "output": 2.25},
-    "deepseek-v3.2":      {"input": 0.042, "output": 0.063},
-    "_default":           {"input": 0.15,  "output": 0.15},
+    "gpt-5.4":              {"input": 0.375,  "output": 2.250},   # $2.50/$15.00 per 1M
+    "gemini-3.1-pro-preview": {"input": 0.300, "output": 1.800},  # $2.00/$12.00 per 1M
+    "claude-opus-4-6":      {"input": 0.750,  "output": 3.750},   # $5.00/$25.00 per 1M
+    "claude-sonnet-4-6":    {"input": 0.450,  "output": 2.250},   # $3.00/$15.00 per 1M
+    "deepseek-v3.2":        {"input": 0.042,  "output": 0.063},   # $0.28/$0.42 per 1M
+    "gemini-2.5-pro":       {"input": 0.1875, "output": 1.500},   # $1.25/$10.00 per 1M
+    "gpt-5-mini":           {"input": 0.0375, "output": 0.300},   # $0.25/$2.00 per 1M
+    "gemini-2.5-flash":     {"input": 0.0225, "output": 0.090},   # $0.15/$0.60 per 1M
+    "claude-haiku-4-5":     {"input": 0.150,  "output": 0.750},   # $1.00/$5.00 per 1M
+    "gpt-5-nano":           {"input": 0.0075, "output": 0.060},   # $0.05/$0.40 per 1M
+    "gemini-2.5-flash-lite": {"input": 0.01125, "output": 0.045}, # $0.075/$0.30 per 1M
+    "_default":             {"input": 0.15,   "output": 0.15},
 }
 
 
@@ -66,10 +74,8 @@ async def refresh_model_quality_cache():
     """model_quality_logから学習結果をキャッシュに読み込む（scheduler.pyから定期呼出）"""
     global _model_quality_cache
     try:
-        import asyncpg
-        database_url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        conn = await asyncpg.connect(database_url)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT task_type, model_used, tier,
                     AVG(quality_score) as avg_quality, COUNT(*) as cnt
@@ -91,8 +97,6 @@ async def refresh_model_quality_cache():
                     }
             _model_quality_cache = cache
             logger.info(f"モデル品質キャッシュ更新: {len(cache)}タスクタイプ")
-        finally:
-            await conn.close()
     except Exception as e:
         logger.warning(f"モデル品質キャッシュ更新失敗: {e}")
 
@@ -134,14 +138,15 @@ NEMOTRON_JP_MODEL = "nemotron-jp"  # ollama内のモデル名
 # Nemotron優先タスク（日本語コンテンツ生成/チャット/Tool Calling）
 _NEMOTRON_PRIORITY_TASKS = {
     "content", "sns_draft", "drafting", "note_article", "note_draft",
-    "product_desc", "booth_description", "chat", "persona_extraction",
+    "product_desc", "booth_description", "persona_extraction",
     "quality_scoring", "tool_calling", "intel_summary",
 }
 
 # Nemotron + /think 推奨タスク（品質検証・推論）
+# strategy/proposal_generation/analysisは9Bの/thinkでは重すぎる
+# analysisは_NEMOTRON_PRIORITY_TASKS経由で/thinkなしNemotronへ
 _NEMOTRON_THINK_TASKS = {
-    "quality_verification", "content_refinement", "analysis",
-    "proposal_generation", "strategy",
+    "quality_verification", "content_refinement",
 }
 
 
@@ -171,7 +176,7 @@ _DELTA_TASKS = {
 _LOCAL_OK_TASKS = {
     "drafting",           # ローカル0.76 > API 0.71（実データ）
     "variation_gen",      # 多様性生成、品質より量
-    "chat",               # 人格はsystem_promptで担保
+    # chat_light は _DEEPSEEK_FINAL_TASKS で処理（ローカルではなくDeepSeek V3.2）
     "sns_draft",          # 短文、ローカルで十分
     "quality_scoring",    # スコアリング用（低品質でOK）
     "persona_extraction", # キーワード抽出系
@@ -200,12 +205,14 @@ _HAIKU_TASKS = {
     "quality_verification", "content_refinement",
     "proposal_generation", "persona_deep_analysis",
     "strategy", "competitive_analysis",
+    "chat",                 # Discord Bot対話（事実回答・状態確認・相談）
 }
 
 # DeepSeek V3.2（最終品質+コスパ）
 _DEEPSEEK_FINAL_TASKS = {
     "content_final", "note_article_final",
     "booth_description_final", "complex_analysis",
+    "chat_light",           # Discord Bot軽度対話（挨拶・雑談・短文）
 }
 
 
@@ -251,14 +258,14 @@ def choose_best_model_v6(
                 "note": "Tool Search必須"}
 
     if intelligence_required >= 50:
-        return {"provider": "google", "model": "gemini-2.5-pro", "tier": "S", "via": "direct",
+        return {"provider": "google", "model": "gemini-2.5-pro", "tier": "A", "via": "openrouter",
                 "note": f"知能指数{intelligence_required}≥50"}
 
     if final_publish and quality in ["high", "premium"]:
         if anthropic_available and task_type in ["strategy", "pricing", "btob"]:
             return {"provider": "anthropic", "model": "claude-sonnet-4-6", "tier": "S", "via": "direct",
                     "note": "最終公開+戦略タスク"}
-        return {"provider": "google", "model": "gemini-2.5-pro", "tier": "S", "via": "direct",
+        return {"provider": "google", "model": "gemini-2.5-pro", "tier": "A", "via": "openrouter",
                 "note": "最終公開品質"}
 
     # === quality="low" → 強制ローカル ===
@@ -289,10 +296,16 @@ def choose_best_model_v6(
 
     if local_available and budget_sensitive and quality == "medium":
         cached = _model_quality_cache.get(task_type)
-        if cached and cached.get("avg_quality", 0) >= 0.6 and cached.get("tier") == "L":
-            node = _pick_local_node()
-            return {"provider": "local", "model": cached["model"], "tier": "L", "node": node,
-                    "note": f"学習ループ推奨(品質{cached['avg_quality']:.2f})"}
+        if cached and cached.get("avg_quality", 0) >= 0.6:
+            cached_model = cached["model"]
+            cached_tier = cached.get("tier", "unknown")
+            # ローカルモデルの場合のみ学習ループで推奨
+            if cached_tier in ("L", "unknown") and cached_model in ("qwen3.5-9b", "qwen3.5-4b", "nemotron-jp"):
+                node = _pick_local_node()
+                if cached_model == "qwen3.5-4b":
+                    node = _pick_local_node(prefer_delta=True)
+                return {"provider": "local", "model": cached_model, "tier": "L", "node": node,
+                        "note": f"学習ループ推奨(品質{cached['avg_quality']:.2f})"}
 
     # === Tier L: ローカルで十分なタスク ===
 
@@ -320,7 +333,7 @@ def choose_best_model_v6(
     # Claude Haiku推奨タスク（高い推論力が必要）
     if task_type in _HAIKU_TASKS:
         if anthropic_available:
-            return {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "tier": "A", "via": "direct",
+            return {"provider": "anthropic", "model": "claude-haiku-4-5", "tier": "A", "via": "direct",
                     "note": f"高推論力({task_type})→Haiku"}
         return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
                 "note": f"Haiku不可→Gemini Flash"}
@@ -334,7 +347,7 @@ def choose_best_model_v6(
 
     if quality == "high":
         if anthropic_available:
-            return {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "tier": "A", "via": "direct",
+            return {"provider": "anthropic", "model": "claude-haiku-4-5", "tier": "A", "via": "direct",
                     "note": "quality=high→Haiku"}
         return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
                 "note": "quality=high→Gemini Flash"}
@@ -399,7 +412,13 @@ async def call_llm(
 
     try:
         if provider == "local":
-            result = await _call_local_llm(prompt, system_prompt, model, node)
+            use_think = model_selection.get("think", False) if model_selection else False
+            result = await _call_local_llm(
+                prompt, system_prompt, model, node, think=use_think,
+                temperature=kwargs.get("temperature"),
+                repeat_penalty=kwargs.get("repeat_penalty"),
+                seed=kwargs.get("seed"),
+            )
         elif provider == "openai" and via == "direct":
             result = await _call_openai(prompt, system_prompt, model)
         elif provider == "anthropic":
@@ -432,9 +451,8 @@ async def call_llm(
 
         # agent_reasoning_trace: モデル選定根拠
         try:
-            import asyncpg as _apg
-            _trace_conn = await _apg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as _trace_conn:
                 await _trace_conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, action, reasoning, confidence, context)
@@ -445,8 +463,6 @@ async def call_llm(
                                 "nemotron_enabled": NEMOTRON_JP_ENABLED},
                                ensure_ascii=False),
                 )
-            finally:
-                await _trace_conn.close()
         except Exception:
             pass
 
@@ -500,16 +516,18 @@ async def call_llm(
         return result
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-        _log_llm_call(model, tier, latency_ms, False, str(e))
-        log_usage("llm_call", model, 0, 0, False, str(e))
-        logger.error(f"LLM呼び出し失敗 ({model}): {e}")
+        error_msg = str(e) or f"{type(e).__name__}(no message)"
+        _log_llm_call(model, tier, latency_ms, False, error_msg)
+        log_usage("llm_call", model, 0, 0, False, error_msg)
+        logger.error(f"LLM呼び出し失敗 ({model}@{node or provider}): {error_msg}")
 
         # イベントログ: LLMエラー
         try:
             from tools.event_logger import log_event
             await log_event("llm.error", "llm", {
-                "model": model, "provider": provider, "error": str(e)[:200],
-            }, severity="error")
+                "model": model, "provider": provider, "node": node,
+                "error": error_msg[:200], "exception_type": type(e).__name__,
+            }, severity="error", source_node=node if provider == "local" else "alpha")
         except Exception:
             pass
 
@@ -538,8 +556,9 @@ async def call_llm(
         return {"text": "", "error": str(e), "model_used": model}
 
 
-async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str) -> dict:
-    """Ollama経由でローカルLLM呼び出し"""
+async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str, think: bool = False,
+                          temperature: float = None, repeat_penalty: float = None, seed: int = None) -> dict:
+    """Ollama経由でローカルLLM呼び出し。think=TrueでNemotron推論モード有効"""
     url_map = {
         "bravo": os.getenv("BRAVO_OLLAMA_URL", "http://100.75.146.9:11434"),
         "charlie": os.getenv("CHARLIE_OLLAMA_URL", "http://100.70.161.106:11434"),
@@ -562,31 +581,43 @@ async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    # Nemotron推論制御: /think or /no_think
-    think_mode = False
-    if ollama_model == NEMOTRON_JP_MODEL:
-        think_mode = True  # Nemotronはデフォルト推論ON
+    # 推論制御: Nemotron JPはthink: true対応（Ollama 0.18.2+）
+    # think=Trueの場合、thinkingフィールドに推論トレース、contentに最終回答が分離される
+    think_mode = think
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # Nemotron 9Bは長文で120秒超えうる→read_timeoutを300秒に延長
+    timeout_config = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0)
+    async with httpx.AsyncClient(timeout=timeout_config) as client:
         try:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": ollama_model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": think_mode,
-                },
-            )
+            payload = {
+                "model": ollama_model,
+                "messages": messages,
+                "stream": False,
+                "think": think_mode,
+            }
+            # Ollamaオプション（temperature, repeat_penalty等）
+            options = {}
+            if temperature is not None:
+                options["temperature"] = temperature
+            if repeat_penalty is not None:
+                options["repeat_penalty"] = repeat_penalty
+            if seed is not None:
+                options["seed"] = seed
+            if options:
+                payload["options"] = options
+
+            resp = await client.post(f"{base_url}/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
             msg = data.get("message", {})
             text = msg.get("content", "")
-            # 思考モードが有効だった場合のフォールバック
-            if not text and msg.get("thinking"):
-                text = msg["thinking"]
+            thinking = msg.get("thinking", "")
+            # think=true時: thinkingに推論トレース、contentに最終回答
+            if not text and thinking:
+                text = thinking  # フォールバック: contentが空ならthinkingを使用
             return {
                 "text": text,
+                "thinking": thinking,
                 "node": node,
                 "prompt_tokens": data.get("prompt_eval_count", 0),
                 "completion_tokens": data.get("eval_count", 0),
