@@ -1,7 +1,9 @@
 """
 SYUTAINβ V25 Discord Webhook通知
+severity-based dedup対応
 """
 import os
+import time
 import logging
 import httpx
 from dotenv import load_dotenv
@@ -11,6 +13,37 @@ logger = logging.getLogger("syutain.discord")
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 BRAIN_WEBHOOK_URL = os.getenv("DISCORD_BRAIN_WEBHOOK_URL", "")
+
+# ===== 重複排除 =====
+DEDUP_INTERVAL = 300  # 5分
+_recent_notifications: dict[str, float] = {}  # error_type -> last_sent_timestamp
+
+
+def _should_send(error_type: str, severity: str) -> bool:
+    """severity-based dedup判定。CRITICALは常に送信、ERRORは5分dedup"""
+    if severity == "critical":
+        return True
+    now = time.time()
+    last = _recent_notifications.get(error_type, 0.0)
+    if now - last < DEDUP_INTERVAL:
+        return False
+    _recent_notifications[error_type] = now
+    return True
+
+
+async def notify_error(error_type: str, message: str, severity: str = "error") -> bool:
+    """severity-based dedup付きエラー通知。
+
+    Args:
+        error_type: エラー種別キー（dedup用）
+        message: 通知本文
+        severity: "error" or "critical"
+    """
+    if not _should_send(error_type, severity):
+        logger.debug(f"dedup skip: {error_type}")
+        return False
+    prefix = "\U0001f534" if severity == "critical" else "\u26a0\ufe0f"
+    return await notify_discord(f"{prefix} [{severity.upper()}] {message}")
 
 
 async def notify_discord(content: str, username: str = "SYUTAINβ") -> bool:

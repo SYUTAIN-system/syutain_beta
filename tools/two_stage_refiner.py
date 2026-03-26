@@ -136,15 +136,13 @@ async def _parallel_draft(prompt: str, system_prompt: str) -> list:
     """BRAVO/CHARLIE並列で荒原稿生成（V25: 最大3台）"""
     from tools.node_manager import get_node_manager
 
-    # ノードごとに適切なモデルを動的選定
-    bravo_sel = choose_best_model_v6(task_type="drafting", local_available=True)
-    bravo_sel["node"] = "bravo"
-    charlie_sel = choose_best_model_v6(task_type="drafting", local_available=True)
-    charlie_sel["node"] = "charlie"
+    # ルータに任せてノード+モデルの整合性を保つ（2並列で別ノードが選ばれることを期待）
+    sel_1 = choose_best_model_v6(task_type="drafting", local_available=True)
+    sel_2 = choose_best_model_v6(task_type="drafting", local_available=True)
 
     tasks = [
-        call_llm(prompt, system_prompt, model_selection=bravo_sel),
-        call_llm(prompt, system_prompt, model_selection=charlie_sel),
+        call_llm(prompt, system_prompt, model_selection=sel_1),
+        call_llm(prompt, system_prompt, model_selection=sel_2),
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
