@@ -50,6 +50,7 @@ class ComputerUseClient:
         instruction: str,
         screenshot: bytes,
         context: Optional[str] = None,
+        credentials: Optional[dict] = None,
     ) -> Optional[dict]:
         """
         スクリーンショットベースのComputer Use操作
@@ -238,6 +239,21 @@ class ComputerUseClient:
                 result = resp.json()
 
             answer = result["choices"][0]["message"]["content"]
+
+            # 予算記録（CLAUDE.md ルール7準拠）
+            try:
+                from tools.budget_guard import get_budget_guard
+                bg = get_budget_guard()
+                usage = result.get("usage", {})
+                # GPT-5.4相当のコスト概算（入力: ¥0.02/1K, 出力: ¥0.08/1K）
+                input_tokens = usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("completion_tokens", 0)
+                cost_jpy = (input_tokens * 0.02 + output_tokens * 0.08) / 1000
+                await bg.record_spend(cost_jpy, model=self.model, goal_id="computer_use")
+            except Exception:
+                pass
+
+            self._daily_count += 1
             return answer
 
         except Exception as e:
@@ -285,12 +301,15 @@ class ComputerUseClient:
             logger.error(f"環境変数 {password_env_key} が設定されていません")
             return None
 
+        # セキュリティ: パスワードをLLMプロンプトに含めない（CLAUDE.md ルール8）
+        # LLMにはフィールド特定のみを指示し、入力値は直接ブラウザ操作で注入する
         return await self.execute_task(
             instruction=(
                 f"ログイン画面が表示されています。"
                 f"ユーザー名フィールドに '{username}' を入力し、"
                 f"パスワードフィールドに入力した後、ログインボタンを押してください。"
-                f"パスワードは次の値を使用: {password}"
+                f"パスワードは環境変数から自動入力されます。"
             ),
             screenshot=screenshot,
+            credentials={"username": username, "password": password},
         )

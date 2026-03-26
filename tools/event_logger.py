@@ -134,7 +134,11 @@ async def _notify_important_event(event_type: str, category: str, payload: dict,
         msg = f"{emoji} {node_tag}{event_type}: {str(detail)[:80]}"
 
     try:
-        from tools.discord_notify import notify_discord
-        await notify_discord(msg)
+        if severity in ("error", "critical"):
+            from tools.discord_notify import notify_error
+            await notify_error(event_type, msg, severity=severity)
+        else:
+            from tools.discord_notify import notify_discord
+            await notify_discord(msg)
     except Exception:
         pass

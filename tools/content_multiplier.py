@@ -16,7 +16,6 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -71,10 +70,8 @@ async def multiply_content(
     # intel_itemsから直近トレンドを取得（Q8/Q9修正: SNS投稿に市場動向を反映）
     intel_context = ""
     try:
-        import asyncpg
-        DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        _conn_cm = await asyncpg.connect(DATABASE_URL)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as _conn_cm:
             intel_rows = await _conn_cm.fetch(
                 """SELECT source, title, summary FROM intel_items
                 WHERE importance_score >= 0.5
@@ -85,18 +82,14 @@ async def multiply_content(
                 intel_context = "\n\n【直近の市場動向（投稿に活かせる素材）】\n"
                 for r in intel_rows:
                     intel_context += f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:60]}\n"
-        finally:
-            await _conn_cm.close()
     except Exception as e:
         logger.warning(f"content_multiplier intel取得失敗: {e}")
 
     # persona_memoryからDAICHIの文体・価値観を取得（接続#18修正）
     persona_hint = ""
     try:
-        import asyncpg as _apg_pm
-        _DB_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        _conn_pm = await _apg_pm.connect(_DB_URL)
-        try:
+        from tools.db_pool import get_connection as _get_conn_pm
+        async with _get_conn_pm() as _conn_pm:
             pm_rows = await _conn_pm.fetch(
                 """SELECT content FROM persona_memory
                 WHERE category IN ('value', 'preference', 'writing_style', 'approval_pattern')
@@ -106,10 +99,17 @@ async def multiply_content(
                 persona_hint = "\n\n【島原大知の人格・判断傾向】\n"
                 for r in pm_rows:
                     persona_hint += f"- {(r['content'] or '')[:100]}\n"
-        finally:
-            await _conn_pm.close()
     except Exception as e:
         logger.warning(f"content_multiplier persona取得失敗: {e}")
+
+    # 事実誤認防止ルール（全プラットフォーム共通）
+    factual_rules = (
+        "\n【絶対禁止: 事実誤認】\n"
+        "- 楽曲制作・音楽制作を仕事として語るな。島原大知は音楽の仕事をしていない。\n"
+        "- SunoAIでの作詞は完全に個人の趣味。仕事・案件・クライアントとして語るな。\n"
+        "- 島原大知の本業: 映像制作（VFX/動画編集/カラーグレーディング/撮影/ドローン）、VTuber業界支援、事業運営。\n"
+    )
+    anti_ai += factual_rules
 
     model_sel = choose_best_model_v6(
         task_type="content", quality="medium", budget_sensitive=True, needs_japanese=True
@@ -247,8 +247,8 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
 
     if submit_to_approval:
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # Bluesky投稿を承認キューに投入
                 for post in bluesky_posts:
                     await conn.execute(
@@ -274,8 +274,6 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                         }, ensure_ascii=False),
                     )
                 logger.info(f"content_multiplier: {result['total_count']}件生成, {len(bluesky_posts)+len(threads_posts)}件を承認キューに投入")
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"content_multiplier DB保存エラー: {e}")
 

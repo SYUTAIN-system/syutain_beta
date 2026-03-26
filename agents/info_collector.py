@@ -139,7 +139,7 @@ class InfoCollector:
 
         for feed_url, source in rss_feeds:
             try:
-                feed = feedparser.parse(feed_url)
+                feed = await asyncio.to_thread(feedparser.parse, feed_url)
                 for entry in feed.entries[:3]:
                     # 24時間以内の記事のみ
                     published = entry.get("published_parsed")
@@ -261,9 +261,8 @@ class InfoCollector:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            import asyncpg
-            conn = await asyncpg.connect(os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta"))
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -271,8 +270,6 @@ class InfoCollector:
                     "INFO_COLLECTOR", goal_id, task_id, action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception:
             pass
 

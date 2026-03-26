@@ -18,10 +18,10 @@ import uuid
 import asyncio
 import logging
 from typing import Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-import asyncpg
 from dotenv import load_dotenv
+from tools.db_pool import get_connection
 
 load_dotenv()
 
@@ -338,7 +338,6 @@ class BrowserAgent:
 
     async def _exec_playwright(self, action_type: str, url: str, params: dict) -> dict:
         """Layer 3: Playwrightで実行（subprocess経由でNATSイベントループ競合を回避）"""
-        import subprocess
         try:
             if action_type in ("navigate", "extract", "extract_text", "extract_links"):
                 # subprocess で pw_extract.py を実行（NATSイベントループとの競合回避）
@@ -409,8 +408,7 @@ class BrowserAgent:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -418,8 +416,6 @@ class BrowserAgent:
                     "BROWSER_AGENT", goal_id, task_id, action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception:
             pass
 
@@ -435,8 +431,7 @@ class BrowserAgent:
     ):
         """操作ログをPostgreSQLのbrowser_action_logに記録"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO browser_action_log
@@ -447,8 +442,6 @@ class BrowserAgent:
                     self.node, action_type, url, layer_used,
                     fallback_from, success, error_message,
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"ブラウザ操作ログ保存失敗: {e}")
 
@@ -464,7 +457,7 @@ class BrowserAgent:
                     "node": self.node,
                     "success": result.get("success", False),
                     "layer_used": result.get("layer_used", "none"),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             )
         except Exception as e:

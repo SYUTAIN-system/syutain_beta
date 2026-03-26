@@ -13,7 +13,6 @@ import logging
 from typing import Optional
 from datetime import datetime
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -117,8 +116,8 @@ class CryptoTrader:
     async def _check_daily_limit(self, amount_jpy: float) -> bool:
         """日次取引上限チェック"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT COALESCE(SUM(ABS(amount * price)), 0) as daily_total
@@ -134,8 +133,6 @@ class CryptoTrader:
                     )
                     return False
                 return True
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"日次取引上限チェック失敗: {e}")
             return False  # 安全側に倒す
@@ -241,8 +238,8 @@ class CryptoTrader:
     ):
         """取引履歴をPostgreSQLに保存"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO crypto_trades
@@ -251,8 +248,6 @@ class CryptoTrader:
                     """,
                     exchange, pair, side, amount, price, fee_jpy, pnl_jpy, strategy,
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"取引履歴保存失敗: {e}")
 
@@ -261,8 +256,8 @@ class CryptoTrader:
     ) -> list:
         """PostgreSQLから取引履歴を取得"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 if exchange:
                     rows = await conn.fetch(
                         """
@@ -281,8 +276,6 @@ class CryptoTrader:
                         limit,
                     )
                 return [dict(r) for r in rows]
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"取引履歴取得失敗: {e}")
             return []

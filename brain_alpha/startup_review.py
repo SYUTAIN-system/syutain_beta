@@ -15,31 +15,21 @@ Phase 8: レポート保存 + Discord投稿
 LLM呼び出しなし。PostgreSQLクエリのみ。
 """
 
-import os
 import json
 import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
+
+from tools.db_pool import get_connection
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.brain_alpha.startup_review")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "data" / "artifacts"
-
-
-async def _get_conn() -> Optional[asyncpg.Connection]:
-    try:
-        return await asyncpg.connect(DATABASE_URL)
-    except Exception as e:
-        logger.error(f"DB接続失敗: {e}")
-        return None
 
 
 async def run_startup_review() -> dict:
@@ -52,47 +42,41 @@ async def run_startup_review() -> dict:
         "warnings": [],
     }
 
-    conn = await _get_conn()
-    if not conn:
-        report["summary"] = "DB接続不可。精査を中止。"
-        return report
+    async with get_connection() as conn:
+        try:
+            # Phase 1: 前回セッション記憶復元
+            report["phases"]["1_session_restore"] = await _phase1_session(conn)
 
-    try:
-        # Phase 1: 前回セッション記憶復元
-        report["phases"]["1_session_restore"] = await _phase1_session(conn)
+            # Phase 2: Daichiの最新思考
+            report["phases"]["2_daichi_thoughts"] = await _phase2_daichi(conn)
 
-        # Phase 2: Daichiの最新思考
-        report["phases"]["2_daichi_thoughts"] = await _phase2_daichi(conn)
+            # Phase 3: 情報収集精査
+            report["phases"]["3_intel_review"] = await _phase3_intel(conn)
 
-        # Phase 3: 情報収集精査
-        report["phases"]["3_intel_review"] = await _phase3_intel(conn)
+            # Phase 4: 成果物精査
+            report["phases"]["4_artifacts"] = await _phase4_artifacts(conn)
 
-        # Phase 4: 成果物精査
-        report["phases"]["4_artifacts"] = await _phase4_artifacts(conn)
+            # Phase 5: 品質推移
+            report["phases"]["5_quality_trend"] = await _phase5_quality(conn)
 
-        # Phase 5: 品質推移
-        report["phases"]["5_quality_trend"] = await _phase5_quality(conn)
+            # Phase 6: エラー分析
+            report["phases"]["6_errors"] = await _phase6_errors(conn)
 
-        # Phase 6: エラー分析
-        report["phases"]["6_errors"] = await _phase6_errors(conn)
+            # Phase 7: 収益
+            report["phases"]["7_revenue"] = await _phase7_revenue(conn)
 
-        # Phase 7: 収益
-        report["phases"]["7_revenue"] = await _phase7_revenue(conn)
+            # Phase 8: トレース警告 + キュー確認
+            report["phases"]["8_trace_queue"] = await _phase8_trace_queue(conn)
 
-        # Phase 8: トレース警告 + キュー確認
-        report["phases"]["8_trace_queue"] = await _phase8_trace_queue(conn)
+            # サマリー・推奨アクション生成
+            _build_summary(report)
 
-        # サマリー・推奨アクション生成
-        _build_summary(report)
+            # レポートをDBに保存
+            await _save_report(conn, report)
 
-        # レポートをDBに保存
-        await _save_report(conn, report)
-
-    except Exception as e:
-        logger.error(f"精査サイクル例外: {e}")
-        report["summary"] = f"精査中にエラー: {e}"
-    finally:
-        await conn.close()
+        except Exception as e:
+            logger.error(f"精査サイクル例外: {e}")
+            report["summary"] = f"精査中にエラー: {e}"
 
     return report
 
@@ -200,13 +184,29 @@ async def _phase4_artifacts(conn) -> dict:
                WHERE status IN ('completed', 'success')
                  AND created_at > NOW() - INTERVAL '24 hours'"""
         )
-        return {
+        result = {
             "recent_files": recent_files,
             "file_count_24h": len(recent_files),
             "tasks_completed_24h": row["total"] or 0,
             "high_quality": row["high_quality"] or 0,
             "low_quality": row["low_quality"] or 0,
         }
+
+        # review_logに精査結果を記録
+        await conn.execute(
+            """INSERT INTO review_log
+               (reviewer, target_type, target_id, verdict, issues_found, quality_before, quality_after)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            "brain_alpha",
+            "phase4_artifacts",
+            f"startup_review_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            "reviewed" if row["low_quality"] == 0 else "issues_found",
+            json.dumps({"low_quality_count": row["low_quality"] or 0}, ensure_ascii=False),
+            None,
+            None,
+        )
+
+        return result
     except Exception as e:
         return {"error": str(e)}
 

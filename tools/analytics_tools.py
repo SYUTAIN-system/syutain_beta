@@ -185,16 +185,14 @@ ICP定義:
 async def get_revenue_summary(days: int = 30) -> dict:
     """収益サマリーを取得"""
     try:
-        import asyncpg
-        database_url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        conn = await asyncpg.connect(database_url)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
             # プラットフォーム別収益
             rows = await conn.fetch(
                 """
                 SELECT platform, SUM(revenue_jpy) as total_jpy, COUNT(*) as count
                 FROM revenue_linkage
-                WHERE created_at >= NOW() - INTERVAL '%s days'
+                WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                 GROUP BY platform
                 ORDER BY total_jpy DESC
                 """,
@@ -210,8 +208,6 @@ async def get_revenue_summary(days: int = 30) -> dict:
                 "total_jpy": total,
                 "by_platform": by_platform,
             }
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"収益サマリー取得失敗: {e}")
         return {"period_days": days, "total_jpy": 0, "by_platform": {}, "error": str(e)}

@@ -10,7 +10,6 @@ import logging
 import os
 from datetime import datetime, timezone
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,7 +34,7 @@ async def analyze_booth(limit: int = 20) -> list:
         for keyword in BOOTH_KEYWORDS[:2]:
             try:
                 url = f"https://booth.pm/ja/search/{keyword}?sort=wish_list"
-                content = await jina.extract(url)
+                content = await jina.extract_markdown(url)
                 if not content:
                     continue
 
@@ -93,7 +92,7 @@ async def analyze_note(limit: int = 20) -> list:
         for keyword in NOTE_KEYWORDS[:2]:
             try:
                 url = f"https://note.com/search?q={keyword}&sort=like"
-                content = await jina.extract(url)
+                content = await jina.extract_markdown(url)
                 if not content:
                     continue
 
@@ -151,21 +150,20 @@ async def run_competitive_analysis() -> dict:
 
     if all_results:
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 for item in all_results:
                     await conn.execute(
-                        """INSERT INTO intel_items (source, keyword, title, summary, metadata)
-                        VALUES ($1, $2, $3, $4, $5)""",
-                        f"competitive_analysis_{item['source']}",
+                        """INSERT INTO intel_items (source, keyword, title, summary, category, importance_score)
+                        VALUES ($1, $2, $3, $4, $5, $6)""",
+                        f"competitive_analysis_{item.get('source', 'unknown')}",
                         item.get("keyword", ""),
                         item.get("title", "")[:200],
                         item.get("summary", "")[:500],
-                        json.dumps(item, ensure_ascii=False),
+                        "competitive_analysis",
+                        0.6,
                     )
                     saved += 1
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"競合分析DB保存エラー: {e}")
 

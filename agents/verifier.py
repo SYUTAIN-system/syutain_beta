@@ -146,6 +146,7 @@ class Verifier:
                     logger.warning(f"Tier S品質検査失敗（元スコア維持）: {e}")
 
         # AI文体パターン検出（LLM不要、コストゼロ）
+        ai_check = None
         if has_output and quality_score > 0:
             text_for_check = output.get("text", "")
             if text_for_check and len(text_for_check) > 50:
@@ -191,13 +192,10 @@ class Verifier:
         # 品質ログをDBに記録
         await self._log_quality(task_id, execution_result, result)
 
-        # 判断根拠を記録
+        # 判断根拠を記録（ai_checkの結果を再利用）
         ai_patterns_info = None
-        if has_output and quality_score > 0:
-            text_for_check_len = len(output.get("text", ""))
-            if text_for_check_len > 50:
-                ai_check_local = check_ai_patterns(output.get("text", ""))
-                ai_patterns_info = {"count": ai_check_local["count"], "patterns": ai_check_local["patterns"][:5]}
+        if ai_check is not None:
+            ai_patterns_info = {"count": ai_check["count"], "patterns": ai_check["patterns"][:5]}
 
         await self._record_trace(
             task_id=task_id,
@@ -228,7 +226,7 @@ class Verifier:
         return result
 
     async def _score_quality(self, output: dict, success_definition: list) -> float:
-        """LLMで出力品質をスコアリング（0.0-1.0）"""
+        """LLMで出力品質をスコアリング（0.0-1.0）— 詳細ルーブリック付き"""
         text = output.get("text", "")
         if not text:
             return 0.0
@@ -249,21 +247,52 @@ class Verifier:
 
         try:
             llm_result = await call_llm(
-                prompt=f"""以下の出力の品質を0.0〜1.0で評価してください。数値のみ回答してください。
+                prompt=f"""以下の出力を5つの基準で各1-5点で評価し、合計点を25点満点で算出してください。
+
+## 評価基準（各1-5点）
+
+A. 完成度: 成功条件を満たしているか
+   1=全く未達成 2=一部のみ 3=概ね達成 4=達成 5=条件を超える品質
+
+B. 正確性: 事実誤認・論理矛盾がないか
+   1=重大な誤り 2=複数の軽微な誤り 3=1つの誤り 4=ほぼ正確 5=完全に正確
+
+C. 実用性: 読者が理解・行動できる内容か
+   1=意味不明 2=理解困難 3=理解可能 4=行動可能 5=即座に活用可能
+
+D. 独自性: テンプレ的でなく価値ある視点があるか
+   1=完全にテンプレ 2=ほぼ定型 3=一部独自 4=独自の視点あり 5=深い洞察
+
+E. 文体品質: 日本語として自然で読みやすいか
+   1=不自然 2=AI臭い 3=普通 4=自然 5=島原大知の声が聞こえる
 
 ## 成功条件
 {success_str}
 
 ## 出力（先頭500文字）
 {text[:500]}
-""",
-                system_prompt="品質評価エージェント。0.0〜1.0の数値のみ出力。",
+
+回答形式: A=X B=X C=X D=X E=X 合計=XX""",
+                system_prompt="品質評価エージェント。指定された形式で回答する。",
                 model_selection=model_sel,
             )
 
-            score_text = llm_result.get("text", "0.5").strip()
-            # 数値を抽出
+            score_text = llm_result.get("text", "").strip()
             import re
+
+            # 合計点を抽出
+            total_match = re.search(r"合計[=:：\s]*(\d+)", score_text)
+            if total_match:
+                total = int(total_match.group(1))
+                return min(max(round(total / 25.0, 3), 0.0), 1.0)
+
+            # 個別点を合算
+            individual = re.findall(r"[A-E][=:：\s]*(\d)", score_text)
+            if len(individual) >= 3:
+                total = sum(int(x) for x in individual[:5])
+                return min(max(round(total / 25.0, 3), 0.0), 1.0)
+
+            # フォールバック: 従来の数値抽出
             match = re.search(r"(0?\.\d+|1\.0|0|1)", score_text)
             if match:
                 return min(max(float(match.group(1)), 0.0), 1.0)
@@ -300,33 +329,62 @@ class Verifier:
 
         try:
             llm_result = await call_llm(
-                prompt=f"""以下の成果物の品質を検査してください。0.0〜1.0の数値で回答してください。
+                prompt=f"""以下の成果物を6つの基準で各1-5点で検査してください。
 
-## 検査項目
-1. 正確性: 事実誤認や論理矛盾がないか
-2. 文体一貫性: トーンや表現が統一されているか
-3. 実用性: 読者が行動に移せる内容か
-4. 完成度: 欠落している要素がないか
+## 検査基準（各1-5点）
+
+A. 正確性: 事実誤認や論理矛盾がないか
+   1=重大な誤り多数 2=誤りあり 3=概ね正確 4=ほぼ完璧 5=完全に正確
+
+B. 文体一貫性: トーンや表現が統一されているか
+   1=バラバラ 2=不統一 3=概ね統一 4=一貫 5=完全に統一
+
+C. ICP適合性: ターゲット層（AI活用に関心がある28-39歳の非エンジニアクリエイター）に響くか
+   1=全く響かない 2=やや的外れ 3=普通 4=響く 5=強く共感
+
+D. 実用性: 読者が具体的に行動に移せるか
+   1=行動不能 2=抽象的 3=一部実用的 4=実用的 5=即実践可能
+
+E. 完成度: 必要な要素が揃っているか
+   1=大幅欠落 2=欠落あり 3=最低限 4=十分 5=完璧
+
+F. 独自価値: 他では得られない視点・情報があるか
+   1=コモディティ 2=やや独自 3=普通 4=独自性あり 5=唯一無二
 
 ## 成功条件
 {success_str}
 
-## タスクタイプ
-{task_type}
+## タスクタイプ: {task_type}
 
 ## 成果物（先頭1000文字）
 {text[:1000]}
 
-品質スコア（0.0〜1.0の数値のみ）:""",
-                system_prompt="品質検査エージェント。0.0〜1.0の数値のみ出力。",
+回答形式: A=X B=X C=X D=X E=X F=X 合計=XX""",
+                system_prompt="品質検査エージェント。指定された形式で回答する。",
                 model_selection=model_sel,
             )
 
             import re
             score_text = llm_result.get("text", "").strip()
-            match = re.search(r"(0?\.\d+|1\.0|0|1)", score_text)
-            if match:
-                tier_s_score = min(max(float(match.group(1)), 0.0), 1.0)
+
+            # 合計点を抽出（30点満点）
+            total_match = re.search(r"合計[=:：\s]*(\d+)", score_text)
+            tier_s_score = None
+            if total_match:
+                total = int(total_match.group(1))
+                tier_s_score = min(max(round(total / 30.0, 3), 0.0), 1.0)
+            else:
+                # 個別点を合算
+                individual = re.findall(r"[A-F][=:：\s]*(\d)", score_text)
+                if len(individual) >= 3:
+                    total = sum(int(x) for x in individual[:6])
+                    tier_s_score = min(max(round(total / 30.0, 3), 0.0), 1.0)
+                else:
+                    match = re.search(r"(0?\.\d+|1\.0|0|1)", score_text)
+                    if match:
+                        tier_s_score = min(max(float(match.group(1)), 0.0), 1.0)
+
+            if tier_s_score is not None:
                 # 元スコアとTier Sスコアの加重平均（Tier S検査を重視）
                 final_score = base_score * 0.3 + tier_s_score * 0.7
                 logger.info(
@@ -424,8 +482,9 @@ class Verifier:
                         """,
                         execution_result.get("task_type", "unknown"),
                         execution_result.get("output", {}).get("model_used", "unknown"),
-                        execution_result.get("model_selection", {}).get("tier", "unknown")
-                            if execution_result.get("model_selection") else "unknown",
+                        (execution_result.get("model_selection") or
+                         execution_result.get("output", {}).get("model_selection") or
+                         {}).get("tier", "unknown"),
                         verification.quality_score,
                         execution_result.get("cost_jpy", 0.0),
                     )

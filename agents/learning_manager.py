@@ -13,8 +13,8 @@ import logging
 from typing import Optional
 from datetime import datetime, timedelta
 
-import asyncpg
 from dotenv import load_dotenv
+from tools.db_pool import get_connection
 
 load_dotenv()
 
@@ -42,8 +42,7 @@ class LearningManager:
                            confidence: float = None, context: dict = None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, action, reasoning, confidence, context)
@@ -51,8 +50,6 @@ class LearningManager:
                     "learning_manager", action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.debug(f"トレース記録失敗（無視）: {e}")
 
@@ -68,8 +65,7 @@ class LearningManager:
     ):
         """コンテンツが商品に変換された記録を保存"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO revenue_linkage
@@ -84,16 +80,13 @@ class LearningManager:
                     f"コンテンツ変換記録: {content_id} → {product_id} "
                     f"({platform}, {revenue_jpy}円)"
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"コンテンツ変換記録失敗: {e}")
 
     async def get_conversion_stats(self, days: int = 30) -> dict:
         """コンテンツ→商品変換の統計を取得"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT platform,
@@ -101,7 +94,7 @@ class LearningManager:
                            SUM(revenue_jpy) as total_revenue,
                            AVG(revenue_jpy) as avg_revenue
                     FROM revenue_linkage
-                    WHERE created_at >= NOW() - INTERVAL '$1 days'
+                    WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                     GROUP BY platform
                     ORDER BY total_revenue DESC
                     """,
@@ -111,8 +104,6 @@ class LearningManager:
                     "period_days": days,
                     "platforms": [dict(r) for r in rows],
                 }
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"変換統計取得失敗: {e}")
             return {}
@@ -129,8 +120,7 @@ class LearningManager:
     ):
         """提案の採用/却下結果を記録"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     UPDATE proposal_history
@@ -152,16 +142,13 @@ class LearningManager:
                     """,
                     proposal_id, adopted, rejection_reason,
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"提案結果記録失敗: {e}")
 
     async def get_proposal_adoption_rate(self, days: int = 30) -> dict:
         """提案採用率の統計"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT
@@ -170,7 +157,7 @@ class LearningManager:
                         COUNT(*) FILTER (WHERE adopted = false) as rejected,
                         COALESCE(SUM(revenue_impact_jpy) FILTER (WHERE adopted = true), 0) as total_revenue
                     FROM proposal_history
-                    WHERE created_at >= NOW() - INTERVAL '$1 days'
+                    WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                     """,
                     days,
                 )
@@ -184,8 +171,6 @@ class LearningManager:
                     "adoption_rate": (adopted / total * 100) if total > 0 else 0,
                     "total_revenue_impact_jpy": row["total_revenue"] if row else 0,
                 }
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"提案採用率取得失敗: {e}")
             return {}
@@ -204,8 +189,7 @@ class LearningManager:
     ):
         """モデル品質ログを記録"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO model_quality_log
@@ -216,16 +200,13 @@ class LearningManager:
                     task_type, model_used, tier, quality_score,
                     refinement_needed, refinement_model, total_cost_jpy,
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"モデル品質ログ記録失敗: {e}")
 
     async def get_model_quality_stats(self, days: int = 30) -> list:
         """モデル別品質統計"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT
@@ -237,15 +218,13 @@ class LearningManager:
                         SUM(total_cost_jpy) as total_cost,
                         COUNT(*) FILTER (WHERE refinement_needed = true) as refinement_count
                     FROM model_quality_log
-                    WHERE created_at >= NOW() - INTERVAL '$1 days'
+                    WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                     GROUP BY model_used, tier, task_type
                     ORDER BY avg_quality DESC
                     """,
                     days,
                 )
                 return [dict(r) for r in rows]
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"モデル品質統計取得失敗: {e}")
             return []
@@ -253,8 +232,7 @@ class LearningManager:
     async def get_best_model_for_task(self, task_type: str) -> Optional[dict]:
         """タスクタイプ別の最適モデルを取得（学習結果に基づく）"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT
@@ -276,8 +254,6 @@ class LearningManager:
                 if row:
                     return dict(row)
                 return None
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"最適モデル取得失敗: {e}")
             return None
@@ -376,8 +352,7 @@ class LearningManager:
     async def _get_task_stats(self, days: int = 7) -> dict:
         """タスク完了統計"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT
@@ -387,13 +362,11 @@ class LearningManager:
                         AVG(quality_score) FILTER (WHERE quality_score IS NOT NULL) as avg_quality,
                         SUM(cost_jpy) as total_cost
                     FROM tasks
-                    WHERE created_at >= NOW() - INTERVAL '$1 days'
+                    WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                     """,
                     days,
                 )
                 return dict(row) if row else {}
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"タスク統計取得失敗: {e}")
             return {}
@@ -401,8 +374,7 @@ class LearningManager:
     async def _get_browser_stats(self, days: int = 7) -> dict:
         """ブラウザ操作統計"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT
@@ -411,15 +383,13 @@ class LearningManager:
                         COUNT(*) FILTER (WHERE success = true) as success_count,
                         COUNT(*) FILTER (WHERE fallback_from IS NOT NULL) as fallback_count
                     FROM browser_action_log
-                    WHERE created_at >= NOW() - INTERVAL '$1 days'
+                    WHERE created_at >= NOW() - $1 * INTERVAL '1 day'
                     GROUP BY layer_used
                     ORDER BY count DESC
                     """,
                     days,
                 )
                 return {"layers": [dict(r) for r in rows]}
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"ブラウザ統計取得失敗: {e}")
             return {}
@@ -427,8 +397,7 @@ class LearningManager:
     async def _save_report(self, report: dict):
         """レポートをPostgreSQLに保存（intel_itemsテーブルを流用）"""
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO intel_items
@@ -438,8 +407,6 @@ class LearningManager:
                     """,
                     json.dumps(report, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"レポート保存失敗: {e}")
 

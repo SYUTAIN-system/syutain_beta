@@ -38,6 +38,18 @@ STRATEGY_NG_WORDS = [
     "無双",
 ]
 
+# 事実誤認NG: 楽曲制作を仕事として語る表現（SunoAIでの作詞は趣味。仕事ではない）
+MUSIC_AS_WORK_NG_PATTERNS = [
+    r"楽曲制作(?:の仕事|の?案件|の?依頼|を?受注|を?納品|の?クライアント)",
+    r"音楽制作(?:の仕事|の?案件|の?依頼|を?受注|を?納品|の?クライアント)",
+    r"(?:クライアント|案件|依頼|受注).{0,10}(?:楽曲|音楽|作詞|作曲)",
+    r"(?:楽曲|音楽|作曲).{0,10}(?:携わ|手がけ|担当|制作し|案件|受注|納品)",
+    r"VTuber.*楽曲制作.*携わ",
+    r"楽曲制作で培った",
+    r"音楽制作で培った",
+    r"感情分析データを活用",
+]
+
 
 def check_platform_ng(text: str, platform: str = "bluesky") -> dict:
     """
@@ -68,6 +80,16 @@ def check_platform_ng(text: str, platform: str = "bluesky") -> dict:
                 "type": "strategy",
                 "matched": ng,
                 "pattern": "CONTENT_STRATEGY禁止語句",
+            })
+
+    # 事実誤認NG: 楽曲制作を仕事として語る表現
+    for pattern in MUSIC_AS_WORK_NG_PATTERNS:
+        match = re.search(pattern, text)
+        if match:
+            violations.append({
+                "type": "factual_error",
+                "matched": match.group(),
+                "pattern": "楽曲制作は仕事ではない（SunoAI作詞は趣味）",
             })
 
     return {

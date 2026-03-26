@@ -70,7 +70,7 @@ class StripeClient:
                     data={
                         "name": name,
                         "description": description,
-                        **({"metadata": metadata} if metadata else {}),
+                        **({f"metadata[{k}]": str(v) for k, v in metadata.items()} if metadata else {}),
                     },
                 )
                 resp.raise_for_status()
@@ -217,10 +217,8 @@ async def record_revenue(
 ) -> bool:
     """収益をPostgreSQLに記録"""
     try:
-        import asyncpg
-        database_url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        conn = await asyncpg.connect(database_url)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO revenue_linkage (platform, revenue_jpy, product_id, source_content_id)
@@ -230,8 +228,6 @@ async def record_revenue(
             )
             logger.info(f"収益記録: {platform} {amount_jpy}円")
             return True
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"収益記録失敗: {e}")
         return False

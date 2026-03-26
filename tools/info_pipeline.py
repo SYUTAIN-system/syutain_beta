@@ -130,6 +130,19 @@ class InfoPipeline:
 
         logger.info(f"情報収集パイプライン完了: {saved}件保存 (Gmail:{len(gmail_results)}, Tavily:{len(tavily_results)}, Jina:{len(jina_results)}, RSS:{len(rss_results)}, YouTube:{len(youtube_results)})")
 
+        # event_logに記録
+        try:
+            from tools.event_logger import log_event
+            await log_event("info.pipeline_completed", "system", {
+                "total_saved": saved,
+                "gmail": len(gmail_results), "tavily": len(tavily_results),
+                "jina": len(jina_results), "rss": len(rss_results),
+                "youtube": len(youtube_results),
+                "keywords_used": len(kw_list),
+            })
+        except Exception:
+            pass
+
         # 判断根拠を記録
         # 高スコア上位5件の理由を記録
         high_items = sorted(all_items, key=lambda x: x.get("importance_score", 0), reverse=True)[:5]
@@ -438,23 +451,130 @@ class InfoPipeline:
     # ===== 重要度スコアリング =====
 
     def _score_importance(self, item: dict) -> float:
-        """記事の重要度スコア (0.0-1.0)"""
-        score = 0.3  # ベースライン
-        text = (item.get("title", "") + " " + item.get("content", "")).lower()
+        """記事の重要度スコア (0.0-1.0) — 多軸ルールベース評価
 
-        # 高優先キーワード
-        high_priority = ["gpt-5", "deepseek v4", "qwen3.5", "breaking", "release", "launch", "新モデル"]
-        for kw in high_priority:
-            if kw.lower() in text:
-                score += 0.15
+        5軸で評価し加重合計:
+        1. 緊急性 (0.25): 速報・リリース・破壊的変更か
+        2. SYUTAINβ関連性 (0.25): 使用技術スタックとの直接関係
+        3. ICP関連性 (0.20): ターゲット層が関心を持つトピックか
+        4. アクション可能性 (0.15): 具体的な行動に結びつくか
+        5. 情報の具体性 (0.15): 数値・日付・バージョン等の具体情報があるか
+        """
+        import re
 
-        # 中優先キーワード
-        mid_priority = ["api", "pricing", "benchmark", "performance", "update"]
-        for kw in mid_priority:
-            if kw.lower() in text:
-                score += 0.05
+        title = item.get("title", "") or ""
+        content = item.get("content", "") or ""
+        text = (title + " " + content).lower()
+        title_lower = title.lower()
 
-        return min(1.0, score)
+        # --- 軸1: 緊急性 (0-1) ---
+        urgency = 0.0
+        # 速報・リリース系
+        breaking_kw = ["breaking", "release", "launch", "発表", "公開", "リリース",
+                       "新モデル", "新バージョン", "announced", "available now", "just released"]
+        for kw in breaking_kw:
+            if kw in text:
+                urgency = max(urgency, 0.8)
+        # 重大変更
+        critical_kw = ["deprecated", "廃止", "pricing change", "料金変更", "api変更",
+                       "breaking change", "security vulnerability", "脆弱性", "障害", "outage"]
+        for kw in critical_kw:
+            if kw in text:
+                urgency = max(urgency, 0.9)
+        # バージョン番号がタイトルにある
+        if re.search(r'v?\d+\.\d+', title_lower):
+            urgency = max(urgency, 0.5)
+        # 「速報」「緊急」系がタイトルにある
+        if any(kw in title_lower for kw in ["速報", "緊急", "breaking", "urgent"]):
+            urgency = max(urgency, 0.9)
+
+        # --- 軸2: SYUTAINβスタック関連性 (0-1) ---
+        stack_relevance = 0.0
+        # 直接使用技術（高関連）
+        direct_stack = ["deepseek", "qwen", "nemotron", "ollama", "nats", "jetstream",
+                        "fastapi", "next.js", "postgresql", "pgvector", "tailscale",
+                        "playwright", "caddy", "claude", "anthropic"]
+        for kw in direct_stack:
+            if kw in text:
+                stack_relevance = max(stack_relevance, 0.9)
+        # 間接関連技術（中関連）
+        indirect_stack = ["gpt-5", "gemini", "openai", "llm", "gguf", "mlx", "lora",
+                          "mcp", "a2a", "vllm", "function calling", "tool use",
+                          "computer use", "stagehand", "lightpanda"]
+        for kw in indirect_stack:
+            if kw in text:
+                stack_relevance = max(stack_relevance, 0.6)
+        # 広い技術トピック
+        broad_tech = ["生成ai", "aiエージェント", "ai agent", "自動化",
+                      "ヘッドレスブラウザ", "量子化", "ファインチューニング"]
+        for kw in broad_tech:
+            if kw in text:
+                stack_relevance = max(stack_relevance, 0.4)
+
+        # --- 軸3: ICP関連性 (0-1) ---
+        icp_relevance = 0.0
+        # ICPが直接関心を持つトピック
+        icp_high = ["副業", "フリーランス", "個人開発", "indie", "収益化",
+                    "ai導入", "ai活用", "ノーコード", "ローコード", "自動化ツール",
+                    "コンテンツマーケティング", "snsマーケティング", "seo"]
+        for kw in icp_high:
+            if kw in text:
+                icp_relevance = max(icp_relevance, 0.8)
+        # ICPの周辺関心
+        icp_mid = ["saas", "micro-saas", "アフィリエイト", "stripe", "booth",
+                   "note.com", "電子書籍", "デジタルコンテンツ", "pricing",
+                   "リモートワーク", "クリエイター"]
+        for kw in icp_mid:
+            if kw in text:
+                icp_relevance = max(icp_relevance, 0.5)
+
+        # --- 軸4: アクション可能性 (0-1) ---
+        actionability = 0.0
+        # 具体的アクションを示唆する表現
+        action_kw = ["how to", "手順", "ガイド", "チュートリアル", "方法",
+                     "migration guide", "移行", "アップグレード", "設定方法",
+                     "benchmark", "比較", "vs", "pricing", "料金"]
+        for kw in action_kw:
+            if kw in text:
+                actionability = max(actionability, 0.7)
+        # API変更や設定変更の必要性
+        config_action = ["api key", "endpoint変更", "パラメータ変更", "非推奨",
+                         "must update", "required", "必須"]
+        for kw in config_action:
+            if kw in text:
+                actionability = max(actionability, 0.9)
+
+        # --- 軸5: 情報の具体性 (0-1) ---
+        specificity = 0.0
+        # 数値の存在
+        numbers = len(re.findall(r'\d+\.?\d*[%倍xX]|\$\d+|¥\d+|\d+GB|\d+B param', text))
+        if numbers >= 3:
+            specificity = max(specificity, 0.8)
+        elif numbers >= 1:
+            specificity = max(specificity, 0.5)
+        # 日付の存在
+        if re.search(r'202[5-7][-/年]\d{1,2}', text):
+            specificity = max(specificity, 0.6)
+        # バージョン番号
+        if re.search(r'v\d+\.\d+|version \d+', text):
+            specificity = max(specificity, 0.5)
+        # URL/リンクの存在（ソース付き）
+        if "http" in text or "github.com" in text:
+            specificity = max(specificity, 0.3)
+        # タイトルが短すぎる（情報量不足）
+        if len(title) < 10:
+            specificity = max(0.0, specificity - 0.3)
+
+        # --- 加重合計 ---
+        score = (
+            urgency * 0.25 +
+            stack_relevance * 0.25 +
+            icp_relevance * 0.20 +
+            actionability * 0.15 +
+            specificity * 0.15
+        )
+
+        return round(min(1.0, max(0.0, score)), 3)
 
     def _classify_category(self, text: str) -> str:
         """テキストからカテゴリを分類"""

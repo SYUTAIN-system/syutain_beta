@@ -174,7 +174,8 @@ class MCPManager:
     async def _call_mcp_tool(self, srv: MCPServerInfo, tool_name: str, params: dict) -> Any:
         """MCPプロトコル経由でツール実行（プレースホルダー）"""
         # 実際のMCP SDK統合はここに実装
-        raise NotImplementedError("MCP SDK統合は別途実装")
+        logger.warning("MCP SDK未実装、フォールバック使用")
+        return None
 
     async def _direct_api_fallback(self, server_name: str, tool_name: str, params: dict) -> Any:
         """直接APIフォールバック"""

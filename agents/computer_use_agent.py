@@ -14,8 +14,8 @@ import logging
 from typing import Optional
 from datetime import datetime
 
-import asyncpg
 from dotenv import load_dotenv
+from tools.db_pool import get_connection
 
 load_dotenv()
 
@@ -195,9 +195,7 @@ class ComputerUseAgent:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            import asyncpg
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -205,8 +203,6 @@ class ComputerUseAgent:
                     "COMPUTER_USE_AGENT", goal_id, task_id, action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception:
             pass
 
@@ -266,10 +262,12 @@ class ComputerUseAgent:
         if not password:
             return {"success": False, "error": f"環境変数 {password_env_key} 未設定"}
 
+        # セキュリティ: パスワードをLLMプロンプトに含めない（CLAUDE.md ルール8）
         return await self.execute_multi_step(
-            goal=f"ユーザー名 '{username}' でログインする（パスワード: {password}）",
+            goal=f"ユーザー名 '{username}' でログインする。パスワードは環境変数から自動入力される。",
             start_url=url,
             max_steps=5,
+            credentials={"username": username, "password": password},
         )
 
     async def handle_captcha(self, url: str) -> dict:

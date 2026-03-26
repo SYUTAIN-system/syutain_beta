@@ -179,10 +179,8 @@ class MonitorAgent:
     async def _reassign_tasks_from_down_node(self, down_node: str) -> None:
         """ダウンノードに割り当てられた実行中タスクを別ノードに再振替（接続#19）"""
         try:
-            import asyncpg
-            DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # ダウンノードの実行中タスクを検索
                 stuck_tasks = await conn.fetch(
                     """SELECT id, type, assigned_node FROM tasks
@@ -219,8 +217,6 @@ class MonitorAgent:
                     f"ダウン: {down_node.upper()}\n"
                     f"再振替: {len(stuck_tasks)}タスク → {fallback.upper()}"
                 )
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"タスク再振替エラー: {e}")
 
@@ -375,10 +371,8 @@ class MonitorAgent:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            import asyncpg
-            DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -386,8 +380,6 @@ class MonitorAgent:
                     "MONITOR_AGENT", goal_id, task_id, action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception:
             pass
 

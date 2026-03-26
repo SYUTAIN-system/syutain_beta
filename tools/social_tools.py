@@ -10,7 +10,8 @@ import os
 import json
 import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import unicodedata
 
 import asyncio
 import httpx
@@ -39,6 +40,17 @@ BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD", "")
 # Threads (Meta Graph API)
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "")
+
+
+def _count_x_chars(text: str) -> int:
+    """X (Twitter) の文字カウント: CJK=2文字、ASCII=1文字（Twitter API準拠）"""
+    count = 0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ('F', 'W'):
+            count += 2
+        else:
+            count += 1
+    return count
 
 
 async def _require_approval(action: str, data: dict) -> dict:
@@ -113,6 +125,16 @@ async def post_to_x(content: str, account: str = "syutain", skip_approval: bool 
         logger.error(f"X APIキー未設定 (account={account})")
         return {"success": False, "reason": "credentials_missing"}
 
+    # NGワードチェック（post_to_x直接経路）
+    try:
+        from tools.platform_ng_check import check_platform_ng
+        ng_result = check_platform_ng(content, "x")
+        if not ng_result["passed"]:
+            logger.warning(f"X投稿({creds['handle']}): NGワード検出 — 投稿中止: {ng_result['violations']}")
+            return {"success": False, "reason": "ng_word_detected", "violations": ng_result["violations"]}
+    except Exception:
+        pass
+
     try:
         # OAuth 1.0a User Context (tweepy使用)
         import tweepy
@@ -148,10 +170,20 @@ async def execute_approved_x(content: str, account: str = "syutain") -> dict:
     """承認済みX投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）"""
     creds = _get_x_credentials(account)
 
-    # 280文字制限チェック
-    if len(content) > 280:
-        logger.warning(f"X投稿: 280文字超過({len(content)}文字)。切り詰め")
-        content = content[:277] + "..."
+    # 280文字制限チェック（CJK=2, ASCII=1でカウント）
+    x_len = _count_x_chars(content)
+    if x_len > 280:
+        logger.warning(f"X投稿: 280文字超過({x_len}加重文字)。切り詰め")
+        # 切り詰め: 加重カウントで277以内に収める
+        trimmed = []
+        cur = 0
+        for ch in content:
+            w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
+            if cur + w > 277:
+                break
+            trimmed.append(ch)
+            cur += w
+        content = "".join(trimmed) + "..."
 
     # NGワードチェック
     try:
@@ -262,7 +294,7 @@ async def post_to_bluesky(content: str, skip_approval: bool = False) -> dict:
             did = session["did"]
 
             # 投稿
-            now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             post_resp = await client.post(
                 "https://bsky.social/xrpc/com.atproto.repo.createRecord",
                 headers={"Authorization": f"Bearer {access_jwt}"},
@@ -308,6 +340,16 @@ async def execute_approved_bluesky(content: str) -> dict:
     """承認済みBluesky投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）"""
     if not BLUESKY_HANDLE or not BLUESKY_APP_PASSWORD:
         return {"success": False, "reason": "credentials_missing"}
+
+    # NGワードチェック（Bluesky）
+    try:
+        from tools.platform_ng_check import check_platform_ng
+        ng_result = check_platform_ng(content, "bluesky")
+        if not ng_result["passed"]:
+            logger.warning(f"Bluesky投稿: NGワード検出 — 投稿中止: {ng_result['violations']}")
+            return {"success": False, "reason": "ng_word_detected", "violations": ng_result["violations"]}
+    except Exception:
+        pass
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             session_resp = await client.post(
@@ -316,7 +358,7 @@ async def execute_approved_bluesky(content: str) -> dict:
             )
             session_resp.raise_for_status()
             session = session_resp.json()
-            now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             post_resp = await client.post(
                 "https://bsky.social/xrpc/com.atproto.repo.createRecord",
                 headers={"Authorization": f"Bearer {session['accessJwt']}"},
@@ -424,7 +466,7 @@ async def get_x_engagement(post_id: str, account: str = "syutain") -> dict:
                 oauth_params = {
                     "oauth_consumer_key": creds["consumer_key"],
                     "oauth_nonce": oauth_nonce,
-                    "oauth_signature_method": "HMAC-SHA256",
+                    "oauth_signature_method": "HMAC-SHA1",
                     "oauth_timestamp": oauth_timestamp,
                     "oauth_token": creds["access_token"],
                     "oauth_version": "1.0",
@@ -437,7 +479,7 @@ async def get_x_engagement(post_id: str, account: str = "syutain") -> dict:
                 base_string = f"GET&{urllib.parse.quote(url, safe='')}&{urllib.parse.quote(sorted_params, safe='')}"
                 signing_key = f"{urllib.parse.quote(creds['consumer_secret'], safe='')}&{urllib.parse.quote(creds['access_token_secret'], safe='')}"
                 signature = base64.b64encode(
-                    hmac.new(signing_key.encode(), base_string.encode(), hashlib.sha256).digest()
+                    hmac.new(signing_key.encode(), base_string.encode(), hashlib.sha1).digest()
                 ).decode()
 
                 oauth_params["oauth_signature"] = signature
@@ -560,10 +602,8 @@ async def cross_post_bluesky_to_x(limit: int = 3) -> list:
     """
     results = []
     try:
-        import asyncpg
-        DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
             # Blueskyで投稿済み＆Xに未横展開の投稿を取得
             rows = await conn.fetch(
                 """SELECT payload->>'content_preview' as content,
@@ -588,9 +628,17 @@ async def cross_post_bluesky_to_x(limit: int = 3) -> list:
                 if not content or len(content) < 20:
                     continue
 
-                # 280文字に調整
-                if len(content) > 280:
-                    content = content[:277] + "..."
+                # 280文字に調整（CJK=2, ASCII=1でカウント）
+                if _count_x_chars(content) > 280:
+                    trimmed = []
+                    cur = 0
+                    for ch in content:
+                        w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
+                        if cur + w > 277:
+                            break
+                        trimmed.append(ch)
+                        cur += w
+                    content = "".join(trimmed) + "..."
 
                 # 承認キューに投入
                 import json
@@ -609,8 +657,6 @@ async def cross_post_bluesky_to_x(limit: int = 3) -> list:
 
             if results:
                 logger.info(f"Bluesky→X横展開: {len(results)}件を承認キューに投入")
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"Bluesky→X横展開エラー: {e}")
 

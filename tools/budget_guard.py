@@ -79,13 +79,19 @@ class BudgetGuard:
                 )
                 if row:
                     self._monthly_spend_jpy = float(row["total"])
+                # 情報収集支出（is_info=trueのもの）
+                row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE date_trunc('month', recorded_at) = date_trunc('month', CURRENT_DATE) AND is_info = true"
+                )
+                if row:
+                    self._info_spend_jpy = float(row["total"])
                 # チャット支出（goal_id='chat'のもの）
                 row = await conn.fetchrow(
                     "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE recorded_at::date = CURRENT_DATE AND goal_id = 'chat'"
                 )
                 if row:
                     self._chat_spend_jpy = float(row["total"])
-                logger.info(f"DB復元: 日次¥{self._daily_spend_jpy:.1f}, 月次¥{self._monthly_spend_jpy:.1f}, チャット¥{self._chat_spend_jpy:.1f}")
+                logger.info(f"DB復元: 日次¥{self._daily_spend_jpy:.1f}, 月次¥{self._monthly_spend_jpy:.1f}, 情報¥{self._info_spend_jpy:.1f}, チャット¥{self._chat_spend_jpy:.1f}")
         except Exception as e:
             logger.warning(f"DB復元失敗（インメモリで継続）: {e}")
 
@@ -136,7 +142,25 @@ class BudgetGuard:
                 "message": f"単一呼び出し上限超過: {amount_jpy}円 > {SINGLE_CALL_LIMIT_JPY}円",
             }
 
-        # インメモリ集計更新
+        # 予算超過チェック（加算前に判定）
+        projected_daily = self._daily_spend_jpy + amount_jpy
+        projected_monthly = self._monthly_spend_jpy + amount_jpy
+        daily_ratio = projected_daily / DAILY_BUDGET_JPY if DAILY_BUDGET_JPY > 0 else 0
+        monthly_ratio = projected_monthly / MONTHLY_BUDGET_JPY if MONTHLY_BUDGET_JPY > 0 else 0
+        max_ratio = max(daily_ratio, monthly_ratio)
+
+        if max_ratio >= ALERT_THRESHOLD_STOP:
+            msg = f"予算90%超過 - 即時停止: 日次{projected_daily:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{projected_monthly:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
+            logger.critical(msg)
+            return {
+                "allowed": False,
+                "daily_remaining_jpy": max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy),
+                "monthly_remaining_jpy": max(0, MONTHLY_BUDGET_JPY - self._monthly_spend_jpy),
+                "alert_level": "stop",
+                "message": msg,
+            }
+
+        # インメモリ集計更新（予算範囲内の場合のみ加算）
         self._daily_spend_jpy += amount_jpy
         self._monthly_spend_jpy += amount_jpy
         if is_info_collection:
@@ -158,16 +182,12 @@ class BudgetGuard:
             # テーブルが存在しない場合もあるため警告のみ
             logger.warning(f"予算記録DB保存失敗（インメモリで継続）: {e}")
 
-        # アラートレベル判定
+        # アラートレベル判定（stop は加算前にチェック済みなのでここでは warn/ok のみ）
         daily_ratio = self._daily_spend_jpy / DAILY_BUDGET_JPY if DAILY_BUDGET_JPY > 0 else 0
         monthly_ratio = self._monthly_spend_jpy / MONTHLY_BUDGET_JPY if MONTHLY_BUDGET_JPY > 0 else 0
         max_ratio = max(daily_ratio, monthly_ratio)
 
-        if max_ratio >= ALERT_THRESHOLD_STOP:
-            alert_level = "stop"
-            msg = f"予算90%超過 - 即時停止: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{self._monthly_spend_jpy:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
-            logger.critical(msg)
-        elif max_ratio >= ALERT_THRESHOLD_WARN:
+        if max_ratio >= ALERT_THRESHOLD_WARN:
             alert_level = "warn"
             msg = f"予算80%警告: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{self._monthly_spend_jpy:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
             logger.warning(msg)
@@ -216,8 +236,10 @@ class BudgetGuard:
         }
 
     async def record_chat_spend(self, amount_jpy: float, model: str = ""):
-        """チャット経由のAPI支出を記録"""
+        """チャット経由のAPI支出を記録（日次/月次にも加算）"""
         self._chat_spend_jpy += amount_jpy
+        self._daily_spend_jpy += amount_jpy
+        self._monthly_spend_jpy += amount_jpy
         # DBにもchat固有マーカー付きで記録
         try:
             pool = await self._get_pool()

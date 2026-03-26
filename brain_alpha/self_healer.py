@@ -17,14 +17,13 @@ import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
+
+from tools.db_pool import get_connection
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.brain_alpha.self_healer")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 NODE_IPS = {
     "bravo": "100.75.146.9",
@@ -44,14 +43,6 @@ NODE_STATES = {
 # CHARLIE SSH猶予タイマー（初回検出時刻を記録）
 _charlie_ssh_fail_since: Optional[float] = None
 CHARLIE_GRACE_PERIOD = 600  # 10分
-
-
-async def _get_conn() -> Optional[asyncpg.Connection]:
-    try:
-        return await asyncpg.connect(DATABASE_URL)
-    except Exception as e:
-        logger.error(f"DB接続失敗: {e}")
-        return None
 
 
 def _ssh_check(ip: str, timeout: int = 5) -> bool:
@@ -116,13 +107,10 @@ async def self_heal_check() -> dict:
     """全ノードサービス確認 + 自動修復"""
     global _charlie_ssh_fail_since
 
-    conn = await _get_conn()
-    if not conn:
-        return {"status": "db_error"}
-
     results = {"checked_at": datetime.now(timezone.utc).isoformat(), "nodes": {}, "fixes": []}
 
-    try:
+    async with get_connection() as conn:
+      try:
         # 現在のnode_state取得
         states = {}
         rows = await conn.fetch("SELECT node_name, state FROM node_state")
@@ -203,11 +191,20 @@ async def self_heal_check() -> dict:
                 await _update_node_state(conn, node, node_result, "サービス復帰検出（自動）")
                 await _notify(f"✅ {node.upper()}: 復帰。状態={node_result}")
 
-    except Exception as e:
+        # 結果をevent_logに記録（修復があった場合のみ）
+        if results["fixes"]:
+            try:
+                from tools.event_logger import log_event
+                await log_event("self_heal.executed", "system", {
+                    "fixes": results["fixes"],
+                    "nodes": {k: v for k, v in results["nodes"].items() if v != "healthy"},
+                }, severity="warning")
+            except Exception:
+                pass
+
+      except Exception as e:
         logger.error(f"self_heal_check例外: {e}")
         results["error"] = str(e)
-    finally:
-        await conn.close()
 
     return results
 
@@ -290,66 +287,61 @@ async def _check_remote_services(conn, node: str, ip: str, fixes: list) -> str:
 
 async def data_integrity_check() -> dict:
     """データ整合性を確認・修復"""
-    conn = await _get_conn()
-    if not conn:
-        return {"status": "db_error"}
-
     results = {"checked_at": datetime.now(timezone.utc).isoformat(), "fixes": []}
 
-    try:
-        # 1. stuck tasks: status='running' かつ30分以上前 → 'failed'
-        stuck = await conn.execute(
-            """UPDATE tasks SET status = 'failed', updated_at = NOW()
-               WHERE status = 'running'
-                 AND updated_at < NOW() - INTERVAL '30 minutes'"""
-        )
-        stuck_count = int(stuck.split()[-1]) if stuck else 0
-        if stuck_count:
-            results["fixes"].append(f"stuck_tasks: {stuck_count}件→failed")
-
-        # 2. 72h超過承認 → 自動却下
-        expired_approvals = await conn.execute(
-            """UPDATE approval_queue SET status = 'expired', responded_at = NOW()
-               WHERE status = 'pending'
-                 AND requested_at < NOW() - INTERVAL '72 hours'"""
-        )
-        exp_count = int(expired_approvals.split()[-1]) if expired_approvals else 0
-        if exp_count:
-            results["fixes"].append(f"expired_approvals: {exp_count}件")
-
-        # 3. 7日超過handoff → expired
-        expired_handoffs = await conn.execute(
-            """UPDATE brain_handoff SET status = 'expired'
-               WHERE status = 'pending'
-                 AND created_at < NOW() - INTERVAL '7 days'"""
-        )
-        hoff_count = int(expired_handoffs.split()[-1]) if expired_handoffs else 0
-        if hoff_count:
-            results["fixes"].append(f"expired_handoffs: {hoff_count}件")
-
-        # 4. 10万件超過debug eventログ削除
-        total_events = await conn.fetchval("SELECT COUNT(*) FROM event_log WHERE severity = 'info'")
-        if total_events and total_events > 100000:
-            delete_count = total_events - 80000  # 8万件まで削減
-            await conn.execute(
-                """DELETE FROM event_log WHERE id IN (
-                     SELECT id FROM event_log WHERE severity = 'info'
-                     ORDER BY created_at ASC LIMIT $1
-                   )""",
-                delete_count,
+    async with get_connection() as conn:
+        try:
+            # 1. stuck tasks: status='running' かつ30分以上前 → 'failed'
+            stuck = await conn.execute(
+                """UPDATE tasks SET status = 'failed', updated_at = NOW()
+                   WHERE status = 'running'
+                     AND updated_at < NOW() - INTERVAL '30 minutes'"""
             )
-            results["fixes"].append(f"old_events_pruned: {delete_count}件")
+            stuck_count = int(stuck.split()[-1]) if stuck else 0
+            if stuck_count:
+                results["fixes"].append(f"stuck_tasks: {stuck_count}件→failed")
 
-        results["status"] = "ok"
-        if results["fixes"]:
-            logger.info(f"データ整合性修復: {results['fixes']}")
+            # 2. 72h超過承認 → 自動却下
+            expired_approvals = await conn.execute(
+                """UPDATE approval_queue SET status = 'expired', responded_at = NOW()
+                   WHERE status = 'pending'
+                     AND requested_at < NOW() - INTERVAL '72 hours'"""
+            )
+            exp_count = int(expired_approvals.split()[-1]) if expired_approvals else 0
+            if exp_count:
+                results["fixes"].append(f"expired_approvals: {exp_count}件")
 
-    except Exception as e:
-        logger.error(f"データ整合性チェック失敗: {e}")
-        results["status"] = "error"
-        results["error"] = str(e)
-    finally:
-        await conn.close()
+            # 3. 7日超過handoff → expired
+            expired_handoffs = await conn.execute(
+                """UPDATE brain_handoff SET status = 'expired'
+                   WHERE status = 'pending'
+                     AND created_at < NOW() - INTERVAL '7 days'"""
+            )
+            hoff_count = int(expired_handoffs.split()[-1]) if expired_handoffs else 0
+            if hoff_count:
+                results["fixes"].append(f"expired_handoffs: {hoff_count}件")
+
+            # 4. 10万件超過debug eventログ削除
+            total_events = await conn.fetchval("SELECT COUNT(*) FROM event_log WHERE severity = 'info'")
+            if total_events and total_events > 100000:
+                delete_count = total_events - 80000  # 8万件まで削減
+                await conn.execute(
+                    """DELETE FROM event_log WHERE id IN (
+                         SELECT id FROM event_log WHERE severity = 'info'
+                         ORDER BY created_at ASC LIMIT $1
+                       )""",
+                    delete_count,
+                )
+                results["fixes"].append(f"old_events_pruned: {delete_count}件")
+
+            results["status"] = "ok"
+            if results["fixes"]:
+                logger.info(f"データ整合性修復: {results['fixes']}")
+
+        except Exception as e:
+            logger.error(f"データ整合性チェック失敗: {e}")
+            results["status"] = "error"
+            results["error"] = str(e)
 
     return results
 
@@ -390,61 +382,56 @@ async def brain_alpha_health_check() -> dict:
 
 async def get_healing_stats() -> dict:
     """自律修復の統計を返す"""
-    conn = await _get_conn()
-    if not conn:
-        return {"status": "db_error"}
+    async with get_connection() as conn:
+        try:
+            # 24h修復件数
+            total_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '24 hours'"
+            )
+            success_24h = await conn.fetchval(
+                """SELECT COUNT(*) FROM auto_fix_log
+                   WHERE created_at > NOW() - INTERVAL '24 hours'
+                     AND fix_result IN ('success', 'attempted')"""
+            )
 
-    try:
-        # 24h修復件数
-        total_24h = await conn.fetchval(
-            "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '24 hours'"
-        )
-        success_24h = await conn.fetchval(
-            """SELECT COUNT(*) FROM auto_fix_log
-               WHERE created_at > NOW() - INTERVAL '24 hours'
-                 AND fix_result IN ('success', 'attempted')"""
-        )
+            # 7日修復件数
+            total_7d = await conn.fetchval(
+                "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '7 days'"
+            )
 
-        # 7日修復件数
-        total_7d = await conn.fetchval(
-            "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '7 days'"
-        )
+            # カテゴリ別
+            by_type = await conn.fetch(
+                """SELECT error_type, COUNT(*) as cnt, fix_result
+                   FROM auto_fix_log
+                   WHERE created_at > NOW() - INTERVAL '7 days'
+                   GROUP BY error_type, fix_result
+                   ORDER BY cnt DESC LIMIT 10"""
+            )
 
-        # カテゴリ別
-        by_type = await conn.fetch(
-            """SELECT error_type, COUNT(*) as cnt, fix_result
-               FROM auto_fix_log
-               WHERE created_at > NOW() - INTERVAL '7 days'
-               GROUP BY error_type, fix_result
-               ORDER BY cnt DESC LIMIT 10"""
-        )
+            # 直近修復ログ
+            recent = await conn.fetch(
+                """SELECT id, error_type, error_detail, fix_strategy, fix_result, created_at
+                   FROM auto_fix_log ORDER BY created_at DESC LIMIT 20"""
+            )
 
-        # 直近修復ログ
-        recent = await conn.fetch(
-            """SELECT id, error_type, error_detail, fix_strategy, fix_result, created_at
-               FROM auto_fix_log ORDER BY created_at DESC LIMIT 20"""
-        )
-
-        return {
-            "total_24h": total_24h or 0,
-            "success_24h": success_24h or 0,
-            "success_rate_24h": round((success_24h or 0) / max(total_24h or 1, 1) * 100, 1),
-            "total_7d": total_7d or 0,
-            "by_type": [{"error_type": r["error_type"], "count": r["cnt"], "result": r["fix_result"]} for r in by_type],
-            "recent": [
-                {
-                    "id": r["id"],
-                    "error_type": r["error_type"],
-                    "error_detail": (r["error_detail"] or "")[:100],
-                    "fix_strategy": r["fix_strategy"],
-                    "fix_result": r["fix_result"],
-                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-                }
-                for r in recent
-            ],
-        }
-    except Exception as e:
-        logger.error(f"修復統計取得失敗: {e}")
-        return {"status": "error", "error": str(e)}
-    finally:
-        await conn.close()
+            return {
+                "total_24h": total_24h or 0,
+                "success_24h": success_24h or 0,
+                "success_rate_24h": round((success_24h or 0) / max(total_24h or 1, 1) * 100, 1),
+                "total_7d": total_7d or 0,
+                "by_type": [{"error_type": r["error_type"], "count": r["cnt"], "result": r["fix_result"]} for r in by_type],
+                "recent": [
+                    {
+                        "id": r["id"],
+                        "error_type": r["error_type"],
+                        "error_detail": (r["error_detail"] or "")[:100],
+                        "fix_strategy": r["fix_strategy"],
+                        "fix_result": r["fix_result"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    }
+                    for r in recent
+                ],
+            }
+        except Exception as e:
+            logger.error(f"修復統計取得失敗: {e}")
+            return {"status": "error", "error": str(e)}

@@ -3,19 +3,17 @@ Brain-β → Brain-α エスカレーション共通ヘルパー
 claude_code_queue / brain_handoff へのレコード挿入を一元化。
 """
 
-import os
 import json
 import logging
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
+
+from tools.db_pool import get_connection
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.brain_alpha.escalation")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 
 async def escalate_to_queue(
@@ -29,8 +27,7 @@ async def escalate_to_queue(
 ) -> Optional[int]:
     """claude_code_queueにエスカレーションを追加"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        async with get_connection() as conn:
             row_id = await conn.fetchval(
                 """INSERT INTO claude_code_queue
                    (priority, category, description, auto_solvable,
@@ -43,8 +40,6 @@ async def escalate_to_queue(
             )
             logger.info(f"エスカレーション: {source_agent} → queue#{row_id} ({category})")
             return row_id
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"エスカレーション失敗: {e}")
         return None
@@ -59,8 +54,7 @@ async def handoff_to_alpha(
 ) -> Optional[int]:
     """brain_handoffにβ→αハンドオフを追加"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        async with get_connection() as conn:
             row_id = await conn.fetchval(
                 """INSERT INTO brain_handoff
                    (direction, category, source_agent, title, detail, context, status)
@@ -71,8 +65,6 @@ async def handoff_to_alpha(
             )
             logger.info(f"ハンドオフβ→α: {source_agent} → handoff#{row_id} ({title})")
             return row_id
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"ハンドオフβ→α失敗: {e}")
         return None
@@ -81,8 +73,7 @@ async def handoff_to_alpha(
 async def get_alpha_directives(category: str = None, status: str = "pending") -> list:
     """brain_handoffからα→β指令を取得"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        async with get_connection() as conn:
             if category:
                 rows = await conn.fetch(
                     """SELECT id, category, title, detail, context, status, created_at
@@ -110,8 +101,6 @@ async def get_alpha_directives(category: str = None, status: str = "pending") ->
                 }
                 for r in rows
             ]
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"α指令取得失敗: {e}")
         return []
@@ -120,15 +109,12 @@ async def get_alpha_directives(category: str = None, status: str = "pending") ->
 async def acknowledge_directive(handoff_id: int) -> bool:
     """指令をacknowledged状態に更新"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        async with get_connection() as conn:
             await conn.execute(
                 "UPDATE brain_handoff SET status = 'acknowledged', acknowledged_at = NOW() WHERE id = $1",
                 handoff_id,
             )
             return True
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"指令acknowledge失敗: {e}")
         return False

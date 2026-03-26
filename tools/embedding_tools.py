@@ -9,7 +9,6 @@ import logging
 from typing import Optional
 
 import httpx
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,15 +51,15 @@ async def embed_and_store_persona(persona_id: int, text: str):
     if not embedding:
         return False
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
+            # pgvectorのvector型にはリストの文字列表現を渡す
+            embedding_str = str(embedding)
             await conn.execute(
-                "UPDATE persona_memory SET embedding = $1 WHERE id = $2",
-                json.dumps(embedding), persona_id,
+                "UPDATE persona_memory SET embedding = $1::vector WHERE id = $2",
+                embedding_str, persona_id,
             )
             return True
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"persona embedding保存失敗: {e}")
         return False
@@ -72,8 +71,9 @@ async def search_similar_persona(query: str, limit: int = 5) -> list:
     if not embedding:
         return []
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
+            embedding_str = str(embedding)
             rows = await conn.fetch(
                 """SELECT id, category, content, reasoning,
                     1 - (embedding <=> $1::vector) as similarity
@@ -81,11 +81,9 @@ async def search_similar_persona(query: str, limit: int = 5) -> list:
                 WHERE embedding IS NOT NULL
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2""",
-                json.dumps(embedding), limit,
+                embedding_str, limit,
             )
             return [dict(r) for r in rows]
-        finally:
-            await conn.close()
     except Exception as e:
         logger.error(f"persona類似検索失敗: {e}")
         return []

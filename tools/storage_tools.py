@@ -117,38 +117,46 @@ class SqliteHelper:
 
     def execute(self, query: str, params: tuple = ()) -> Optional[int]:
         """SQL実行（INSERT/UPDATE/DELETE）"""
+        conn = None
         try:
             conn = self._connect()
             cursor = conn.execute(query, params)
             conn.commit()
-            lastrowid = cursor.lastrowid
-            conn.close()
-            return lastrowid
+            return cursor.lastrowid
         except Exception as e:
             logger.error(f"SQLite実行失敗: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
     def fetch(self, query: str, params: tuple = ()) -> list:
         """SELECT結果を取得"""
+        conn = None
         try:
             conn = self._connect()
             rows = conn.execute(query, params).fetchall()
-            conn.close()
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error(f"SQLiteフェッチ失敗: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     def fetchone(self, query: str, params: tuple = ()) -> Optional[dict]:
         """単一行を取得"""
+        conn = None
         try:
             conn = self._connect()
             row = conn.execute(query, params).fetchone()
-            conn.close()
             return dict(row) if row else None
         except Exception as e:
             logger.error(f"SQLiteフェッチ行失敗: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
 
 # ===== 中間成果物ストレージ（CLAUDE.mdルール18）=====

@@ -23,6 +23,7 @@ import os
 import hashlib
 import struct
 import asyncio
+import time as _time_mod
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -47,7 +48,10 @@ _MAX_DEVIATION_RATE = 0.15                  # 絶対上限 15%
 _INTUITION_MULTIPLIER = 1.3                 # 人間直感入力がある日の倍率
 
 # メモリ上のみに存在する変異フラグ（プロセス再起動で消える）
+# 最大1000エントリ、1時間超過エントリは自動パージ
 _pending_mutations: dict = {}
+_PENDING_MAX_SIZE = 1000
+_PENDING_MAX_AGE_SEC = 3600
 
 
 class _MutationState:
@@ -63,7 +67,8 @@ class _MutationState:
         try:
             from pysqlcipher3 import dbapi2 as sqlcipher
             conn = sqlcipher.connect(_MUTATION_DB_PATH)
-            conn.execute(f"PRAGMA key='{_SQLCIPHER_PASSPHRASE}'")
+            safe_passphrase = _SQLCIPHER_PASSPHRASE.replace("'", "''")
+            conn.execute(f"PRAGMA key='{safe_passphrase}'")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS mutation_state (
                     key TEXT PRIMARY KEY,
@@ -205,6 +210,25 @@ def _seed_to_float(seed: bytes) -> float:
     return value / (2**64)
 
 
+def _purge_stale_pending():
+    """古いエントリと超過エントリをパージしてメモリリークを防止"""
+    try:
+        now = _time_mod.time()
+        # 1時間超過エントリを削除
+        stale_keys = [k for k, v in _pending_mutations.items()
+                      if now - v.get("_ts", 0) > _PENDING_MAX_AGE_SEC]
+        for k in stale_keys:
+            _pending_mutations.pop(k, None)
+        # 最大サイズ超過時は古い順に削除
+        if len(_pending_mutations) > _PENDING_MAX_SIZE:
+            sorted_keys = sorted(_pending_mutations.keys(),
+                                 key=lambda k: _pending_mutations[k].get("_ts", 0))
+            for k in sorted_keys[:len(_pending_mutations) - _PENDING_MAX_SIZE]:
+                _pending_mutations.pop(k, None)
+    except Exception:
+        pass
+
+
 # ===== 変異判定・適用 =====
 
 def should_mutate(intuition_input: Optional[str] = None) -> bool:
@@ -254,11 +278,13 @@ def apply_deviation(original_value: float, action_id: str) -> float:
         # 0.0〜1.0の範囲にクランプ
         mutated_value = max(0.0, min(1.0, mutated_value))
 
-        # 変異フラグをメモリに一時保持
+        # 変異フラグをメモリに一時保持（タイムスタンプ付き）
+        _purge_stale_pending()
         _pending_mutations[action_id] = {
             "original": original_value,
             "mutated": mutated_value,
             "deviation": deviation,
+            "_ts": _time_mod.time(),
         }
 
         return mutated_value
@@ -282,10 +308,12 @@ def apply_deviation_int(original_value: int, max_shift: int, action_id: str) -> 
         shift = int(direction * max_shift * _state.deviation_rate * deviation_roll)
         mutated = original_value + shift
 
+        _purge_stale_pending()
         _pending_mutations[action_id] = {
             "original": original_value,
             "mutated": mutated,
             "shift": shift,
+            "_ts": _time_mod.time(),
         }
 
         return mutated
@@ -338,8 +366,11 @@ def cleanup_stale_flags(max_age_seconds: int = 3600):
     report_outcome()が呼ばれなかった変異フラグを定期的にクリーンアップする。
     """
     try:
-        # 全削除（タイムスタンプは保持しないので一律クリア）
-        _pending_mutations.clear()
+        now = _time_mod.time()
+        stale_keys = [k for k, v in _pending_mutations.items()
+                      if now - v.get("_ts", 0) > max_age_seconds]
+        for k in stale_keys:
+            _pending_mutations.pop(k, None)
     except Exception:
         pass
 
