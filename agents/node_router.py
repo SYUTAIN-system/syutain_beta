@@ -257,10 +257,8 @@ class NodeRouter:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            import asyncpg
-            DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_reasoning_trace
                        (agent_name, goal_id, task_id, action, reasoning, confidence, context)
@@ -268,8 +266,6 @@ class NodeRouter:
                     "NODE_ROUTER", goal_id, task_id, action, reasoning,
                     confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                 )
-            finally:
-                await conn.close()
         except Exception:
             pass
 
@@ -281,7 +277,8 @@ class NodeRouter:
             return False
         load = self._node_loads.get(name, {})
         last_seen = load.get("last_seen", 0)
-        return (time.time() - last_seen) < 90 if last_seen > 0 else True  # 初期状態は利用可能と仮定
+        # 初期状態（ハートビート未受信）は利用不可とする — 安全側に倒す
+        return (time.time() - last_seen) < 90 if last_seen > 0 else False
 
     def register_handler(self, task_type: str, handler: Callable) -> None:
         """タスクハンドラを登録"""

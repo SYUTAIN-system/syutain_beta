@@ -20,6 +20,7 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 
+import httpx
 import psutil
 
 from dotenv import load_dotenv
@@ -86,16 +87,23 @@ class Worker:
         """ワーカーを起動"""
         logger.info(f"ワーカー起動: {self.node} — {self.role['description']}")
 
-        # NATS接続
-        try:
-            from tools.nats_client import get_nats_client
-            self._nats_client = await get_nats_client()
-            if not self._nats_client or not self._nats_client.nc:
-                logger.error("NATS接続失敗。3秒後にリトライ...")
-                await asyncio.sleep(3)
+        # NATS接続（指数バックオフリトライ: 1s, 2s, 4s, 8s, 16s）
+        from tools.nats_client import get_nats_client
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
                 self._nats_client = await get_nats_client()
-        except Exception as e:
-            logger.error(f"NATS接続失敗: {e}")
+                if self._nats_client and self._nats_client.nc:
+                    logger.info(f"NATS接続成功 (attempt {attempt + 1})")
+                    break
+            except Exception as e:
+                logger.error(f"NATS接続失敗 (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                backoff = 2 ** attempt  # 1, 2, 4, 8, 16
+                logger.info(f"NATS再接続を{backoff}秒後にリトライ...")
+                await asyncio.sleep(backoff)
+        else:
+            logger.error("NATS接続: 全リトライ失敗。ワーカー起動を中止")
             return
 
         # SQLiteローカルDB初期化
@@ -225,11 +233,16 @@ class Worker:
                     logger.warning("InfoCollector未初期化。情報収集をスキップ")
 
             elif task_type in ("browser", "browser_action", "extract", "navigate") and "browser_agent" in self._agents:
-                result = await self._agents["browser_agent"].execute(
-                    action_type=data.get("action_type", "extract"),
-                    url=data.get("url", ""),
-                    params=data.get("params", {}),
-                )
+                target_url = data.get("url", "")
+                if not target_url:
+                    result = {"status": "skipped", "error": "URLが指定されていないためスキップ"}
+                    logger.warning(f"browser_action: URLなしのためスキップ (task: {data.get('task_id', '?')})")
+                else:
+                    result = await self._agents["browser_agent"].execute(
+                        action_type=data.get("action_type", "extract"),
+                        url=target_url,
+                        params=data.get("params", {}),
+                    )
             elif task_type in ("computer_use", "login", "captcha") and "computer_use_agent" in self._agents:
                 result = await self._agents["computer_use_agent"].execute_multi_step(
                     goal=data.get("goal", ""),
@@ -243,9 +256,17 @@ class Worker:
                 # ローカルLLM推論タスク
                 try:
                     from tools.llm_router import call_llm, choose_best_model_v6
+                    # ランタイムでOllamaの利用可否を確認
+                    _local_ok = False
+                    try:
+                        async with httpx.AsyncClient(timeout=3.0) as _hc:
+                            _resp = await _hc.get("http://localhost:11434/api/tags")
+                            _local_ok = _resp.status_code == 200
+                    except Exception:
+                        _local_ok = False
                     model = choose_best_model_v6(
                         task_type=task_type, quality="medium",
-                        local_available=True, budget_sensitive=True,
+                        local_available=_local_ok, budget_sensitive=True,
                     )
                     llm_result = await call_llm(
                         prompt=data.get("prompt", ""),
