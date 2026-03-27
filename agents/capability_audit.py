@@ -17,7 +17,7 @@ import shutil
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
+from tools.db_pool import get_connection
 from dotenv import load_dotenv
 
 from tools.nats_client import get_nats_client
@@ -26,7 +26,6 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.capability_audit")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 # ノード定義（設計書 第2章準拠）
 NODE_DEFINITIONS = {
@@ -83,17 +82,7 @@ class CapabilityAudit:
     """能力監査エンジン"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
         self._last_snapshot: Optional[dict] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
 
     async def run_full_audit(self) -> dict:
         """
@@ -119,7 +108,14 @@ class CapabilityAudit:
 
         # 各ノードの監査を並列実行
         node_tasks = [self._audit_node(name) for name in NODE_DEFINITIONS]
-        node_results = await asyncio.gather(*node_tasks, return_exceptions=True)
+        try:
+            node_results = await asyncio.gather(*node_tasks, return_exceptions=True)
+        except Exception as e:
+            # gather前の例外で未awaitコルーチンが残らないようclose
+            for t in node_tasks:
+                if hasattr(t, 'close'):
+                    t.close()
+            raise
 
         for name, result in zip(NODE_DEFINITIONS, node_results):
             if isinstance(result, Exception):
@@ -157,20 +153,20 @@ class CapabilityAudit:
             try:
                 from tools.event_logger import log_event
                 import asyncio
-                asyncio.ensure_future(log_event(
+                asyncio.create_task(log_event(
                     "system.capability_diff", "system",
                     {"diff_count": len(diff), "changes": {k: str(v)[:100] for k, v in list(diff.items())[:5]}},
                 ))
                 # 新規ツール・モデル検出時は通知
                 new_items = [k for k in diff if diff[k].get("from") in (None, "unknown", "offline")]
                 if new_items:
-                    asyncio.ensure_future(log_event(
+                    asyncio.create_task(log_event(
                         "system.new_capability_detected", "system",
                         {"new_capabilities": new_items},
                     ))
                     try:
                         from tools.discord_notify import notify_discord
-                        asyncio.ensure_future(notify_discord(
+                        asyncio.create_task(notify_discord(
                             f"🔍 新規能力検知: {', '.join(new_items[:3])}"
                         ))
                     except Exception:
@@ -409,18 +405,16 @@ class CapabilityAudit:
     async def _save_snapshot(self, snapshot: dict, diff: Optional[dict]):
         """スナップショットをPostgreSQLに保存"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO capability_snapshots (snapshot_data, diff_from_previous)
-                        VALUES ($1, $2)
-                        """,
-                        json.dumps(snapshot, ensure_ascii=False, default=str),
-                        json.dumps(diff, ensure_ascii=False, default=str) if diff else None,
-                    )
-                logger.info("能力監査スナップショットをPostgreSQLに保存")
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO capability_snapshots (snapshot_data, diff_from_previous)
+                    VALUES ($1, $2)
+                    """,
+                    json.dumps(snapshot, ensure_ascii=False, default=str),
+                    json.dumps(diff, ensure_ascii=False, default=str) if diff else None,
+                )
+            logger.info("能力監査スナップショットをPostgreSQLに保存")
         except Exception as e:
             logger.error(f"スナップショット保存失敗: {e}")
 
@@ -439,26 +433,19 @@ class CapabilityAudit:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "CAPABILITY_AUDIT", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "CAPABILITY_AUDIT", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception:
             pass
 
     async def close(self):
-        """接続プールを閉じる"""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass
 
 
 # シングルトン

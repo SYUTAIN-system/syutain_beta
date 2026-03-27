@@ -80,8 +80,8 @@ async def _load_intel_themes(conn) -> list[str]:
         rows = await conn.fetch(
             """SELECT title, summary FROM intel_items
             WHERE created_at > NOW() - INTERVAL '3 days'
-            AND status = 'reviewed'
-            ORDER BY relevance_score DESC LIMIT 10"""
+            AND review_flag IN ('reviewed', 'actionable')
+            ORDER BY importance_score DESC LIMIT 10"""
         )
         return [f"{r['title']}: {(r['summary'] or '')[:80]}" for r in rows if r["title"]]
     except Exception as e:

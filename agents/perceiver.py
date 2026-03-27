@@ -13,34 +13,23 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 from agents.capability_audit import get_capability_audit
 from tools.nats_client import get_nats_client
 from tools.budget_guard import get_budget_guard
+from tools.db_pool import get_connection
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.perceiver")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 
 class Perceiver:
     """認識エンジン — 環境状態の収集と構造化"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def perceive(self, goal_id: str, raw_goal: str) -> dict:
         """
@@ -179,6 +168,39 @@ class Perceiver:
 
         perception["checklist"]["goal_received"] = True
 
+        # 11. ペルソナ記憶 — 目標に関連するDaichiの価値観・判断基準（CLAUDE.md ルール23）
+        try:
+            from brain_alpha.memory_manager import recall_relevant_memory
+            persona_memories = await recall_relevant_memory(raw_goal, limit=5)
+            perception["persona_context"] = persona_memories
+            perception["checklist"]["persona_memory_loaded"] = bool(persona_memories)
+        except Exception as e:
+            logger.warning(f"ペルソナ記憶読み込み失敗: {e}")
+            perception["persona_context"] = []
+            perception["checklist"]["persona_memory_loaded"] = False
+
+        # 12. セッション記憶 — 直近セッションの経験・未解決課題
+        try:
+            from brain_alpha.memory_manager import load_session_memory
+            session_memories = await load_session_memory(limit=2)
+            perception["session_memory"] = session_memories
+            perception["checklist"]["session_memory_loaded"] = bool(session_memories)
+        except Exception as e:
+            logger.warning(f"セッション記憶読み込み失敗: {e}")
+            perception["session_memory"] = []
+            perception["checklist"]["session_memory_loaded"] = False
+
+        # 13. 直近の重要インテリジェンス（importance_score上位）
+        try:
+            from tools.agent_context import build_agent_context
+            intel_context = await build_agent_context("proposal_engine")
+            if intel_context:
+                perception["intel_context"] = intel_context
+            perception["checklist"]["intel_context_loaded"] = bool(intel_context)
+        except Exception as e:
+            logger.warning(f"インテリジェンスコンテキスト読み込み失敗: {e}")
+            perception["checklist"]["intel_context_loaded"] = False
+
         ok_count = sum(1 for v in perception['checklist'].values() if v)
         total_count = len(perception['checklist'])
         logger.info(f"認識完了: {ok_count}/{total_count} チェック項目OK")
@@ -200,16 +222,14 @@ class Perceiver:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "PERCEIVER", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "PERCEIVER", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception:
             pass
 
@@ -241,11 +261,7 @@ class Perceiver:
     async def _load_previous_attempts(self, goal_id: str) -> list[dict]:
         """過去の同一ゴールへの試行を読み込む"""
         try:
-            pool = await self._get_pool()
-            if not pool:
-                return []
-
-            async with pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT id, type, status, output_data, cost_jpy, quality_score, created_at
@@ -264,11 +280,7 @@ class Perceiver:
     async def _load_market_context(self) -> list[dict]:
         """直近の情報収集結果を読み込む"""
         try:
-            pool = await self._get_pool()
-            if not pool:
-                return []
-
-            async with pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT source, title, summary, importance_score, category, created_at
@@ -284,8 +296,4 @@ class Perceiver:
             return []
 
     async def close(self):
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass

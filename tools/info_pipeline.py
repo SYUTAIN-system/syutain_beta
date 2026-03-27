@@ -13,14 +13,11 @@ import logging
 from typing import Optional
 from datetime import datetime
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.info_pipeline")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 # 情報収集キーワード（80+個、設計書準拠）
 INTEL_KEYWORDS = [
@@ -77,23 +74,10 @@ class InfoPipeline:
     """情報収集パイプライン"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def close(self) -> None:
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"DB接続プール終了エラー: {e}")
+        pass
 
     # ===== パイプライン実行 =====
 
@@ -435,16 +419,15 @@ class InfoPipeline:
                            confidence: float = None, context: dict = None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5)""",
-                        "info_pipeline", action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5)""",
+                    "info_pipeline", action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception as e:
             logger.debug(f"トレース記録失敗（無視）: {e}")
 
@@ -594,19 +577,16 @@ class InfoPipeline:
 
     async def _save_items(self, items: list) -> int:
         """intel_itemsテーブルに保存"""
-        pool = await self._get_pool()
-        if not pool:
-            logger.warning("DB接続不可: 情報収集結果を保存できません")
-            return 0
+        from tools.db_pool import get_connection
 
         saved = 0
         for item in items:
             try:
-                async with pool.acquire() as conn:
+                async with get_connection() as conn:
                     await conn.execute(
                         """
-                        INSERT INTO intel_items (source, keyword, title, summary, url, importance_score, category)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        INSERT INTO intel_items (source, keyword, title, summary, url, importance_score, category, review_flag)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         """,
                         item.get("source", ""),
                         item.get("keyword", ""),
@@ -615,6 +595,7 @@ class InfoPipeline:
                         item.get("url", ""),
                         item.get("importance_score", 0.0),
                         item.get("category", "other"),
+                        "reviewed" if item.get("importance_score", 0.0) >= 0.5 else "raw",
                     )
                     saved += 1
                     # 高重要度（0.7以上）はDiscord通知 + Brain-αハンドオフ
@@ -649,11 +630,9 @@ class InfoPipeline:
 
     async def get_recent_items(self, limit: int = 20, category: Optional[str] = None) -> list:
         """最近のintel_itemsを取得"""
-        pool = await self._get_pool()
-        if not pool:
-            return []
         try:
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 if category:
                     rows = await conn.fetch(
                         "SELECT * FROM intel_items WHERE category = $1 ORDER BY created_at DESC LIMIT $2",

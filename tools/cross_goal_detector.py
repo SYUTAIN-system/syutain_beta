@@ -7,20 +7,16 @@ SYUTAINβ V25 Cross-Goal干渉検知（Layer 9）
 V25新規機能。
 """
 
-import os
 import time
 import logging
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.cross_goal_detector")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 # 干渉検知ルール閾値
 API_CONCURRENT_REQUEST_LIMIT = 10       # 同一APIへの同時リクエスト上限
@@ -32,23 +28,12 @@ class CrossGoalDetector:
     """V25 Cross-Goal干渉検知エンジン"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
         # アクティブゴールのリソース使用状況をインメモリ追跡
         self._goal_resources: dict[str, dict] = {}
         # goal_id -> { api_calls: {api: count}, nodes_used: {node: cpu_pct}, budget_used_jpy: float, actions: [str] }
         # api_callsカウンターの時間ベースリセット（1時間ごと）
         self._last_reset_time: float = time.monotonic()
         self._RESET_INTERVAL_SEC: float = 3600.0  # 1時間
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        """PostgreSQL接続プールを取得"""
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
 
     def register_goal(self, goal_id: str):
         """アクティブゴールを登録"""
@@ -320,12 +305,8 @@ class CrossGoalDetector:
         return sorted_goals[-1] if len(sorted_goals) > 1 else None
 
     async def close(self):
-        """接続プールを閉じる"""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        """リソース解放（互換性のため保持）"""
+        pass
 
 
 # シングルトン

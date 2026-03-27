@@ -14,17 +14,15 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
+from tools.db_pool import get_connection
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.planner")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 # タスクタイプ定義
 TASK_TYPES = [
@@ -128,16 +126,7 @@ class Planner:
     """Task Graph Planner — ゴールをタスクDAGに分解"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def plan(self, goal_packet: dict, perception: dict) -> TaskGraph:
         """
@@ -161,8 +150,10 @@ class Planner:
 
         capability = perception.get("capability_snapshot", {})
         budget = perception.get("budget", {})
+        persona_context = perception.get("persona_context", {})
+        intel_context = perception.get("intel_context", {})
 
-        plan_prompt = self._build_plan_prompt(goal_packet, capability, budget)
+        plan_prompt = self._build_plan_prompt(goal_packet, capability, budget, persona_context, intel_context)
 
         try:
             llm_result = await call_llm(
@@ -208,12 +199,24 @@ class Planner:
 
         return task_graph
 
-    def _build_plan_prompt(self, goal_packet: dict, capability: dict, budget: dict) -> str:
+    def _build_plan_prompt(self, goal_packet: dict, capability: dict, budget: dict, persona_context: dict = None, intel_context: dict = None) -> str:
         """計画用プロンプトを生成"""
         nodes_available = []
         for node_name, node_info in capability.get("nodes", {}).items():
             if node_info.get("status") == "healthy":
                 nodes_available.append(f"- {node_name}: {node_info.get('role', '不明')}")
+
+        # ペルソナ情報をプロンプトに注入（CLAUDE.md ルール23準拠）
+        persona_section = ""
+        if persona_context:
+            values = persona_context.get("values", [])
+            taboos = persona_context.get("taboos", [])
+            if values or taboos:
+                persona_section = "\n## ペルソナ制約（島原大知）\n"
+                if values:
+                    persona_section += "- 価値観: " + ", ".join(str(v) for v in values[:5]) + "\n"
+                if taboos:
+                    persona_section += "- 禁止事項: " + ", ".join(str(t) for t in taboos[:5]) + "\n"
 
         return f"""以下のゴールをタスクDAGに分解してください。
 
@@ -227,7 +230,7 @@ class Planner:
 - 予算残: 日次{budget.get('daily_remaining_jpy', 'N/A')}円, 月次{budget.get('monthly_remaining_jpy', 'N/A')}円
 - 利用可能ノード:
 {chr(10).join(nodes_available) if nodes_available else '  情報なし'}
-
+{persona_section}{self._build_intel_section(intel_context)}
 ## 承認が必要な操作
 公開投稿, 課金発生, 外部アカウント変更, 価格設定, 暗号通貨取引
 
@@ -247,6 +250,26 @@ class Planner:
   ]
 }}
 """
+
+    def _build_intel_section(self, intel_context: dict = None) -> str:
+        """インテリジェンスコンテキストをプロンプトに注入"""
+        if not intel_context:
+            return ""
+        section = "\n## 直近のインテリジェンス\n"
+        digest = intel_context.get("intel_digest", {})
+        if digest:
+            section += f"- サマリー: {digest.get('summary', 'N/A')}\n"
+            items = digest.get("for_content", []) or digest.get("for_proposals", [])
+            for item in items[:5]:
+                title = item.get("title", "")[:60] if isinstance(item, dict) else str(item)[:60]
+                section += f"  - {title}\n"
+        trends = intel_context.get("recent_intel", [])
+        if trends:
+            section += "- 直近の注目情報:\n"
+            for t in trends[:3]:
+                title = t.get("title", "")[:60] if isinstance(t, dict) else str(t)[:60]
+                section += f"  - {title}\n"
+        return section
 
     def _parse_plan(self, goal_id: str, plan_text: str, capability: dict) -> TaskGraph:
         """LLM出力からTaskGraphを生成"""
@@ -362,11 +385,7 @@ class Planner:
     async def _save_tasks(self, graph: TaskGraph):
         """タスクをPostgreSQLに保存"""
         try:
-            pool = await self._get_pool()
-            if not pool:
-                return
-
-            async with pool.acquire() as conn:
+            async with get_connection() as conn:
                 for task in graph.nodes.values():
                     await conn.execute(
                         """
@@ -394,16 +413,14 @@ class Planner:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "PLANNER", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "PLANNER", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception:
             pass
 
@@ -419,8 +436,4 @@ class Planner:
         return await self.plan(goal_packet, perception)
 
     async def close(self):
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass

@@ -21,7 +21,6 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 from tools.semantic_loop_detector import get_semantic_loop_detector
@@ -32,8 +31,6 @@ from tools.budget_guard import get_budget_guard
 load_dotenv()
 
 logger = logging.getLogger("syutain.loop_guard")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 # Layer 1: Retry Budget
 MAX_RETRIES_PER_ACTION = 2
@@ -72,17 +69,7 @@ class LoopGuard:
     """9層ループ防止壁"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
         self._states: dict[str, LoopGuardState] = {}
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
 
     def get_or_create_state(self, goal_id: str) -> LoopGuardState:
         """ゴール用の状態を取得 or 新規作成"""
@@ -95,7 +82,7 @@ class LoopGuard:
         goal_id: str,
         action_key: str = "",
         error_class: Optional[str] = None,
-        value_justification: Optional[str] = None,
+        value_justification: Optional[str] = "default_task",
         is_approval_waiting: bool = False,
         task_cost_jpy: float = 0.0,
         token_count: int = 0,
@@ -187,7 +174,8 @@ class LoopGuard:
     # ===== 各Layer実装 =====
 
     def _check_layer1(self, state: LoopGuardState, action_key: str) -> dict:
-        """Layer 1: Retry Budget（同一アクション再試行2回まで）/ Step Count"""
+        """Layer 1: Retry Budget（同一アクション再試行2回→切替、3回→エスカレーション）
+        CLAUDE.md ルール4: 同じ処理を3回以上繰り返す場合は停止してエスカレーションを発動する"""
         # 総ステップ数チェック（Layer 7の前段チェック）
         if state.step_count > MAX_RETRIES_PER_ACTION * 25:
             # 早期警告用の軽量チェック
@@ -196,6 +184,15 @@ class LoopGuard:
         if action_key:
             count = state.retry_counts.get(action_key, 0) + 1
             state.retry_counts[action_key] = count
+            if count >= 3:
+                # CLAUDE.md ルール4: 3回繰り返し→エスカレーション
+                return {
+                    "allowed": False,
+                    "layer_triggered": 1,
+                    "layer_name": "retry_budget_escalation",
+                    "action": "ESCALATE",
+                    "details": f"同一アクション'{action_key}'が{count}回繰り返し（ルール4: 3回以上→エスカレーション）",
+                }
             if count > MAX_RETRIES_PER_ACTION:
                 return {
                     "allowed": False,
@@ -252,19 +249,16 @@ class LoopGuard:
 
     def _check_layer4(self, value_justification: str) -> dict:
         """Layer 4: Value Guard（価値のない再試行禁止）
-        value_justificationが未提供の場合はパススルー（ブロックしない）。
-        明示的に空文字列で呼ばれた場合のみ、呼び出し元が意図的に価値根拠を宣言していない。
+        value_justificationが未提供(None)または空文字列 → ブロック。
+        呼び出し元は必ず価値根拠を宣言すること。
         """
-        if value_justification is None:
-            # 未提供: Layer 4チェックをスキップ
-            return {"allowed": True}
-        if value_justification.strip() == "":
+        if value_justification is None or value_justification.strip() == "":
             return {
                 "allowed": False,
                 "layer_triggered": 4,
                 "layer_name": "value_guard",
                 "action": "SKIP",
-                "details": "この行動の価値根拠（value_justification）が空→SKIP",
+                "details": "この行動の価値根拠（value_justification）が未提供/空→SKIP",
             }
         return {"allowed": True}
 
@@ -414,29 +408,24 @@ class LoopGuard:
     ):
         """ループガードイベントをPostgreSQLに記録"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO loop_guard_events
-                            (goal_id, layer_triggered, layer_name, trigger_reason, action_taken,
-                             step_count_at_trigger, cost_at_trigger_jpy)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        """,
-                        goal_id, layer, layer_name, details, action,
-                        state.step_count, state.total_cost_jpy,
-                    )
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO loop_guard_events
+                        (goal_id, layer_triggered, layer_name, trigger_reason, action_taken,
+                         step_count_at_trigger, cost_at_trigger_jpy)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    goal_id, layer, layer_name, details, action,
+                    state.step_count, state.total_cost_jpy,
+                )
         except Exception as e:
             logger.error(f"ループガードイベントDB記録失敗: {e}")
 
     async def close(self):
-        """接続プールを閉じる"""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        """接続プールは集約済みのため何もしない"""
+        pass
 
 
 # シングルトン

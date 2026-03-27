@@ -263,11 +263,16 @@ class ComputerUseAgent:
             return {"success": False, "error": f"環境変数 {password_env_key} 未設定"}
 
         # セキュリティ: パスワードをLLMプロンプトに含めない（CLAUDE.md ルール8）
+        # credentials kwarg は execute_multi_step が受け付けないため、
+        # ログイン指示を goal 文字列に埋め込む（パスワード自体はプロンプトに含めない）
+        login_goal = (
+            f"ログインページでユーザー名フィールドに '{username}' を入力し、"
+            f"パスワードフィールドに環境変数 {password_env_key} の値を入力してログインボタンを押す。"
+        )
         return await self.execute_multi_step(
-            goal=f"ユーザー名 '{username}' でログインする。パスワードは環境変数から自動入力される。",
+            goal=login_goal,
             start_url=url,
             max_steps=5,
-            credentials={"username": username, "password": password},
         )
 
     async def handle_captcha(self, url: str) -> dict:

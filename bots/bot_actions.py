@@ -308,18 +308,26 @@ async def get_goals_list(status: str = "") -> str:
 async def get_engagement_summary(platform: str = "") -> str:
     """SNSエンゲージメント概要"""
     async with get_connection() as conn:
-        query = """
-            SELECT platform, account, quality_score,
-              engagement_data->>'like_count' as likes,
-              engagement_data->>'impression_count' as imps,
-              LEFT(content, 50) as preview
-            FROM posting_queue
-            WHERE engagement_data IS NOT NULL
-        """
         if platform:
-            query += f" AND platform='{platform}'"
-        query += " ORDER BY (engagement_data->>'like_count')::int DESC NULLS LAST LIMIT 5"
-        rows = await conn.fetch(query)
+            rows = await conn.fetch("""
+                SELECT platform, account, quality_score,
+                  engagement_data->>'like_count' as likes,
+                  engagement_data->>'impression_count' as imps,
+                  LEFT(content, 50) as preview
+                FROM posting_queue
+                WHERE engagement_data IS NOT NULL AND platform=$1
+                ORDER BY (engagement_data->>'like_count')::int DESC NULLS LAST LIMIT 5
+            """, platform)
+        else:
+            rows = await conn.fetch("""
+                SELECT platform, account, quality_score,
+                  engagement_data->>'like_count' as likes,
+                  engagement_data->>'impression_count' as imps,
+                  LEFT(content, 50) as preview
+                FROM posting_queue
+                WHERE engagement_data IS NOT NULL
+                ORDER BY (engagement_data->>'like_count')::int DESC NULLS LAST LIMIT 5
+            """)
         if not rows:
             return "エンゲージメントデータはまだありません。"
         lines = ["**反応が高い投稿:**"]
@@ -878,8 +886,8 @@ async def post_to_sns(args: str = "") -> str:
         ng = check_platform_ng(content, platform_for_check)
         if not ng["passed"]:
             return f"NGワード検出: {ng['violations']}"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"NGチェック失敗（投稿は続行）: {e}")
 
     # 承認キューに入れる（直接投稿ではなく、承認後に投稿）
     try:
@@ -899,7 +907,96 @@ async def post_to_sns(args: str = "") -> str:
         return f"投稿キュー追加失敗: {e}"
 
 
-# --- #7: リマインダー ---
+# --- #7: 商品パッケージ管理 ---
+
+@_register("packages_list")
+async def packages_list(args: str = "") -> str:
+    """承認待ち商品パッケージ一覧"""
+    try:
+        from brain_alpha.product_packager import get_pending_packages
+        packages = await get_pending_packages()
+        if not packages:
+            return "📦 承認待ちパッケージはありません"
+        lines = ["📦 **承認待ちパッケージ一覧**"]
+        for p in packages:
+            tags = json.loads(p["tags"]) if isinstance(p["tags"], str) else (p["tags"] or [])
+            lines.append(
+                f"  #{p['id']} | {p['title'][:40]} | ¥{p['price_jpy']} | {p['category'] or '-'} | {', '.join(tags[:3])}"
+            )
+        lines.append(f"\n承認: [ACTION:package_approve:ID]  却下: [ACTION:package_reject:ID]")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"パッケージ一覧取得失敗: {e}"
+
+
+@_register("package_approve")
+async def package_approve(args: str = "") -> str:
+    """商品パッケージを承認。形式: ID"""
+    try:
+        pkg_id = int(args.strip())
+    except (ValueError, TypeError):
+        return "形式: [ACTION:package_approve:ID]（IDは数値）"
+    try:
+        from brain_alpha.product_packager import approve_package
+        result = await approve_package(pkg_id)
+        if result["status"] == "approved":
+            return f"✅ パッケージ #{pkg_id}『{result.get('title', '')}』を承認しました"
+        elif result["status"] == "not_found":
+            return f"パッケージ #{pkg_id} が見つかりません"
+        return f"承認失敗: {result}"
+    except Exception as e:
+        return f"パッケージ承認失敗: {e}"
+
+
+@_register("package_reject")
+async def package_reject(args: str = "") -> str:
+    """商品パッケージを却下。形式: ID|理由"""
+    parts = args.split("|", 1)
+    try:
+        pkg_id = int(parts[0].strip())
+    except (ValueError, TypeError):
+        return "形式: [ACTION:package_reject:ID] または [ACTION:package_reject:ID|理由]"
+    reason = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        from brain_alpha.product_packager import reject_package
+        result = await reject_package(pkg_id, reason)
+        if result["status"] == "rejected":
+            return f"❌ パッケージ #{pkg_id} を却下しました"
+        elif result["status"] == "not_found":
+            return f"パッケージ #{pkg_id} が見つかりません"
+        return f"却下失敗: {result}"
+    except Exception as e:
+        return f"パッケージ却下失敗: {e}"
+
+
+@_register("package_preview")
+async def package_preview(args: str = "") -> str:
+    """商品パッケージのプレビュー。形式: ID"""
+    try:
+        pkg_id = int(args.strip())
+    except (ValueError, TypeError):
+        return "形式: [ACTION:package_preview:ID]（IDは数値）"
+    try:
+        from brain_alpha.product_packager import preview_package
+        pkg = await preview_package(pkg_id)
+        if "error" in pkg:
+            return f"プレビュー取得失敗: {pkg['error']}"
+        tags = json.loads(pkg["tags"]) if isinstance(pkg["tags"], str) else (pkg["tags"] or [])
+        preview_text = (pkg.get("body_preview") or "")[:300]
+        return (
+            f"📦 **パッケージ #{pkg['id']}**\n"
+            f"タイトル: {pkg['title']}\n"
+            f"価格: ¥{pkg['price_jpy']}\n"
+            f"カテゴリ: {pkg.get('category', '-')}\n"
+            f"タグ: {', '.join(tags)}\n"
+            f"ステータス: {pkg['status']}\n"
+            f"---\n{preview_text}..."
+        )
+    except Exception as e:
+        return f"プレビュー取得失敗: {e}"
+
+
+# --- #8: リマインダー ---
 
 @_register("remind")
 async def set_reminder(args: str = "") -> str:

@@ -21,11 +21,22 @@ EMBEDDING_MODEL = "jina-embeddings-v3"
 EMBEDDING_DIM = 1024
 
 
-async def get_embedding(text: str) -> Optional[list]:
-    """テキストをJina Embeddings APIでベクトル化"""
+_last_429_at: float = 0.0  # モジュールレベルのレートリミット追跡
+
+
+async def get_embedding(text: str, _retry: int = 0) -> Optional[list]:
+    """テキストをJina Embeddings APIでベクトル化（429バックオフ付き）"""
+    import asyncio, time
     if not JINA_API_KEY:
         logger.warning("JINA_API_KEY未設定")
         return None
+
+    global _last_429_at
+    # 直近429から60秒以内は即スキップ（連続429防止）
+    if _last_429_at and (time.time() - _last_429_at) < 60:
+        logger.debug("Jina API rate limit cooldown中、スキップ")
+        return None
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -37,8 +48,26 @@ async def get_embedding(text: str) -> Optional[list]:
                 json={"model": EMBEDDING_MODEL, "input": [text[:8000]]},
             )
             if resp.status_code == 200:
-                data = resp.json()
-                return data["data"][0]["embedding"]
+                # Jina Embeddings v3 コスト追跡（約¥0.01/call推定）
+                try:
+                    from tools.budget_guard import get_budget_guard
+                    bg = get_budget_guard()
+                    await bg.record_spend(
+                        amount_jpy=0.01, model="jina-embeddings-v3",
+                        tier="S", goal_id="embedding", is_info_collection=False,
+                    )
+                except Exception:
+                    pass
+                return resp.json()["data"][0]["embedding"]
+            if resp.status_code == 429:
+                _last_429_at = time.time()
+                if _retry < 1:
+                    wait = float(resp.headers.get("retry-after", "5"))
+                    logger.warning(f"Jina 429 rate limit、{wait}秒後にリトライ")
+                    await asyncio.sleep(min(wait, 30))
+                    return await get_embedding(text, _retry=1)
+                logger.warning("Jina 429 リトライ上限到達、スキップ")
+                return None
             logger.error(f"Jina Embeddings API error: {resp.status_code}")
     except Exception as e:
         logger.error(f"Embedding取得失敗: {e}")

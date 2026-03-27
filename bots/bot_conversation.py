@@ -36,11 +36,34 @@ async def _get_system_status() -> str:
             approvals = await conn.fetchval(
                 "SELECT COUNT(*) FROM approval_queue WHERE status='pending'"
             ) or 0
+            # brain_handoff pending count
+            handoff_pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM brain_handoff WHERE status='pending'"
+            ) or 0
+            # auto_fix recent count (24h)
+            auto_fix_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '24 hours'"
+            ) or 0
+            # content_pipeline last run status
+            cp_last = await conn.fetchrow(
+                """SELECT status, quality_score, created_at
+                   FROM tasks WHERE goal_id='content_pipeline'
+                   ORDER BY created_at DESC LIMIT 1"""
+            )
         status = f"SNS: {posted}件投稿済/{pending}件待ち。エラー24h: {errors}件。コスト: ¥{float(cost):.0f}。ノード: {node_str}。"
         if approvals > 0:
             status += f" 承認待ち: {approvals}件。"
+        if handoff_pending > 0:
+            status += f" brain_handoff待ち: {handoff_pending}件。"
+        if auto_fix_count > 0:
+            status += f" auto_fix(24h): {auto_fix_count}件。"
+        if cp_last:
+            cp_status = cp_last['status']
+            cp_score = f" Q={cp_last['quality_score']:.2f}" if cp_last['quality_score'] else ""
+            status += f" content_pipeline最終: {cp_status}{cp_score}。"
         return status
-    except Exception:
+    except Exception as e:
+        logger.error(f"システム状態取得失敗: {e}")
         return ""
 
 
@@ -165,6 +188,113 @@ async def _get_full_system_report() -> str:
                 for e in eng:
                     imp = f" 最大imp={e['max_imps']}" if e['max_imps'] else ""
                     lines.append(f"  {e['platform']}: 平均likes={e['avg_likes']}{imp}")
+
+            # --- brain_handoff キュー ---
+            handoffs = await conn.fetch(
+                """SELECT status, COUNT(*) FROM brain_handoff
+                   GROUP BY status ORDER BY count DESC"""
+            )
+            if handoffs:
+                lines.append("**brain_handoff キュー**")
+                for h in handoffs:
+                    lines.append(f"  {h['status']}: {h['count']}件")
+            else:
+                lines.append("**brain_handoff キュー: なし**")
+
+            # --- claude_code_queue ---
+            ccq = await conn.fetch(
+                """SELECT status, COUNT(*) FROM claude_code_queue
+                   GROUP BY status ORDER BY count DESC"""
+            )
+            if ccq:
+                lines.append("**claude_code_queue**")
+                for c in ccq:
+                    lines.append(f"  {c['status']}: {c['count']}件")
+            else:
+                lines.append("**claude_code_queue: なし**")
+
+            # --- auto_fix_log サマリー (24h) ---
+            auto_fixes = await conn.fetch(
+                """SELECT fix_type, success, COUNT(*) FROM auto_fix_log
+                   WHERE created_at > NOW() - INTERVAL '24 hours'
+                   GROUP BY fix_type, success ORDER BY count DESC LIMIT 10"""
+            )
+            if auto_fixes:
+                lines.append("**auto_fix_log (24h)**")
+                for af in auto_fixes:
+                    result_str = "成功" if af['success'] else "失敗"
+                    lines.append(f"  {af['fix_type'] or '不明'}: {result_str}={af['count']}件")
+            else:
+                lines.append("**auto_fix_log (24h): なし**")
+
+            # --- brain_cross_evaluation ---
+            cross_eval = await conn.fetch(
+                """SELECT evaluation_type, verdict, COUNT(*),
+                     ROUND(AVG(score)::numeric, 2) as avg_score
+                   FROM brain_cross_evaluation
+                   WHERE created_at > NOW() - INTERVAL '7 days'
+                   GROUP BY evaluation_type, verdict ORDER BY count DESC LIMIT 10"""
+            )
+            if cross_eval:
+                lines.append("**brain_cross_evaluation (7日)**")
+                for ce in cross_eval:
+                    lines.append(f"  {ce['evaluation_type']}/{ce['verdict']}: {ce['count']}件 (平均スコア:{ce['avg_score']})")
+            else:
+                lines.append("**brain_cross_evaluation (7日): なし**")
+
+            # --- note_quality_reviews ---
+            note_reviews = await conn.fetch(
+                """SELECT verdict, COUNT(*),
+                     ROUND(AVG(total_cost_jpy)::numeric, 1) as avg_cost
+                   FROM note_quality_reviews
+                   WHERE created_at > NOW() - INTERVAL '7 days'
+                   GROUP BY verdict ORDER BY count DESC"""
+            )
+            if note_reviews:
+                lines.append("**note_quality_reviews (7日)**")
+                for nr in note_reviews:
+                    lines.append(f"  {nr['verdict']}: {nr['count']}件 (平均コスト¥{nr['avg_cost'] or 0})")
+            else:
+                lines.append("**note_quality_reviews (7日): なし**")
+
+            # --- persona_memory 統計 ---
+            persona_stats = await conn.fetch(
+                """SELECT category, COUNT(*) FROM persona_memory
+                   GROUP BY category ORDER BY count DESC"""
+            )
+            if persona_stats:
+                lines.append("**persona_memory 統計**")
+                total_pm = sum(ps['count'] for ps in persona_stats)
+                lines.append(f"  合計: {total_pm}件")
+                for ps in persona_stats:
+                    lines.append(f"  {ps['category']}: {ps['count']}件")
+
+            # --- content_pipeline ステータス ---
+            cp_runs = await conn.fetch(
+                """SELECT status, type, quality_score, created_at
+                   FROM tasks WHERE goal_id='content_pipeline'
+                   ORDER BY created_at DESC LIMIT 5"""
+            )
+            if cp_runs:
+                lines.append("**content_pipeline (直近5件)**")
+                from datetime import timezone as _tz2, timedelta as _td2
+                _jst2 = _tz2(_td2(hours=9))
+                for cp in cp_runs:
+                    t = cp['created_at'].astimezone(_jst2).strftime('%m/%d %H:%M') if cp['created_at'] else '?'
+                    q = f" Q={cp['quality_score']:.2f}" if cp['quality_score'] else ""
+                    lines.append(f"  [{t}] {cp['type']}: {cp['status']}{q}")
+            else:
+                lines.append("**content_pipeline: 実行なし**")
+
+            # --- posting_queue 詳細カウント ---
+            pq_detail = await conn.fetch(
+                """SELECT status, COUNT(*) FROM posting_queue
+                   GROUP BY status ORDER BY count DESC"""
+            )
+            if pq_detail:
+                lines.append("**posting_queue (全期間)**")
+                for pq in pq_detail:
+                    lines.append(f"  {pq['status']}: {pq['count']}件")
 
         return "\n".join(lines)
     except Exception as e:
@@ -469,7 +599,7 @@ ACTIONタグ（データ取得・操作が必要な場合のみ。複数同時OK
             needs_japanese=True,
         )
         logger.info(f"chat model: {model_sel.get('model','?')} ({task}) — {user_message[:30]}")
-        result = await call_llm(prompt=user_message, system_prompt=system_prompt, model_selection=model_sel)
+        result = await call_llm(prompt=user_message, system_prompt=system_prompt, model_selection=model_sel, goal_id="chat")
         return result.get("text", "すみません、応答生成に失敗しました。").strip()
     except Exception as e:
         logger.error(f"応答生成失敗: {e}")
@@ -506,6 +636,7 @@ async def generate_followup(original_response: str, action_results: dict, user_m
             prompt="上記のデータを自然な日本語で簡潔に報告してください。",
             system_prompt=system_prompt,
             model_selection=model_sel,
+            goal_id="chat",
         )
         return result.get("text", "データ取得しましたが要約に失敗しました。").strip()
     except Exception as e:

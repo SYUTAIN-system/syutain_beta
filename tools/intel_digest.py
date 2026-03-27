@@ -23,6 +23,7 @@ async def generate_intel_digest() -> dict:
             for_content = []  # ContentMultiplier
             for_proposals = []  # ProposalEngine
             for_social = []  # SNS
+            for_competitive = []  # CompetitiveAnalyzer
 
             for item in items:
                 entry = {"id": item["id"], "title": item["title"] or "", "source": item["source"], "score": float(item["importance_score"] or 0)}
@@ -30,6 +31,11 @@ async def generate_intel_digest() -> dict:
                     for_content.append(entry)
                     for_proposals.append(entry)
                 for_social.append(entry)
+                # competitive_analysis結果をfor_competitiveへルーティング
+                src = item["source"] or ""
+                kw = item.get("keyword") or ""
+                if "competitive" in src or "competitive" in kw or "booth" in src or "note.com" in src:
+                    for_competitive.append(entry)
 
             summary_parts = [f"{item['title'][:40]}" for item in items[:5] if item["title"]]
             summary = "今日の注目: " + " / ".join(summary_parts) if summary_parts else "新着情報あり"
@@ -41,7 +47,7 @@ async def generate_intel_digest() -> dict:
                 "for_proposals": for_proposals[:10],
                 "for_quality": [],
                 "for_social": for_social[:10],
-                "for_competitive": [],
+                "for_competitive": for_competitive[:10],
                 "items_count": len(items),
             }
 

@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, AsyncIterator
 
-import asyncpg
+from tools.db_pool import get_connection
 from dotenv import load_dotenv
 from tools.db_pool import get_connection
 
@@ -54,49 +54,27 @@ class ChatAgent:
     """
 
     def __init__(self):
-        self.pg_pool: Optional[asyncpg.Pool] = None
         self.active_sessions: dict = {}  # session_id → session_state
 
     async def initialize(self):
         """初期化"""
-        database_url = os.getenv(
-            "DATABASE_URL", "postgresql://localhost:5432/syutain_beta"
-        )
-        try:
-            self.pg_pool = await asyncpg.create_pool(
-                database_url, min_size=1, max_size=3
-            )
-            logger.info("ChatAgent: PostgreSQL接続完了")
-        except Exception as e:
-            logger.error(f"ChatAgent: PostgreSQL接続エラー: {e}")
+        logger.info("ChatAgent: 初期化完了（共有DB Pool使用）")
 
     async def close(self):
-        """リソース解放"""
-        if self.pg_pool:
-            await self.pg_pool.close()
+        pass
 
     # ========== 判断根拠トレース ==========
 
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            if self.pg_pool:
-                async with self.pg_pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "CHAT_AGENT", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
-            else:
-                async with get_connection() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "CHAT_AGENT", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "CHAT_AGENT", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
                     )
         except Exception:
             pass
@@ -345,7 +323,8 @@ class ChatAgent:
             except Exception as ex:
                 logger.error(f"自律ループ実行エラー: {ex}", exc_info=True)
 
-        _aio.create_task(_run_goal_loop(message))
+        _goal_task = _aio.create_task(_run_goal_loop(message))
+        _goal_task.add_done_callback(lambda t: logger.error(f"自律ループバックグラウンド例外: {t.exception()}") if not t.cancelled() and t.exception() else None)
         logger.info(f"5段階自律ループ起動: '{message[:60]}...'")
 
         # システム状態を取得して応答に含める
@@ -548,9 +527,7 @@ class ChatAgent:
     async def _handle_revenue_query(self, session_id: str, message: str) -> dict:
         """売上状況・履歴を照会する"""
         try:
-            if not self.pg_pool:
-                return {"text": "DB未接続です。", "action": None, "metadata": {}}
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 # 今月の合計
                 monthly = await conn.fetchrow(
                     """SELECT COALESCE(SUM(revenue_jpy), 0) AS total,
@@ -605,11 +582,8 @@ class ChatAgent:
         lower = message.lower()
         status_parts = []
 
-        if not self.pg_pool:
-            return {"text": "システム状態を取得できませんでした。", "action": None, "metadata": {}}
-
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 # 承認リスト関連
                 if any(kw in lower for kw in ["承認待ち", "承認リスト", "承認一覧", "承認"]):
                     rows = await conn.fetch(
@@ -783,34 +757,104 @@ class ChatAgent:
         }
 
     async def _get_system_status_brief(self) -> str:
-        """システム状態の簡易サマリーを返す"""
+        """システム状態の包括的サマリーを返す（LLMが正確な状況を伝えるため）"""
         parts = []
-        if self.pg_pool:
-            try:
-                async with self.pg_pool.acquire() as conn:
-                    active_goals = await conn.fetchval(
-                        "SELECT COUNT(*) FROM goal_packets WHERE status = 'active'"
-                    )
-                    running_tasks = await conn.fetchval(
-                        "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-                    )
-                    pending_tasks = await conn.fetchval(
-                        "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
-                    )
-                parts.append(f"📊 アクティブ目標: {active_goals}件")
-                parts.append(f"実行中: {running_tasks}件 / 待機中: {pending_tasks}件")
-            except Exception as e:
-                logger.error(f"状態取得エラー: {e}")
+        try:
+            async with get_connection() as conn:
+                # ゴール・タスク状況
+                active_goals = await conn.fetchval(
+                    "SELECT COUNT(*) FROM goal_packets WHERE status = 'active'"
+                ) or 0
+                running_tasks = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                ) or 0
+                pending_tasks = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
+                ) or 0
+                completed_today = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'completed' AND updated_at > CURRENT_DATE"
+                ) or 0
+                failed_today = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'failed' AND updated_at > CURRENT_DATE"
+                ) or 0
+                parts.append(f"📊 目標: {active_goals}件稼働 | タスク: 実行中{running_tasks} / 待機{pending_tasks} / 今日完了{completed_today} / 失敗{failed_today}")
 
+                # 承認キュー
+                pending_approvals = await conn.fetchval(
+                    "SELECT COUNT(*) FROM approval_queue WHERE status = 'pending'"
+                ) or 0
+                if pending_approvals:
+                    parts.append(f"🔔 承認待ち: {pending_approvals}件")
+
+                # LLMコスト
+                cost_row = await conn.fetchrow(
+                    "SELECT COUNT(*) as calls, COALESCE(SUM(amount_jpy), 0) as total FROM llm_cost_log WHERE recorded_at > CURRENT_DATE"
+                )
+                if cost_row and cost_row["calls"]:
+                    parts.append(f"💰 LLM使用: {cost_row['calls']}回 / ¥{cost_row['total']:.1f}")
+
+                # 最新インテリジェンス件数
+                intel_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM intel_items WHERE created_at > NOW() - INTERVAL '24 hours'"
+                ) or 0
+                if intel_count:
+                    parts.append(f"📰 情報収集: 24h内{intel_count}件")
+
+                # 直近のエラー
+                recent_errors = await conn.fetch(
+                    "SELECT event_type, COUNT(*) as cnt FROM event_log WHERE created_at > CURRENT_DATE AND event_type LIKE '%error%' GROUP BY event_type ORDER BY cnt DESC LIMIT 3"
+                )
+                if recent_errors:
+                    err_parts = [f"{r['event_type']}({r['cnt']})" for r in recent_errors]
+                    parts.append(f"⚠️ エラー: {', '.join(err_parts)}")
+
+                # SNS投稿状況
+                sns_today = await conn.fetchval(
+                    "SELECT COUNT(*) FROM event_log WHERE created_at > CURRENT_DATE AND event_type = 'sns.posted'"
+                ) or 0
+                parts.append(f"📱 SNS投稿: 今日{sns_today}件")
+
+        except Exception as e:
+            logger.error(f"状態取得エラー: {e}")
+
+        # 予算状況
         try:
             bg = get_budget_guard()
             budget_status = await bg.get_budget_status()
             daily_pct = budget_status.get("daily_usage_pct", 0)
-            parts.append(f"予算消化: {daily_pct:.0f}%")
+            monthly_pct = budget_status.get("monthly_usage_pct", 0)
+            parts.append(f"📈 予算: 日次{daily_pct:.0f}% / 月次{monthly_pct:.0f}%")
         except Exception:
             pass
 
-        return " | ".join(parts) if parts else ""
+        # ノード稼働状況
+        try:
+            from tools.nats_client import get_nats_client
+            nats = await get_nats_client()
+            node_names = ["alpha", "bravo", "charlie", "delta"]
+            node_statuses = []
+            for n in node_names:
+                try:
+                    resp = await nats.request(f"node.{n}.ping", {}, timeout=3.0)
+                    node_statuses.append(f"{n.upper()}:🟢")
+                except Exception:
+                    node_statuses.append(f"{n.upper()}:🔴")
+            parts.append(f"🖥️ ノード: {' '.join(node_statuses)}")
+        except Exception:
+            pass
+
+        # パワーモード
+        try:
+            from zoneinfo import ZoneInfo
+            from datetime import datetime
+            jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
+            hour = jst_now.hour
+            mode = "🌙夜間モード" if (hour >= 23 or hour < 7) else "☀️日中モード"
+            parts.append(f"{mode} ({jst_now.strftime('%H:%M')} JST)")
+        except Exception:
+            pass
+
+        return "\n".join(parts) if parts else "システム状態取得不可"
 
     async def _handle_general(self, session_id: str, message: str) -> dict:
         """一般的な会話の処理"""
@@ -837,7 +881,13 @@ class ChatAgent:
         # 関連する情報収集結果を取得
         intel_context = await self._get_relevant_intel(message)
 
+        # システム状態を常にLLMに渡す（正確な状況報告のため）
+        system_status = await self._get_system_status_brief()
+
         prompt = f"""島原大知との会話を続けてください。
+
+## 現在のシステム状態
+{system_status}
 
 ## 直近の会話
 {history_text}
@@ -845,7 +895,8 @@ class ChatAgent:
 ## 最新メッセージ
 島原: {message}
 
-会話の流れと長期記憶を踏まえて応答してください。収集済み情報があれば活用し、具体的な根拠を示してください。"""
+会話の流れと長期記憶を踏まえて応答してください。収集済み情報があれば活用し、具体的な根拠を示してください。
+システム状態について聞かれた場合は、上記の「現在のシステム状態」セクションの情報を正確に伝えてください。"""
 
         system_prompt = self._build_system_prompt()
 
@@ -860,12 +911,14 @@ class ChatAgent:
             response_text = result.get("text", "申し訳ございません。応答の生成に失敗しました。")
             model_used = result.get("model_used", model_used)
             cost_jpy = result.get("cost_jpy", 0.0)
+            # 注意: call_llm内のrecord_spend()で既にllm_cost_logに記録済み
+            # record_chat_spendを呼ぶと二重計上になるため、チャットマーカーのみ更新
             if cost_jpy > 0:
                 try:
                     bg = get_budget_guard()
-                    await bg.record_chat_spend(cost_jpy, model_used)
+                    bg._chat_spend_jpy += cost_jpy
                 except Exception as e:
-                    logger.error(f"チャット予算記録エラー: {e}")
+                    logger.error(f"チャット予算マーカー更新エラー: {e}")
         except Exception as e:
             logger.error(f"チャット応答LLM呼び出しエラー: {e}")
             response_text = "申し訳ございません。現在応答の生成ができません。しばらく待ってから再度お試しください。"
@@ -873,7 +926,8 @@ class ChatAgent:
         # 長期記憶: ユーザー発言+応答から記憶を抽出して蓄積
         try:
             import asyncio as _aio
-            _aio.ensure_future(self._extract_and_store_memory(session_id, message, response_text))
+            _t = _aio.ensure_future(self._extract_and_store_memory(session_id, message, response_text))
+            _t.add_done_callback(lambda t: logger.error(f"記憶抽出例外: {t.exception()}") if not t.cancelled() and t.exception() else None)
         except Exception:
             pass
 
@@ -991,9 +1045,7 @@ SYUTAINβ: {assistant_msg[:300]}
                 return
 
             # persona_memoryに保存
-            if not self.pg_pool:
-                return
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """INSERT INTO persona_memory (category, context, content, reasoning, source, session_id)
                     VALUES ($1, $2, $3, $4, 'chat', $5) RETURNING id""",
@@ -1124,7 +1176,8 @@ SYUTAINβ: {assistant_msg[:300]}
         # 長期記憶: ユーザー発言+応答から記憶を抽出して蓄積
         try:
             import asyncio as _aio3
-            _aio3.ensure_future(self._extract_and_store_memory(session_id, user_message, full_text))
+            _t3 = _aio3.ensure_future(self._extract_and_store_memory(session_id, user_message, full_text))
+            _t3.add_done_callback(lambda t: logger.error(f"記憶抽出例外: {t.exception()}") if not t.cancelled() and t.exception() else None)
         except Exception:
             pass
 
@@ -1144,12 +1197,8 @@ SYUTAINβ: {assistant_msg[:300]}
         metadata: Optional[dict] = None,
     ):
         """メッセージをPostgreSQLのchat_messagesテーブルに保存"""
-        if not self.pg_pool:
-            logger.debug("PostgreSQL未接続。メッセージ保存をスキップ")
-            return
-
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO chat_messages (session_id, role, content, metadata)
@@ -1167,10 +1216,8 @@ SYUTAINβ: {assistant_msg[:300]}
         self, session_id: str, limit: int = 50
     ) -> list:
         """チャット履歴を取得（最新のlimit件を時系列順で返す）"""
-        if not self.pg_pool:
-            return []
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT id, session_id, role, content, metadata, created_at
@@ -1193,10 +1240,8 @@ SYUTAINβ: {assistant_msg[:300]}
 
     async def get_all_sessions(self) -> list:
         """全セッション一覧を取得"""
-        if not self.pg_pool:
-            return []
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT session_id,
@@ -1218,8 +1263,6 @@ SYUTAINβ: {assistant_msg[:300]}
 
     async def _get_relevant_intel(self, message: str, limit: int = 8) -> str:
         """ユーザーメッセージに関連するintel_itemsを取得しコンテキスト文字列を返す"""
-        if not self.pg_pool:
-            return ""
         try:
             # メッセージからキーワードを抽出（2文字以上の名詞的単語）
             import re
@@ -1229,7 +1272,7 @@ SYUTAINβ: {assistant_msg[:300]}
                         if w not in {"the", "and", "for", "are", "this", "that", "with", "from", "have", "has"}]
             keywords = jp_words + en_words
 
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 if keywords:
                     # キーワードマッチ（title/summaryに含まれるもの）
                     conditions = " OR ".join(

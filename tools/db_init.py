@@ -234,15 +234,71 @@ CREATE TABLE IF NOT EXISTS embeddings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- イベントログ（self_healer, event_logger等で使用）
+CREATE TABLE IF NOT EXISTS event_log (
+    id SERIAL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    severity TEXT DEFAULT 'info',
+    source_node TEXT,
+    goal_id TEXT,
+    task_id TEXT,
+    payload JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Brain-αハンドオフ
+CREATE TABLE IF NOT EXISTS brain_handoff (
+    id SERIAL PRIMARY KEY,
+    goal_id TEXT,
+    status TEXT DEFAULT 'pending',
+    handoff_data JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ノード状態管理（self_healerで使用）
+CREATE TABLE IF NOT EXISTS node_state (
+    node_name TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'unknown',
+    reason TEXT,
+    changed_by TEXT,
+    changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 自動修復ログ（self_healer, auto_log.pyで使用）
+CREATE TABLE IF NOT EXISTS auto_fix_log (
+    id SERIAL PRIMARY KEY,
+    fix_type TEXT,
+    error_type TEXT NOT NULL,
+    error_detail TEXT,
+    fix_strategy TEXT,
+    fix_result TEXT,
+    files_modified JSONB,
+    detail TEXT,
+    strategy TEXT,
+    result TEXT,
+    files_affected JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- インデックス
 CREATE INDEX IF NOT EXISTS idx_tasks_goal_id ON tasks(goal_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_node ON tasks(assigned_node);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_intel_items_source ON intel_items(source);
 CREATE INDEX IF NOT EXISTS idx_approval_queue_status ON approval_queue(status);
 CREATE INDEX IF NOT EXISTS idx_browser_action_log_node ON browser_action_log(node);
 CREATE INDEX IF NOT EXISTS idx_loop_guard_events_goal ON loop_guard_events(goal_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_severity ON event_log(severity);
+CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_event_log_source_node ON event_log(source_node);
+CREATE INDEX IF NOT EXISTS idx_llm_cost_log_recorded_at ON llm_cost_log(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_llm_cost_log_goal_id ON llm_cost_log(goal_id);
+CREATE INDEX IF NOT EXISTS idx_auto_fix_log_created_at ON auto_fix_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_handoff_status ON brain_handoff(status);
 """
 
 # ===== SQLite DDL（ノードローカル）=====

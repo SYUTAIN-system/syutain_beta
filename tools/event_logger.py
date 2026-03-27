@@ -6,28 +6,13 @@ Phase 1-4まで テーブル変更なしで対応できる汎用設計。
 import os
 import json
 import logging
-from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.event_logger")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 THIS_NODE = os.getenv("THIS_NODE", "alpha")
-
-_pool: Optional[asyncpg.Pool] = None
-
-
-async def _get_pool() -> Optional[asyncpg.Pool]:
-    global _pool
-    if _pool is None:
-        try:
-            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-        except Exception as e:
-            logger.error(f"event_logger DB接続失敗: {e}")
-    return _pool
 
 
 async def log_event(
@@ -51,10 +36,8 @@ async def log_event(
         task_id: 関連タスクID
     """
     try:
-        pool = await _get_pool()
-        if not pool:
-            return False
-        async with pool.acquire() as conn:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
             await conn.execute(
                 """INSERT INTO event_log
                 (event_type, category, severity, source_node, goal_id, task_id, payload)

@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import asyncpg
+from tools.db_pool import get_connection
 import httpx
 from dotenv import load_dotenv
 from tools.db_pool import get_connection
@@ -28,7 +28,7 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.approval_manager")
 
-# ===== 承認Tier定義（設計書準拠）=====
+# ===== 承認Tier定義 =====
 TIER_1_HUMAN_REQUIRED = [
     "product_publish",   # 商品公開
     "pricing",           # 価格設定
@@ -37,11 +37,11 @@ TIER_1_HUMAN_REQUIRED = [
     "billing",           # 課金発生
 ]
 
-# SNS投稿は品質スコアベースの自動承認に移行
+# SNS投稿: 品質スコアベースの自動承認（島原指示: 品質0.75以上で自動承認）
+# 例外: 金銭言及・他者メンション・Brain-α要確認フラグ → Tier 1（人間承認）
 SNS_AUTO_APPROVE_TYPES = [
     "sns_posting", "social_post", "bluesky_post", "x_post", "threads_post",
 ]
-# 例外（手動維持）: 金銭言及、他者メンション、Brain-α要確認フラグ
 SNS_MANUAL_KEYWORDS = ["¥", "￥", "円", "万円", "price", "@", "メンション"]
 
 TIER_2_AUTO_WITH_NOTIFICATION = [
@@ -70,18 +70,16 @@ def classify_tier(request_type: str, request_data: dict = None) -> int:
     if request_type in SNS_AUTO_APPROVE_TYPES:
         data = request_data or {}
         content = data.get("content", "")
-        # 例外チェック: 金銭言及/他者メンション → 手動
+        # 例外チェック: 金銭言及/他者メンション → 人間承認
         if any(kw in content for kw in SNS_MANUAL_KEYWORDS):
             return 1
         if data.get("brain_alpha_review"):
             return 1
         quality = data.get("quality_score", 0.65)
-        if quality >= 0.65:
-            return 2  # 自動承認
-        elif quality >= 0.50:
-            return 2  # 自動承認+通知
+        if quality >= 0.75:
+            return 2  # 自動承認+通知（品質0.75以上）
         else:
-            return 1  # 低品質は却下対象
+            return 1  # 低品質は人間確認
     if request_type in TIER_1_HUMAN_REQUIRED:
         return 1
     if request_type in TIER_2_AUTO_WITH_NOTIFICATION:
@@ -101,26 +99,14 @@ class ApprovalManager:
     """
 
     def __init__(self):
-        self.pg_pool: Optional[asyncpg.Pool] = None
         self.discord_webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
 
     async def initialize(self):
-        """初期化: PostgreSQL接続"""
-        database_url = os.getenv(
-            "DATABASE_URL", "postgresql://localhost:5432/syutain_beta"
-        )
-        try:
-            self.pg_pool = await asyncpg.create_pool(
-                database_url, min_size=1, max_size=3
-            )
-            logger.info("ApprovalManager: PostgreSQL接続完了")
-        except Exception as e:
-            logger.error(f"ApprovalManager: PostgreSQL接続エラー: {e}")
+        """初期化"""
+        logger.info("ApprovalManager: 初期化完了（共有DB Pool使用）")
 
     async def close(self):
-        """リソース解放"""
-        if self.pg_pool:
-            await self.pg_pool.close()
+        pass
 
     # ========== 承認リクエスト ==========
 
@@ -231,6 +217,12 @@ class ApprovalManager:
             f"⏰ {APPROVAL_TIMEOUT_HOURS}時間以内に承認/却下してください。タイムアウトで自動却下されます。",
             tier=1,
         )
+        # 専用承認通知（構造化メッセージ）
+        try:
+            from tools.discord_notify import notify_approval_request
+            await notify_approval_request(request_type, approval_id)
+        except Exception:
+            pass
 
         # NATS通知
         try:
@@ -269,14 +261,11 @@ class ApprovalManager:
             approved: True=承認, False=却下
             reason: 承認/却下理由
         """
-        if not self.pg_pool:
-            return {"error": "DB未接続"}
-
         now = datetime.now(timezone.utc)
         status = "approved" if approved else "rejected"
 
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 # 既にレスポンス済みでないか確認
                 row = await conn.fetchrow(
                     "SELECT status, request_type, request_data FROM approval_queue WHERE id = $1",
@@ -375,9 +364,6 @@ class ApprovalManager:
 
         定期的に（1時間ごと）呼び出す
         """
-        if not self.pg_pool:
-            return []
-
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=APPROVAL_TIMEOUT_HOURS)
         reminder_48h = now - timedelta(hours=48)
@@ -385,7 +371,7 @@ class ApprovalManager:
         timed_out = []
 
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 # --- リマインド送信 (48h / 68h経過) ---
                 reminder_rows = await conn.fetch(
                     """
@@ -468,10 +454,8 @@ class ApprovalManager:
 
     async def get_pending_approvals(self) -> list:
         """承認待ちキューを取得"""
-        if not self.pg_pool:
-            return []
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT id, request_type, request_data, status,
@@ -499,10 +483,8 @@ class ApprovalManager:
 
     async def get_all_approvals(self, limit: int = 50) -> list:
         """全承認リクエストを取得（履歴含む）"""
-        if not self.pg_pool:
-            return []
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT id, request_type, request_data, status,
@@ -524,12 +506,8 @@ class ApprovalManager:
         self, request_type: str, request_data: dict, status: str
     ) -> Optional[int]:
         """承認リクエストをPostgreSQLのapproval_queueに追加"""
-        if not self.pg_pool:
-            logger.error("PostgreSQL未接続。承認リクエストをキューに入れられません")
-            return None
-
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """
                     INSERT INTO approval_queue (request_type, request_data, status)
@@ -556,13 +534,10 @@ class ApprovalManager:
 
         Returns: {"similarity": float, "matched_id": int} or None
         """
-        if not self.pg_pool:
-            return None
-
         # 自動承認の閾値（settingsテーブルから読み込み、デフォルト0.8）
         auto_threshold = 0.8
         try:
-            async with self.pg_pool.acquire() as conn:
+            async with get_connection() as conn:
                 threshold_row = await conn.fetchval(
                     "SELECT value FROM settings WHERE key = 'auto_approval_threshold'"
                 )
@@ -690,24 +665,14 @@ class ApprovalManager:
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            if self.pg_pool:
-                async with self.pg_pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
-            else:
-                async with get_connection() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "APPROVAL_MANAGER", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception:
             pass
 

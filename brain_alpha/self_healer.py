@@ -202,6 +202,18 @@ async def self_heal_check() -> dict:
             except Exception:
                 pass
 
+            # 修復失敗が含まれる場合はBrain-αにエスカレーション
+            failed_fixes = [f for f in results["fixes"] if "失敗" in str(f) or "error" in str(f).lower()]
+            if failed_fixes:
+                try:
+                    from bots.bot_escalation import send_instruction_to_brain_alpha
+                    await send_instruction_to_brain_alpha(
+                        f"自動修復失敗: {len(failed_fixes)}件。手動確認・修正が必要です。",
+                        {"failed_fixes": failed_fixes[:3], "node_status": results["nodes"]},
+                    )
+                except Exception:
+                    pass
+
       except Exception as e:
         logger.error(f"self_heal_check例外: {e}")
         results["error"] = str(e)
@@ -219,11 +231,18 @@ async def _check_alpha_services(conn, fixes: list) -> str:
                                  "http://localhost:8000/health"], capture_output=True, text=True, timeout=5)
         if result.stdout.strip() != "200":
             status = "degraded"
-            # launchd再起動
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.fastapi"], capture_output=True, timeout=10)
-            await _log_fix(conn, "fastapi_down", "HTTP応答なし", "launchctl_restart", "attempted")
-            fixes.append("FastAPI再起動")
+            # 修復後検証（5秒待って再チェック）
+            import asyncio as _aio
+            await _aio.sleep(5)
+            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                     "http://localhost:8000/health"], capture_output=True, text=True, timeout=5)
+            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            await _log_fix(conn, "fastapi_down", "HTTP応答なし", "launchctl_restart", fix_result)
+            fixes.append(f"FastAPI再起動({fix_result})")
+            if fix_result == "verified":
+                status = "healthy"
     except Exception:
         pass
 
@@ -235,8 +254,15 @@ async def _check_alpha_services(conn, fixes: list) -> str:
             status = "degraded"
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.nextjs"], capture_output=True, timeout=10)
-            await _log_fix(conn, "nextjs_down", "HTTP応答なし", "launchctl_restart", "attempted")
-            fixes.append("Next.js再起動")
+            import asyncio as _aio
+            await _aio.sleep(5)
+            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                     "http://localhost:3000/"], capture_output=True, text=True, timeout=5)
+            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            await _log_fix(conn, "nextjs_down", "HTTP応答なし", "launchctl_restart", fix_result)
+            fixes.append(f"Next.js再起動({fix_result})")
+            if fix_result == "verified":
+                status = "healthy"
     except Exception:
         pass
 
@@ -248,8 +274,15 @@ async def _check_alpha_services(conn, fixes: list) -> str:
             status = "degraded"
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.nats"], capture_output=True, timeout=10)
-            await _log_fix(conn, "nats_down", "監視ポート応答なし", "launchctl_restart", "attempted")
-            fixes.append("NATS再起動")
+            import asyncio as _aio
+            await _aio.sleep(3)
+            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                     "http://localhost:8222/varz"], capture_output=True, text=True, timeout=5)
+            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            await _log_fix(conn, "nats_down", "監視ポート応答なし", "launchctl_restart", fix_result)
+            fixes.append(f"NATS再起動({fix_result})")
+            if fix_result == "verified":
+                status = "healthy"
     except Exception:
         pass
 

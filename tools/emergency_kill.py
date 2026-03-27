@@ -175,7 +175,7 @@ class EmergencyKill:
             }
 
     def _trigger_kill(self, goal_id: str, reason: str, condition: str, details: dict) -> dict:
-        """Killを発動し、ログに記録（ゴール単位）"""
+        """Killを発動し、ログに記録＋Discord通知（ゴール単位）"""
         self._killed_goals.add(goal_id)
         self._kill_reasons[goal_id] = reason
 
@@ -186,6 +186,20 @@ class EmergencyKill:
         }
         logger.critical(f"EMERGENCY KILL発動: {reason}")
         _write_kill_log(reason, full_details)
+
+        # Discord緊急通知（非同期: fire-and-forget）
+        try:
+            import asyncio
+            from tools.discord_notify import notify_emergency_kill
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(notify_emergency_kill(
+                    reason, goal_id,
+                    details.get("step_count", 0),
+                    details.get("cost_jpy", 0.0),
+                ))
+        except Exception:
+            pass
 
         return {
             "kill": True,

@@ -15,7 +15,6 @@ from typing import Optional, Any
 from pathlib import Path
 from datetime import datetime
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,24 +30,13 @@ class PgHelper:
     """PostgreSQL非同期ヘルパー"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None or self._pool._closed:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def execute(self, query: str, *args) -> Optional[str]:
         """SQL実行"""
-        pool = await self.get_pool()
-        if not pool:
-            return None
         try:
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 return await conn.execute(query, *args)
         except Exception as e:
             logger.error(f"SQL実行失敗: {e}")
@@ -56,11 +44,9 @@ class PgHelper:
 
     async def fetch(self, query: str, *args) -> list:
         """SELECT結果を取得"""
-        pool = await self.get_pool()
-        if not pool:
-            return []
         try:
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 rows = await conn.fetch(query, *args)
                 return [dict(r) for r in rows]
         except Exception as e:
@@ -69,11 +55,9 @@ class PgHelper:
 
     async def fetchval(self, query: str, *args) -> Any:
         """単一値を取得"""
-        pool = await self.get_pool()
-        if not pool:
-            return None
         try:
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 return await conn.fetchval(query, *args)
         except Exception as e:
             logger.error(f"SQLフェッチ値失敗: {e}")
@@ -81,11 +65,9 @@ class PgHelper:
 
     async def fetchrow(self, query: str, *args) -> Optional[dict]:
         """単一行を取得"""
-        pool = await self.get_pool()
-        if not pool:
-            return None
         try:
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 row = await conn.fetchrow(query, *args)
                 return dict(row) if row else None
         except Exception as e:
@@ -93,11 +75,7 @@ class PgHelper:
             return None
 
     async def close(self) -> None:
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass
 
 
 # ===== SQLiteヘルパー =====

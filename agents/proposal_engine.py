@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
+from tools.db_pool import get_pool as _db_get_pool
 
 load_dotenv()
 
@@ -67,11 +68,9 @@ def _load_all_strategies() -> dict:
 
 
 async def _get_pg_pool() -> Optional[asyncpg.Pool]:
-    """PostgreSQL接続プールを取得"""
-    database_url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
+    """PostgreSQL接続プールを取得（グローバルdb_poolを再利用）"""
     try:
-        pool = await asyncpg.create_pool(database_url, min_size=1, max_size=3)
-        return pool
+        return await _db_get_pool()
     except Exception as e:
         logger.error(f"PostgreSQL接続エラー: {e}")
         return None
@@ -93,9 +92,8 @@ class ProposalEngine:
             logger.warning("ProposalEngine: PostgreSQL未接続（提案はメモリ保持のみ）")
 
     async def close(self):
-        """リソース解放"""
-        if self.pg_pool:
-            await self.pg_pool.close()
+        """リソース解放（プールはグローバル共有のため閉じない）"""
+        self.pg_pool = None
 
     async def _record_trace(self, action: str = "", reasoning: str = "",
                            confidence: float = None, context: dict = None):
@@ -287,10 +285,20 @@ class ProposalEngine:
         except Exception:
             pass
 
+        # エージェントコンテキスト注入（最新インテリジェンス + 島原の指摘）
+        agent_intel = ""
+        try:
+            from tools.agent_context import build_agent_context
+            agent_intel = await build_agent_context("proposal_engine")
+        except Exception:
+            pass
+
+        intel_section = f"{agent_intel}\n\n" if agent_intel else ""
         system_prompt = (
             "SYUTAINβの収益提案エンジン。島原大知の事業を最大化する提案を生成する。\n\n"
             f"{strategy_id}\n\n"
             f"{anti_ai[:1500]}\n\n"
+            f"{intel_section}"
             "上記の戦略と文体ガイドに基づき、ICP・チャネル・禁止語句を厳守して提案すること。"
             "必ず有効なJSONのみを出力すること。"
         )

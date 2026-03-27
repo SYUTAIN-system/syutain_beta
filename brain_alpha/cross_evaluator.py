@@ -309,3 +309,86 @@ async def schedule_evaluations() -> dict:
             results["errors"].append(str(e))
 
     return results
+
+
+# ======================================================================
+# 4. フィードバックループ: 評価結果をself_healer/llm_routerに反映
+# ======================================================================
+
+async def apply_cross_evaluation_feedback() -> dict:
+    """
+    brain_cross_evaluationの最新結果を集計し:
+    1. 修復成功率が低い(< 0.5)修復戦略をevent_logに警告記録
+    2. 修復後品質が安定して悪いモデルをmodel_quality_logにフィードバック
+    """
+    feedback = {"strategies_flagged": 0, "model_adjustments": 0}
+
+    try:
+        async with get_connection() as conn:
+            # 修復戦略の成功率を集計（直近30日）
+            strategy_stats = await conn.fetch(
+                """SELECT
+                    recommendations->>'fix_strategy' as strategy,
+                    COUNT(*) as total,
+                    AVG(score) as avg_score,
+                    SUM(CASE WHEN recommendations->>'accuracy' IN ('effective', 'improved', 'accurate') THEN 1 ELSE 0 END) as success_count
+                FROM brain_cross_evaluation
+                WHERE target_type = 'auto_fix'
+                AND created_at > NOW() - INTERVAL '30 days'
+                AND recommendations->>'fix_strategy' IS NOT NULL
+                GROUP BY recommendations->>'fix_strategy'
+                HAVING COUNT(*) >= 3"""
+            )
+
+            for row in strategy_stats:
+                success_rate = int(row["success_count"]) / int(row["total"]) if int(row["total"]) > 0 else 0
+                if success_rate < 0.5:
+                    from tools.event_logger import log_event
+                    await log_event(
+                        "cross_eval.strategy_low_success", "brain_alpha",
+                        {
+                            "strategy": row["strategy"],
+                            "success_rate": round(success_rate, 2),
+                            "total_evaluated": int(row["total"]),
+                            "avg_score": round(float(row["avg_score"]), 2),
+                        },
+                        severity="warning",
+                    )
+                    feedback["strategies_flagged"] += 1
+
+            # レビュー精度が低い場合のモデル品質フィードバック
+            low_accuracy_reviews = await conn.fetch(
+                """SELECT
+                    recommendations->>'accuracy' as accuracy,
+                    score,
+                    recommendations
+                FROM brain_cross_evaluation
+                WHERE target_type = 'review'
+                AND created_at > NOW() - INTERVAL '7 days'
+                AND score < 0.4
+                LIMIT 10"""
+            )
+
+            if len(low_accuracy_reviews) >= 3:
+                from tools.event_logger import log_event
+                await log_event(
+                    "cross_eval.review_quality_alert", "brain_alpha",
+                    {
+                        "low_reviews_count": len(low_accuracy_reviews),
+                        "avg_score": round(
+                            sum(float(r["score"]) for r in low_accuracy_reviews) / len(low_accuracy_reviews), 2
+                        ),
+                    },
+                    severity="warning",
+                )
+                feedback["model_adjustments"] += 1
+
+        if feedback["strategies_flagged"] > 0 or feedback["model_adjustments"] > 0:
+            logger.info(
+                f"相互評価フィードバック適用: 戦略警告{feedback['strategies_flagged']}件, "
+                f"モデル調整{feedback['model_adjustments']}件"
+            )
+    except Exception as e:
+        logger.error(f"相互評価フィードバック適用失敗: {e}")
+
+    return feedback

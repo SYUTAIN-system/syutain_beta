@@ -98,7 +98,7 @@ _PERSONA_KEYWORDS = [
 
 # 多軸品質評価（SNS投稿向け）
 def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
-    """SNS投稿の品質を6軸で算出（0.0-1.0）
+    """SNS投稿の品質を7軸で算出（0.0-1.0）
 
     各軸は実際の投稿品質の差が反映されるよう設計。
     旧版の問題: AI臭さ(ほぼ1.0)、具体性(ほぼ0.0)、独自性(ほぼ1.0)で分散なし。
@@ -107,6 +107,31 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
         return 0.0
 
     import re
+
+    # === ハードフェイル検出（スコア上限0.30） ===
+    hard_fail = False
+
+    # 中国語混入検出
+    _chinese_pat = re.compile(r'[\u4e00-\u9fff]')
+    _japanese_pat = re.compile(r'[\u3040-\u309f\u30a0-\u30ff]')
+    if _chinese_pat.search(text) and not _japanese_pat.search(text[:100]):
+        hard_fail = True
+
+    # 島原大知の読み間違い検出（正: しまはらだいち）
+    _wrong_readings = ["うらわら", "おおとも", "しまばらだいち", "しまはらたいち",
+                       "とうげんだいち", "しまはらおおち"]
+    for wr in _wrong_readings:
+        if wr in text:
+            hard_fail = True
+            break
+
+    # AI自己開示検出
+    _ai_disclosure = ["AIです", "仮の私（AI）", "私はAIが", "AIである私",
+                      "AIとして", "私はAI", "AIの私"]
+    for adp in _ai_disclosure:
+        if adp in text:
+            hard_fail = True
+            break
 
     # --- 軸1: 人間味 (0-1, w=0.20) ---
     # 口語表現、感情語、不完全さ、独白感が高評価
@@ -224,16 +249,73 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     if 1 <= newline_count <= 8:
         readability = min(1.0, readability + 0.1)
 
+    # --- 軸7: daichi_content_patterns構造準拠 (0-1, w=0.12) ---
+    # Phase A: 具体的場面から入る / Phase D: 核心の一文 / Phase E: 行動宣言で終わる
+    structure_score = 0.3  # ベースライン
+    first_line = text.split("\n")[0] if "\n" in text else text[:80]
+    last_line = text.strip().split("\n")[-1] if "\n" in text else text[-80:]
+
+    # Phase A: 具体的な場面・体験から入るパターン（高評価）
+    concrete_openers = [
+        "朝", "夜", "昨日", "さっき", "今日", "先日", "この前", "あの時",
+        "僕は", "私は", "自分", "正直", "ふと", "実は", "気づいた",
+        "やらかした", "失敗", "壊れ", "止まっ", "動かな",
+        "編集室", "画面", "モニター", "椅子", "机", "カフェ",
+    ]
+    if any(m in first_line for m in concrete_openers):
+        structure_score += 0.25
+    # 自己開示（弱さ、葛藤、失敗）が冒頭にある → ボーナス
+    vulnerability_openers = ["できない", "わからな", "怖", "迷", "悩", "不安", "つら"]
+    if any(m in first_line for m in vulnerability_openers):
+        structure_score += 0.10
+    # 抽象的AI論・一般論から入るパターン（ペナルティ）
+    abstract_openers = [
+        "AIは", "AI時代", "AIが", "人工知能", "テクノロジー",
+        "近年", "昨今", "現代", "これからの時代",
+        "〜について", "考えてみ", "注目され",
+    ]
+    if any(m in first_line for m in abstract_openers):
+        structure_score -= 0.25
+
+    # Phase D: 核心の一文（太字 **...** や短い断言文）
+    if "**" in text:
+        structure_score += 0.15  # 太字の核心文がある
+    elif any(s.strip() for s in re.findall(r'(?:^|\n)(.{5,30})[。！]', text)
+             if not any(w in s for w in ["です", "ます", "ました"])):
+        structure_score += 0.05  # 短い断言文がある
+
+    # Phase E: 行動宣言で終わる（「だからこうする」「次はこれをやる」）
+    action_endings = [
+        "する", "やる", "作る", "始める", "変える", "試す", "挑む",
+        "届ける", "残す", "繋ぐ", "壊す", "直す", "進む",
+    ]
+    if any(last_line.rstrip("。！？…").endswith(v) for v in action_endings):
+        structure_score += 0.15
+    # 評論家的な締め（ペナルティ）
+    passive_endings = ["でしょう", "ではないでしょうか", "と思います", "が大切です",
+                       "が重要です", "が求められます"]
+    if any(e in last_line for e in passive_endings):
+        structure_score -= 0.15
+
+    structure_score = max(0.0, min(1.0, structure_score))
+
     # --- 加重合計 ---
     score = (
-        human_score * 0.20 +
-        persona_score * 0.20 +
-        completeness * 0.20 +
-        engagement * 0.15 +
-        ai_score * 0.15 +
-        readability * 0.10
+        human_score * 0.17 +
+        persona_score * 0.17 +
+        completeness * 0.16 +
+        engagement * 0.13 +
+        ai_score * 0.13 +
+        readability * 0.08 +
+        structure_score * 0.16
     )
-    return round(max(0.0, min(1.0, score)), 3)
+    score = round(max(0.0, min(1.0, score)), 3)
+
+    # ハードフェイル: 中国語混入・名前誤読・AI自己開示 → 上限0.30
+    if hard_fail:
+        score = min(score, 0.30)
+
+    return score
 
 
 def _check_ai_cliche(text: str) -> bool:
@@ -318,6 +400,23 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     period = _get_time_period(time_str)
     avoid = "\n".join(f"- {p[:60]}" for p in recent_posts[:5]) if recent_posts else "（なし）"
 
+    # daichi_content_patterns構造ガイド + NG語（全プラットフォーム共通）
+    content_structure_guide = (
+        "\n【投稿の構造ルール（daichi_content_patterns準拠）】\n"
+        "- 冒頭は必ず具体的な場面・体験・感覚から入れ。「AIは〜」「近年〜」のような抽象的な書き出しは禁止。\n"
+        "- 例: 「深夜3時、画面が止まった」「正直、怖かった」「さっきコード壊した」\n"
+        "- 自己開示を恐れるな。弱さ・恐怖・葛藤・失敗を隠さない。\n"
+        "- 核心は短い一文で断言。「設計なき実装の末路だった」のように切れ味良く。\n"
+        "- 締めは行動宣言。「だから僕はこうする」「次はこれをやる」。評論家的な締め禁止。\n"
+        "- 「ではないでしょうか」「が大切です」「が重要です」で終わるな。\n"
+        "\n【使用禁止表現（生成に含めるな）】\n"
+        "- 「誰でも簡単に」「絶対稼げる」「完全自動で放置」「AIに任せればOK」\n"
+        "- 「最短で月100万」「革命」「覇権」「無双」\n"
+        "- 「〜について考えてみました」「いかがでしょうか」「深掘り」「させていただきます」\n"
+        "- 「特筆すべき」「画期的な」「注目すべきは」\n"
+        "- 絵文字3個以上禁止。ハッシュタグ3個以上禁止。箇条書き連打禁止。\n"
+    )
+
     # 事実誤認防止 + 人物像ルール（全プラットフォーム共通）
     factual_rules = (
         "\n【絶対禁止: 事実誤認・捏造】\n"
@@ -364,6 +463,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "- AI臭い定型表現は禁止。島原大知の声で語れ。\n"
             "- 完璧な文章にするな。推敲途中のような人間味を残せ。\n"
             "- 投稿テキストのみを出力。説明や前置きは不要。\n"
+            f"{content_structure_guide}"
             f"{factual_rules}"
             f"{persona_hint}"
         )
@@ -393,6 +493,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "論理・設計・分析。結論→根拠→示唆。一人称「私」。\n"
             "AI臭い定型表現は禁止。SYUTAINβとしての独自の声で語れ。\n"
             "投稿テキストのみを出力。\n"
+            f"{content_structure_guide}"
             f"{factual_rules}"
             f"{persona_hint}"
         )
@@ -412,6 +513,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "SYUTAINβの設計思想として島原大知の哲学がDNAとして反映される。\n"
             "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
             "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
+            f"{content_structure_guide}"
             f"{factual_rules}"
             f"{persona_hint}"
         )
@@ -431,6 +533,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "カジュアルで親しみやすいトーン。開発裏話、気づき、ゆるめの技術トピック。\n"
             "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
             "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
+            f"{content_structure_guide}"
             f"{factual_rules}"
             f"{persona_hint}"
         )
@@ -536,6 +639,15 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 persona_hint = "\n【島原大知の価値観（persona_memory）】\n"
                 for pr in persona_rows:
                     persona_hint += f"- {(pr['content'] or '')[:80]}\n"
+        except Exception:
+            pass
+
+        # agent_contextから最新インテリジェンスを注入
+        try:
+            from tools.agent_context import build_agent_context
+            intel_hint = await build_agent_context("sns_batch")
+            if intel_hint:
+                persona_hint += f"\n{intel_hint}\n"
         except Exception:
             pass
 
@@ -750,13 +862,25 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             scheduled = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
             scheduled += timedelta(minutes=offset_min)
 
-            # 品質スコアに基づく承認判定（CLAUDE.md ルール11準拠）
-            if quality >= 0.60:
-                post_status = "pending"  # 投稿キューへ
+            # 品質スコアに基づく承認判定（CLAUDE.md ルール11準拠、品質0.75以上で自動承認）
+            if quality >= 0.75:
+                post_status = "pending"  # 投稿キューへ（自動承認基準クリア）
+            elif quality >= 0.60:
+                post_status = "pending_review"  # 0.60-0.74は人間レビュー待ち
+                results.setdefault("pending_review", 0)
+                results["pending_review"] += 1
+                logger.info(f"SNS投稿レビュー待ち: 品質{quality:.2f} ({platform}/{account})")
             else:
                 post_status = "rejected"  # 品質不足で却下
                 results["rejected"] += 1
                 logger.info(f"SNS投稿却下: 品質{quality:.2f} ({platform}/{account})")
+                # 却下投稿もDBに保存（監査証跡）
+                await conn.execute(
+                    """INSERT INTO posting_queue
+                       (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    platform, account, draft, scheduled, post_status, quality, theme,
+                )
                 continue
 
             # posting_queueにINSERT

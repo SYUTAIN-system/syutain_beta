@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
+from tools.db_pool import get_connection
 from dotenv import load_dotenv
 
 from agents.capability_audit import get_capability_audit
@@ -39,7 +39,22 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.os_kernel")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
+
+
+def _fire_and_forget(coro) -> asyncio.Task:
+    """asyncio.ensure_futureのラッパー。例外が握り潰されるのを防ぐ"""
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(_log_task_exception)
+    return task
+
+
+def _log_task_exception(task: asyncio.Task):
+    """fire-and-forgetタスクの例外をログ出力"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error(f"バックグラウンドタスク例外: {exc}", exc_info=exc)
 
 # ゴール設定（設計書 6.3準拠）
 DEFAULT_MAX_STEPS = 50
@@ -118,22 +133,12 @@ class OSKernel:
     """
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
         self._perceiver = Perceiver()
         self._planner = Planner()
         self._executor = Executor()
         self._verifier = Verifier()
         self._stop_decider = StopDecider()
         self._active_goals: dict[str, GoalPacket] = {}
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
 
     # ===== Goal Packet生成 =====
 
@@ -238,7 +243,7 @@ class OSKernel:
         logger.info(f"Goal Packet生成完了: {goal_id}")
 
         # イベント記録: goal.created
-        asyncio.ensure_future(log_event(
+        _fire_and_forget(log_event(
             "goal.created", "goal",
             {"raw_goal": raw_goal[:200], "parsed_objective": goal_packet.parsed_objective,
              "priority": goal_packet.priority},
@@ -250,27 +255,25 @@ class OSKernel:
     async def _save_goal_packet(self, gp: GoalPacket):
         """Goal PacketをPostgreSQLに保存"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO goal_packets
-                            (goal_id, raw_goal, parsed_objective, success_definition,
-                             hard_constraints, soft_constraints, approval_boundary, status, progress)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                        ON CONFLICT (goal_id) DO UPDATE SET
-                            status = EXCLUDED.status,
-                            progress = EXCLUDED.progress
-                        """,
-                        gp.goal_id, gp.raw_goal, gp.parsed_objective,
-                        json.dumps(gp.success_definition, ensure_ascii=False),
-                        json.dumps(gp.hard_constraints, ensure_ascii=False, default=str),
-                        json.dumps(gp.soft_constraints, ensure_ascii=False),
-                        json.dumps(gp.approval_boundary, ensure_ascii=False),
-                        gp.status, gp.progress,
-                    )
-                logger.info(f"Goal Packet '{gp.goal_id}' をPostgreSQLに保存")
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO goal_packets
+                        (goal_id, raw_goal, parsed_objective, success_definition,
+                         hard_constraints, soft_constraints, approval_boundary, status, progress)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (goal_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        progress = EXCLUDED.progress
+                    """,
+                    gp.goal_id, gp.raw_goal, gp.parsed_objective,
+                    json.dumps(gp.success_definition, ensure_ascii=False),
+                    json.dumps(gp.hard_constraints, ensure_ascii=False, default=str),
+                    json.dumps(gp.soft_constraints, ensure_ascii=False),
+                    json.dumps(gp.approval_boundary, ensure_ascii=False),
+                    gp.status, gp.progress,
+                )
+            logger.info(f"Goal Packet '{gp.goal_id}' をPostgreSQLに保存")
         except Exception as e:
             logger.error(f"Goal Packet保存失敗: {e}")
 
@@ -293,6 +296,16 @@ class OSKernel:
         gp_dict = goal_packet.to_dict()
 
         logger.info(f"=== 5段階自律ループ開始: {goal_packet.goal_id} ===")
+
+        # セッション記憶ロード — 直近の経験・未解決課題を参照（CLAUDE.md ルール25）
+        _session_context = None
+        try:
+            from brain_alpha.memory_manager import load_session_memory
+            _session_context = await load_session_memory(limit=1)
+            if _session_context:
+                logger.info(f"セッション記憶ロード: {_session_context[0].get('session_id', '?')}")
+        except Exception as e:
+            logger.warning(f"セッション記憶ロード失敗: {e}")
 
         # 新ゴール開始時にSemanticLoopDetectorをリセット（前ゴールの履歴が残ると誤検知する）
         try:
@@ -378,7 +391,7 @@ class OSKernel:
                     # ③ 行動（Act）
                     logger.info(f"--- ③ 行動（Act）: {task_node.task_id} ---")
                     # イベント記録: task.dispatched（意思決定トレース付き）
-                    asyncio.ensure_future(log_event(
+                    _fire_and_forget(log_event(
                         "task.dispatched", "task",
                         {
                             "node": task_node.assigned_node,
@@ -429,7 +442,7 @@ class OSKernel:
                         task_graph.mark_completed(task_node.task_id)
                         completed_count += 1
                         # イベント記録: task.completed
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "task.completed", "task",
                             {"quality_score": q_score,
                              "model": result_dict.get("model_used", ""),
@@ -440,7 +453,7 @@ class OSKernel:
                     else:
                         task_graph.mark_failed(task_node.task_id)
                         # イベント記録: task.failed
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "task.failed", "task",
                             {"error_class": verify_dict.get("error_class", "unknown"),
                              "retry_value": verify_dict.get("retry_value", "none"),
@@ -473,7 +486,7 @@ class OSKernel:
                                 result_dict["refined"] = True
                                 result_dict["cost_jpy"] = result_dict.get("cost_jpy", 0) + refined.get("cost_jpy", 0)
                                 goal_packet.total_cost_jpy += refined.get("cost_jpy", 0)
-                                asyncio.ensure_future(log_event(
+                                _fire_and_forget(log_event(
                                     "quality.refinement", "task",
                                     {"original_score": q_score, "refined_score": new_q,
                                      "model": refined.get("model_used", ""),
@@ -487,19 +500,17 @@ class OSKernel:
 
                     # イベント記録: quality.scored
                     if q_score > 0:
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "quality.scored", "task",
                             {"quality_score": q_score, "task_type": task_node.task_type},
                             goal_id=goal_packet.goal_id, task_id=task_node.task_id,
                         ))
                     try:
-                        pool = await self._get_pool()
-                        if pool:
-                            async with pool.acquire() as conn:
-                                await conn.execute(
-                                    "UPDATE tasks SET quality_score=$1, updated_at=NOW() WHERE id=$2",
-                                    q_score, task_node.task_id,
-                                )
+                        async with get_connection() as conn:
+                            await conn.execute(
+                                "UPDATE tasks SET quality_score=$1, updated_at=NOW() WHERE id=$2",
+                                q_score, task_node.task_id,
+                            )
                     except Exception as e:
                         logger.warning(f"品質スコアDB反映失敗 ({task_node.task_id}): {e}")
 
@@ -539,7 +550,7 @@ class OSKernel:
                         goal_packet.progress = 1.0
                         await self._update_goal_status(goal_packet)
                         avg_quality = sum(r.get("quality_score", 0) or 0 for r in all_results) / max(len(all_results), 1)
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "goal.completed", "goal",
                             {"total_steps": goal_packet.total_steps,
                              "total_cost_jpy": goal_packet.total_cost_jpy,
@@ -552,7 +563,7 @@ class OSKernel:
                         logger.critical(f"{decision}: {stop_decision.reason}")
                         goal_packet.status = "emergency_stopped"
                         await self._update_goal_status(goal_packet)
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "loopguard.triggered", "system",
                             {"decision": decision, "reason": stop_decision.reason,
                              "step_count": goal_packet.total_steps,
@@ -578,7 +589,7 @@ class OSKernel:
                         logger.warning(f"人間エスカレーション: {stop_decision.reason}")
                         goal_packet.status = "escalated"
                         await self._update_goal_status(goal_packet)
-                        asyncio.ensure_future(log_event(
+                        _fire_and_forget(log_event(
                             "goal.escalated", "goal",
                             {"reason": stop_decision.reason},
                             severity="warning",
@@ -597,7 +608,7 @@ class OSKernel:
                         if goal_packet.fallback_goals:
                             fallback = goal_packet.fallback_goals.pop(0)
                             logger.info(f"部分目標に切替: {fallback[:50]}")
-                            asyncio.ensure_future(log_event(
+                            _fire_and_forget(log_event(
                                 "goal.fallback_activated", "goal",
                                 {"original_goal": goal_packet.raw_goal[:100],
                                  "fallback_goal": fallback[:100],
@@ -635,6 +646,7 @@ class OSKernel:
                 goal_packet.status = "completed"
                 goal_packet.progress = 1.0
                 await self._update_goal_status(goal_packet)
+                await self._save_session_on_goal_end(goal_packet, all_results, "completed")
                 return self._build_final_result(goal_packet, all_results, "completed")
 
             # SWITCH_PLANでない場合は終了
@@ -644,40 +656,37 @@ class OSKernel:
         # ループ終了（未完了）
         goal_packet.status = "incomplete"
         await self._update_goal_status(goal_packet)
+        await self._save_session_on_goal_end(goal_packet, all_results, "incomplete")
         return self._build_final_result(goal_packet, all_results, "incomplete")
 
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "OS_KERNEL", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "OS_KERNEL", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception:
             pass
 
     async def _update_goal_status(self, gp: GoalPacket):
         """ゴールのステータスをDBに更新"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE goal_packets SET
-                            status = $1, progress = $2, total_steps = $3,
-                            total_cost_jpy = $4, completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE NULL END
-                        WHERE goal_id = $5
-                        """,
-                        gp.status, gp.progress, gp.total_steps,
-                        gp.total_cost_jpy, gp.goal_id,
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE goal_packets SET
+                        status = $1, progress = $2, total_steps = $3,
+                        total_cost_jpy = $4, completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE NULL END
+                    WHERE goal_id = $5
+                    """,
+                    gp.status, gp.progress, gp.total_steps,
+                    gp.total_cost_jpy, gp.goal_id,
+                )
         except Exception as e:
             logger.error(f"ゴールステータス更新失敗: {e}")
 
@@ -687,6 +696,25 @@ class OSKernel:
             cgd.unregister_goal(gp.goal_id)
         except Exception:
             pass
+
+    async def _save_session_on_goal_end(self, gp, all_results: list, outcome: str):
+        """ゴール終了時にセッション記憶を保存（CLAUDE.md ルール25）"""
+        try:
+            from brain_alpha.memory_manager import save_session_memory
+            decisions = [
+                f"goal={gp.goal_id} outcome={outcome} steps={gp.total_steps} cost=¥{gp.total_cost_jpy:.1f}",
+            ]
+            open_issues = []
+            if outcome != "completed":
+                open_issues.append(f"未完了ゴール: {gp.parsed_objective[:100]}")
+            await save_session_memory(
+                session_id=f"goal-{gp.goal_id}",
+                summary=f"{outcome}: {gp.parsed_objective[:200]}",
+                decisions=decisions,
+                open_issues=open_issues,
+            )
+        except Exception as e:
+            logger.warning(f"セッション記憶保存失敗: {e}")
 
         # LoopGuard状態クリア
         try:
@@ -780,11 +808,6 @@ class OSKernel:
                 await component.close()
             except Exception as e:
                 logger.warning(f"コンポーネント終了エラー: {e}")
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
 
 
 # シングルトン

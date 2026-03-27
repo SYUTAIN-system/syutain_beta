@@ -491,8 +491,56 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # note記事品質チェック（30分間隔、コストガード付き）
+            self._scheduler.add_job(
+                self.note_quality_check,
+                IntervalTrigger(minutes=30),
+                id="note_quality_check",
+                name="note記事品質チェック（30分）",
+                replace_existing=True,
+            )
+
+            # 日次サマリーDiscord通知（毎日 20:30 JST）
+            self._scheduler.add_job(
+                self.daily_summary_notify,
+                CronTrigger(hour=20, minute=30, timezone="Asia/Tokyo"),
+                id="daily_summary_notify",
+                name="日次サマリーDiscord通知（20:30）",
+                replace_existing=True,
+            )
+
+            # 商品パッケージング（1時間間隔）
+            self._scheduler.add_job(
+                self.product_packaging,
+                IntervalTrigger(hours=1),
+                id="product_packaging",
+                name="商品パッケージング（1時間）",
+                replace_existing=True,
+            )
+
+            # 経営日報（毎日 07:05 JST）
+            self._scheduler.add_job(
+                self.executive_briefing,
+                CronTrigger(hour=7, minute=5, timezone="Asia/Tokyo"),
+                id="executive_briefing",
+                name="経営日報（毎日07:05）",
+                replace_existing=True,
+            )
+
             self._scheduler.start()
             logger.info("スケジューラー起動完了")
+
+            # 起動時の時刻に応じてパワーモードを自動判定（23:00-07:00 JST = night）
+            global _current_power_mode
+            from zoneinfo import ZoneInfo
+            jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
+            current_hour = jst_now.hour
+            if current_hour >= 23 or current_hour < 7:
+                _current_power_mode = "night"
+                logger.info(f"起動時刻 {jst_now.strftime('%H:%M')} JST → 夜間モードで開始")
+            else:
+                _current_power_mode = "day"
+                logger.info(f"起動時刻 {jst_now.strftime('%H:%M')} JST → 日中モードで開始")
 
             # ジョブ一覧表示
             for job in self._scheduler.get_jobs():
@@ -545,10 +593,9 @@ class SyutainScheduler:
 
             # PostgreSQLに保存
             try:
-                import asyncpg
                 import json
-                conn = await asyncpg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     await conn.execute(
                         """
                         INSERT INTO capability_snapshots (snapshot_data)
@@ -556,8 +603,6 @@ class SyutainScheduler:
                         """,
                         json.dumps(snapshot, ensure_ascii=False, default=str),
                     )
-                finally:
-                    await conn.close()
             except Exception as e:
                 logger.error(f"Capability Audit保存失敗: {e}")
 
@@ -593,6 +638,47 @@ class SyutainScheduler:
             })
         except Exception as e:
             logger.error(f"動的キーワード更新失敗: {e}")
+
+    async def daily_summary_notify(self):
+        """日次サマリー: 完了タスク数・収益・承認待ち件数をDiscord通知"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.discord_notify import notify_daily_summary
+            async with get_connection() as conn:
+                completed = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'completed' AND updated_at > CURRENT_DATE"
+                ) or 0
+                revenue = await conn.fetchval(
+                    "SELECT COALESCE(SUM(revenue_jpy), 0) FROM commerce_transactions WHERE created_at > CURRENT_DATE"
+                ) or 0.0
+                pending = await conn.fetchval(
+                    "SELECT COUNT(*) FROM approval_queue WHERE status = 'pending'"
+                ) or 0
+            await notify_daily_summary(int(completed), float(revenue), int(pending))
+            logger.info(f"日次サマリー通知: 完了={completed}, 収益=¥{revenue}, 承認待ち={pending}")
+        except Exception as e:
+            logger.error(f"日次サマリー通知失敗: {e}")
+
+    async def product_packaging(self):
+        """publish_ready記事を商品パッケージに変換"""
+        try:
+            from brain_alpha.product_packager import package_publish_ready_articles
+            result = await package_publish_ready_articles()
+            if result.get("packaged", 0) > 0:
+                logger.info(f"商品パッケージング: {result['packaged']}件パッケージ化")
+            else:
+                logger.debug("商品パッケージング: 対象なし")
+        except Exception as e:
+            logger.error(f"商品パッケージングエラー: {e}")
+
+    async def executive_briefing(self):
+        """経営日報を生成してDiscord送信"""
+        try:
+            from brain_alpha.executive_briefing import generate_executive_briefing
+            result = await generate_executive_briefing()
+            logger.info(f"経営日報: {result.get('status', 'unknown')}")
+        except Exception as e:
+            logger.error(f"経営日報エラー: {e}")
 
     async def generate_intel_digest(self):
         """intel_digest生成: 直近24時間の情報をエージェント向けに要約"""
@@ -750,10 +836,9 @@ class SyutainScheduler:
     async def redispatch_orphan_tasks(self):
         """5分おきに孤立pendingタスクを検出し、NATSでディスパッチを再試行"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 48時間以上前のpendingタスクは stale に移行（永久放置防止）
                 stale_count = await conn.execute(
                     """UPDATE tasks SET status = 'stale'
@@ -857,8 +942,6 @@ class SyutainScheduler:
                             logger.info(f"タスク {task_id} ({task_type}) → {node} に再ディスパッチ")
                         except Exception as e:
                             logger.error(f"タスク再ディスパッチ失敗: {e}")
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"孤立タスク再ディスパッチ処理失敗: {e}")
 
@@ -936,9 +1019,8 @@ class SyutainScheduler:
     async def cost_forecast(self):
         """6時間間隔でAPI月末コスト予測"""
         try:
-            import asyncpg
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 直近7日の平均日次コスト
                 avg_daily = await conn.fetchval("""
                     SELECT COALESCE(AVG(daily_total), 0) FROM (
@@ -979,8 +1061,6 @@ class SyutainScheduler:
                         )
                     except Exception:
                         pass
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"コスト予測失敗: {e}")
 
@@ -1151,17 +1231,14 @@ class SyutainScheduler:
             from tools.event_logger import log_event
 
             # 最近のシステム活動からコンテキストを生成
-            import asyncpg
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 recent_proposals = await conn.fetch(
                     "SELECT title, score FROM proposal_history ORDER BY created_at DESC LIMIT 3"
                 )
                 recent_tasks = await conn.fetchval(
                     "SELECT count(*) FROM tasks WHERE updated_at > NOW() - INTERVAL '3 days'"
                 )
-            finally:
-                await conn.close()
 
             context = f"直近3日: タスク{recent_tasks}件処理。"
             if recent_proposals:
@@ -1237,9 +1314,8 @@ class SyutainScheduler:
             # intel_itemsからトピックを動的生成（Q7修正）
             topics = []
             try:
-                import asyncpg as _apg_nb
-                _conn_nb = await _apg_nb.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as _conn_nb:
                     intel_rows = await _conn_nb.fetch(
                         """SELECT title, summary, category FROM intel_items
                         WHERE importance_score >= 0.5
@@ -1252,8 +1328,6 @@ class SyutainScheduler:
                             summary = (r['summary'] or '')[:100]
                             topics.append(f"{title}に関する実践的な解説と島原大知の見解（参考: {summary}）")
                         logger.info(f"夜間バッチ: intel_itemsから{len(topics)}トピック生成")
-                finally:
-                    await _conn_nb.close()
             except Exception as e:
                 logger.warning(f"夜間バッチ intel_items取得失敗: {e}")
 
@@ -1297,9 +1371,8 @@ class SyutainScheduler:
 
             # 品質0.7以上の成果物に対してcontent_multiplier実行
             try:
-                import asyncpg as _apg
-                conn = await _apg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     high_quality = await conn.fetch(
                         """SELECT id, type, output_data
                         FROM tasks
@@ -1317,8 +1390,6 @@ class SyutainScheduler:
                             source_type="artifact",
                         )
                         logger.info(f"夜間バッチ: content_multiplier {result['total_count']}件生成")
-                finally:
-                    await conn.close()
             except Exception as e:
                 logger.error(f"夜間バッチ content_multiplier失敗: {e}")
 
@@ -1330,9 +1401,8 @@ class SyutainScheduler:
         """毎週金曜23:15 JST: 直近1週間の高品質成果物から商品化候補を生成"""
         logger.info("週次商品化候補生成開始")
         try:
-            import asyncpg as _apg
-            conn = await _apg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 直近1週間で品質0.7以上の成果物
                 rows = await conn.fetch(
                     """SELECT id, type, quality_score, output_data
@@ -1372,8 +1442,6 @@ class SyutainScheduler:
                         "source_task_id": best["id"],
                         "quality_score": float(best["quality_score"]),
                     })
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"週次商品化候補生成失敗: {e}")
 
@@ -1401,9 +1469,8 @@ class SyutainScheduler:
             # intel_itemsから直近トレンドを取得してプロンプトに注入（Q7修正）
             intel_hint = ""
             try:
-                import asyncpg as _apg_nd
-                _conn_nd = await _apg_nd.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as _conn_nd:
                     intel_rows = await _conn_nd.fetch(
                         """SELECT title, summary, source FROM intel_items
                         WHERE importance_score >= 0.4
@@ -1414,8 +1481,6 @@ class SyutainScheduler:
                         intel_hint = "\n\n## 直近の市場動向（記事に活用できる素材）\n"
                         for r in intel_rows:
                             intel_hint += f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:80]}\n"
-                finally:
-                    await _conn_nd.close()
             except Exception as e:
                 logger.warning(f"note_draft intel取得失敗: {e}")
 
@@ -1580,7 +1645,6 @@ class SyutainScheduler:
     async def node_health_check(self):
         """5分間隔でノードのヘルスチェックを実行しevent_logに記録"""
         try:
-            import asyncpg
             import json
             import httpx
 
@@ -1682,10 +1746,9 @@ class SyutainScheduler:
     async def anomaly_detection(self):
         """5分間隔で異常検知 → Discord通知"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 直近5分のerrorイベント数
                 error_count = await conn.fetchval(
                     """SELECT COUNT(*) FROM event_log
@@ -1741,18 +1804,15 @@ class SyutainScheduler:
                     except Exception as e:
                         logger.error(f"異常検知Discord通知失敗: {e}")
 
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"異常検知処理失敗: {e}")
 
     async def _check_post_duplicate(self, draft: str) -> bool:
         """Bluesky投稿の重複チェック。N-gram類似度0.5以上なら棄却。"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 直近10件のBlueskyドラフトを取得（テーマ重複を広く検出）
                 rows = await conn.fetch(
                     """SELECT request_data FROM approval_queue
@@ -1792,8 +1852,6 @@ class SyutainScheduler:
                         )
                         return True
                 return False
-            finally:
-                await conn.close()
         except Exception as e:
             logger.warning(f"Bluesky重複チェック失敗: {e}")
             return False
@@ -1831,10 +1889,9 @@ class SyutainScheduler:
             # 直近10投稿の内容を取得して重複回避+テーマローテーション強制
             recent_contents = []
             try:
-                import asyncpg
                 import json as _json
-                conn = await asyncpg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     rows = await conn.fetch(
                         """SELECT request_data FROM approval_queue
                         WHERE request_type = 'bluesky_post'
@@ -1843,8 +1900,6 @@ class SyutainScheduler:
                     for row in rows:
                         rd = _json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"]
                         recent_contents.append(rd.get("content", ""))
-                finally:
-                    await conn.close()
             except Exception:
                 pass
 
@@ -1938,10 +1993,9 @@ class SyutainScheduler:
                 return
 
             # 承認キューに投入
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO approval_queue (request_type, request_data, status)
                     VALUES ('bluesky_post', $1, 'pending')""",
@@ -1953,8 +2007,6 @@ class SyutainScheduler:
                         "quality_score": quality_score if 'quality_score' in dir() else None,
                     }, ensure_ascii=False),
                 )
-            finally:
-                await conn.close()
 
             # イベント記録
             try:
@@ -2029,10 +2081,9 @@ class SyutainScheduler:
             # 直近のX投稿とBluesky投稿を取得（重複回避）
             recent_posts = ""
             try:
-                import asyncpg
                 import json as _json
-                conn = await asyncpg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     rows = await conn.fetch(
                         """SELECT request_data FROM approval_queue
                         WHERE request_type IN ('x_post', 'bluesky_post')
@@ -2041,8 +2092,6 @@ class SyutainScheduler:
                     for row in rows:
                         rd = _json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"]
                         recent_posts += f"- {rd.get('content', '')[:60]}\n"
-                finally:
-                    await conn.close()
             except Exception:
                 pass
 
@@ -2106,10 +2155,9 @@ class SyutainScheduler:
                 return
 
             # 承認キューに投入
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO approval_queue (request_type, request_data, status)
                     VALUES ('x_post', $1, 'pending')""",
@@ -2121,8 +2169,6 @@ class SyutainScheduler:
                         "pattern": current_pattern,
                     }, ensure_ascii=False),
                 )
-            finally:
-                await conn.close()
 
             try:
                 from tools.event_logger import log_event
@@ -2160,10 +2206,9 @@ class SyutainScheduler:
             # 直近投稿取得（重複回避）
             recent_posts = ""
             try:
-                import asyncpg
                 import json as _json
-                conn = await asyncpg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     rows = await conn.fetch(
                         """SELECT request_data FROM approval_queue
                         WHERE request_type IN ('x_post', 'bluesky_post')
@@ -2172,8 +2217,6 @@ class SyutainScheduler:
                     for row in rows:
                         rd = _json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"]
                         recent_posts += f"- {rd.get('content', '')[:60]}\n"
-                finally:
-                    await conn.close()
             except Exception:
                 pass
 
@@ -2234,10 +2277,9 @@ class SyutainScheduler:
                 logger.info("島原Xドラフト: 重複のため棄却")
                 return
 
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO approval_queue (request_type, request_data, status)
                     VALUES ('x_post', $1, 'pending')""",
@@ -2249,8 +2291,6 @@ class SyutainScheduler:
                         "pattern": current_pattern,
                     }, ensure_ascii=False),
                 )
-            finally:
-                await conn.close()
 
             try:
                 from tools.event_logger import log_event
@@ -2290,10 +2330,9 @@ class SyutainScheduler:
             # 直近投稿取得（全プラットフォーム重複回避）
             recent_posts = ""
             try:
-                import asyncpg
                 import json as _json
-                conn = await asyncpg.connect(DATABASE_URL)
-                try:
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
                     rows = await conn.fetch(
                         """SELECT request_data FROM approval_queue
                         WHERE request_type IN ('threads_post', 'bluesky_post', 'x_post')
@@ -2302,8 +2341,6 @@ class SyutainScheduler:
                     for row in rows:
                         rd = _json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"]
                         recent_posts += f"- {rd.get('content', '')[:60]}\n"
-                finally:
-                    await conn.close()
             except Exception:
                 pass
 
@@ -2368,10 +2405,9 @@ class SyutainScheduler:
                 logger.info("Threadsドラフト: 重複のため棄却")
                 return
 
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO approval_queue (request_type, request_data, status)
                     VALUES ('threads_post', $1, 'pending')""",
@@ -2382,8 +2418,6 @@ class SyutainScheduler:
                         "pattern": current_pattern,
                     }, ensure_ascii=False),
                 )
-            finally:
-                await conn.close()
 
             try:
                 from tools.event_logger import log_event
@@ -2464,15 +2498,19 @@ class SyutainScheduler:
     async def posting_queue_process(self):
         """毎分: posting_queueからscheduled_at<=NOWの投稿を実行"""
         try:
-            import asyncpg
             import json
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 rows = await conn.fetch(
-                    """SELECT id, platform, account, content
-                       FROM posting_queue
-                       WHERE status = 'pending' AND scheduled_at <= NOW()
-                       ORDER BY scheduled_at ASC LIMIT 3"""
+                    """UPDATE posting_queue SET status = 'processing'
+                       WHERE id IN (
+                           SELECT id FROM posting_queue
+                           WHERE status = 'pending' AND scheduled_at <= NOW()
+                             AND (quality_score >= 0.75 OR quality_score IS NULL)
+                           ORDER BY scheduled_at ASC LIMIT 3
+                           FOR UPDATE SKIP LOCKED
+                       )
+                       RETURNING id, platform, account, content, quality_score"""
                 )
                 for row in rows:
                     platform = row["platform"]
@@ -2488,8 +2526,8 @@ class SyutainScheduler:
                             logger.warning(f"posting_queue#{post_id} 最終NGチェック不合格: {ng_check['violations']}")
                             await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
                             continue
-                    except Exception:
-                        pass  # NGチェック失敗時は投稿を続行
+                    except Exception as e:
+                        logger.warning(f"posting_queue#{post_id} NGチェック失敗（投稿続行）: {e}")
 
                     # 重複チェック: 同じ日に同じ先頭30文字の投稿が既にpostedなら拒否
                     try:
@@ -2504,8 +2542,8 @@ class SyutainScheduler:
                             logger.warning(f"posting_queue#{post_id} 重複投稿検知→スキップ")
                             await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
                             continue
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"posting_queue#{post_id} 重複チェック失敗（投稿続行）: {e}")
 
                     try:
                         result = {}
@@ -2523,8 +2561,8 @@ class SyutainScheduler:
                             try:
                                 from tools.discord_notify import notify_discord
                                 await notify_discord(content)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"リマインダー通知失敗: {e}")
                             result = {"success": True, "post_url": "reminder"}
 
                         if result.get("success"):
@@ -2553,8 +2591,6 @@ class SyutainScheduler:
                     except Exception as e:
                         logger.error(f"posting_queue#{post_id} 投稿エラー: {e}")
                         await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"posting_queue処理エラー: {e}")
 
@@ -2590,20 +2626,26 @@ class SyutainScheduler:
     async def brain_cross_evaluate(self):
         """Brain-αの修正/レビュー効果を後追い検証"""
         try:
-            from brain_alpha.cross_evaluator import schedule_evaluations
+            from brain_alpha.cross_evaluator import schedule_evaluations, apply_cross_evaluation_feedback
             result = await schedule_evaluations()
             total = result.get("fixes_evaluated", 0) + result.get("reviews_evaluated", 0)
             if total > 0:
                 logger.info(f"Brain-α相互評価: {total}件評価完了")
+            # 評価結果をself_healer/llm_routerにフィードバック
+            try:
+                fb = await apply_cross_evaluation_feedback()
+                if fb.get("strategies_flagged", 0) > 0 or fb.get("model_adjustments", 0) > 0:
+                    logger.info(f"相互評価フィードバック: {fb}")
+            except Exception as fb_err:
+                logger.warning(f"相互評価フィードバック失敗: {fb_err}")
         except Exception as e:
             logger.error(f"Brain-α相互評価失敗: {e}")
 
     async def expire_old_handoffs(self):
         """7日超過のpending brain_handoffをexpiredに更新"""
         try:
-            import asyncpg
-            conn = await asyncpg.connect(DATABASE_URL)
-            try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 result = await conn.execute(
                     """UPDATE brain_handoff
                        SET status = 'expired'
@@ -2613,10 +2655,49 @@ class SyutainScheduler:
                 count = int(result.split()[-1]) if result else 0
                 if count > 0:
                     logger.info(f"brain_handoff expired: {count}件")
-            finally:
-                await conn.close()
         except Exception as e:
             logger.error(f"handoff期限切れ処理失敗: {e}")
+
+    async def note_quality_check(self):
+        """note記事品質チェック（30分おき、コストガード付き）"""
+        try:
+            from brain_alpha.note_quality_checker import NoteQualityChecker
+            from tools.discord_notify import notify_discord
+
+            checker = NoteQualityChecker()
+            await checker.initialize()
+            results = await checker.check_all_pending()
+
+            for r in results:
+                gpt5 = r.get("gpt5")
+                if gpt5 and gpt5.get("publish_verdict") == "publish_ready":
+                    await notify_discord(
+                        f"✅ 記事『{r.get('title', '不明')}』が品質チェック通過。"
+                        f"推奨価格: ¥{gpt5.get('pricing_recommendation', '-')}。"
+                        f"チェックコスト: ¥{r.get('cost_jpy', 0):.1f}"
+                    )
+                elif gpt5 and gpt5.get("publish_verdict") == "needs_edit":
+                    instructions = gpt5.get("edit_instructions", [])[:3]
+                    await notify_discord(
+                        f"⚠️ 記事『{r.get('title', '不明')}』に修正が必要。"
+                        f"修正点: {', '.join(instructions)}"
+                    )
+                elif r.get("status") == "blocked":
+                    await notify_discord(f"🛑 品質チェック停止: {r.get('reason', '不明')}")
+
+            if results:
+                total_cost = sum(r.get("cost_jpy", 0) for r in results)
+                logger.info(f"note品質チェック完了: {len(results)}件, コスト: ¥{total_cost:.1f}")
+                try:
+                    from tools.event_logger import log_event
+                    await log_event(
+                        "note_quality.run_complete", "note_quality",
+                        {"count": len(results), "cost_jpy": round(total_cost, 2)},
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"note品質チェックエラー: {e}")
 
     def stop(self):
         """スケジューラーを停止"""

@@ -14,9 +14,9 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
+from tools.db_pool import get_connection
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
 from tools.budget_guard import get_budget_guard
@@ -24,8 +24,6 @@ from tools.budget_guard import get_budget_guard
 load_dotenv()
 
 logger = logging.getLogger("syutain.executor")
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 
 class ExecutionResult:
@@ -71,16 +69,7 @@ class Executor:
     """行動エンジン — タスクの実行と成果物管理"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def execute_task(self, task: dict, goal_packet: dict) -> ExecutionResult:
         """
@@ -104,13 +93,11 @@ class Executor:
 
         # タスクステータスを running に更新
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE tasks SET status = 'running', updated_at = NOW() WHERE id = $1",
-                        task_id,
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE tasks SET status = 'running', updated_at = NOW() WHERE id = $1",
+                    task_id,
+                )
         except Exception as e:
             logger.warning(f"タスクrunningステータス更新失敗 ({task_id}): {e}")
 
@@ -131,13 +118,13 @@ class Executor:
             elif task_type == "browser_action":
                 result = await self._execute_browser_task(task, goal_packet)
             elif task_type == "computer_use":
-                result = await self._execute_computer_use_task(task)
+                result = await self._execute_computer_use_task(task, goal_packet)
             elif task_type == "data_extraction":
-                result = await self._execute_data_extraction(task)
+                result = await self._execute_data_extraction(task, goal_packet)
             elif task_type == "batch_process":
-                result = await self._execute_batch_task(task)
+                result = await self._execute_batch_task(task, goal_packet)
             elif task_type == "approval_request":
-                result = await self._execute_approval_request(task)
+                result = await self._execute_approval_request(task, goal_packet)
             else:
                 result = await self._execute_llm_task(task, goal_packet)
 
@@ -188,6 +175,18 @@ class Executor:
         )
 
         logger.info(f"タスク実行完了: {task_id} ({result.status}, {elapsed:.1f}秒, ¥{result.cost_jpy:.0f})")
+
+        # Discord通知（成功/失敗）
+        try:
+            if result.status == "success":
+                from tools.discord_notify import notify_task_complete
+                summary = result.output.get("summary", description[:100]) if result.output else description[:100]
+                await notify_task_complete(f"{task_type}:{task_id}", summary)
+            elif result.status == "failure":
+                from tools.discord_notify import notify_task_failed
+                await notify_task_failed(f"{task_type}:{task_id}", result.error_message or "不明")
+        except Exception:
+            pass
 
         # 中間成果物をDBに保存（CLAUDE.md ルール18: 途中停止しても資産化）
         await self._save_result(task_id, result, goal_packet.get("goal_id", ""))
@@ -333,7 +332,7 @@ class Executor:
                 "description": f"以下のブラウザ操作タスクを調査で代替してください: {description}",
             }, goal_packet or {"goal_id": "", "raw_goal": ""})
 
-    async def _execute_computer_use_task(self, task: dict) -> ExecutionResult:
+    async def _execute_computer_use_task(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
         """Computer Useタスクの実行（V25: GPT-5.4）"""
         task_id = task.get("task_id", "")
 
@@ -374,31 +373,28 @@ class Executor:
                 error_message=f"Computer Use通信失敗: {e}",
             )
 
-    async def _execute_data_extraction(self, task: dict) -> ExecutionResult:
+    async def _execute_data_extraction(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
         """データ抽出タスクの実行"""
-        # LLMタスクとして実行（簡易実装）
-        return await self._execute_llm_task(task, {"goal_id": "", "raw_goal": ""})
+        return await self._execute_llm_task(task, goal_packet or {"goal_id": "", "raw_goal": ""})
 
-    async def _execute_batch_task(self, task: dict) -> ExecutionResult:
+    async def _execute_batch_task(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
         """バッチ処理タスクの実行"""
-        return await self._execute_llm_task(task, {"goal_id": "", "raw_goal": ""})
+        return await self._execute_llm_task(task, goal_packet or {"goal_id": "", "raw_goal": ""})
 
-    async def _execute_approval_request(self, task: dict) -> ExecutionResult:
+    async def _execute_approval_request(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
         """承認リクエストタスク"""
         task_id = task.get("task_id", "")
 
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO approval_queue (request_type, request_data)
-                        VALUES ($1, $2)
-                        """,
-                        task.get("task_type", "general"),
-                        json.dumps(task, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO approval_queue (request_type, request_data)
+                    VALUES ($1, $2)
+                    """,
+                    task.get("task_type", "general"),
+                    json.dumps(task, ensure_ascii=False, default=str),
+                )
             return ExecutionResult(
                 task_id=task_id,
                 status="pending_approval",
@@ -480,43 +476,39 @@ class Executor:
                            reasoning: str = "", confidence: float = None, context: dict = None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "executor", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "executor", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception as e:
             logger.debug(f"トレース記録失敗（無視）: {e}")
 
     async def _save_result(self, task_id: str, result: ExecutionResult, goal_id: str):
         """実行結果をPostgreSQLに保存（CLAUDE.md ルール18）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE tasks SET
-                            status = $1,
-                            output_data = $2,
-                            artifacts = $3,
-                            cost_jpy = $4,
-                            quality_score = $5,
-                            updated_at = NOW()
-                        WHERE id = $6
-                        """,
-                        result.status,
-                        json.dumps(result.output, ensure_ascii=False, default=str),
-                        json.dumps(result.artifacts, ensure_ascii=False, default=str),
-                        result.cost_jpy,
-                        result.quality_score,
-                        task_id,
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE tasks SET
+                        status = $1,
+                        output_data = $2,
+                        artifacts = $3,
+                        cost_jpy = $4,
+                        quality_score = $5,
+                        updated_at = NOW()
+                    WHERE id = $6
+                    """,
+                    result.status,
+                    json.dumps(result.output, ensure_ascii=False, default=str),
+                    json.dumps(result.artifacts, ensure_ascii=False, default=str),
+                    result.cost_jpy,
+                    result.quality_score,
+                    task_id,
+                )
         except Exception as e:
             logger.error(f"タスク結果保存失敗 ({task_id}): {e}")
 
@@ -536,8 +528,4 @@ class Executor:
             logger.warning(f"タスク完了通知失敗 ({task_id}): {e}")
 
     async def close(self):
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass

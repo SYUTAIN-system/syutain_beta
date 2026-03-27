@@ -25,19 +25,15 @@ STRIPE_API_URL = "https://api.stripe.com/v1"
 async def _require_approval(action: str, data: dict) -> dict:
     """ApprovalManager承認（CLAUDE.mdルール11: 商品公開・価格設定は承認必須）"""
     try:
-        from tools.nats_client import get_nats_client
-        nats = await get_nats_client()
-        response = await nats.request(
-            "approval.request",
-            {
-                "request_type": "commerce",
-                "action": action,
-                "data": data,
-                "requested_at": datetime.now().isoformat(),
-            },
-            timeout=300.0,
+        from agents.approval_manager import get_approval_manager
+        manager = await get_approval_manager()
+        result = await manager.request_approval(
+            request_type="commerce",
+            request_data={"action": action, **data},
         )
-        return response or {"approved": False, "reason": "タイムアウト"}
+        if result.get("status") == "approved":
+            return {"approved": True, "approval_id": result.get("approval_id")}
+        return {"approved": False, "reason": "承認待ち", "approval_id": result.get("approval_id")}
     except Exception as e:
         logger.error(f"承認リクエスト失敗: {e}")
         return {"approved": False, "reason": str(e)}

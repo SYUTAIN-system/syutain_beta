@@ -68,8 +68,8 @@ async def notify_discord(content: str, username: str = "SYUTAINβ") -> bool:
                         "username": f"{username} → Brain-α",
                         "content": content,
                     })
-                except Exception:
-                    pass  # Brain通知失敗はメイン通知に影響させない
+                except Exception as e:
+                    logger.warning(f"Brain-α通知失敗（メイン送信は成功）: {e}")
 
             return ok
     except Exception as e:
@@ -103,8 +103,11 @@ async def notify_task_failed(task_name: str, error: str = ""):
     await notify_discord(f"\u274c タスク失敗: {task_name} — エラー: {error[:200]}")
 
 
-async def notify_emergency_kill(reason: str):
-    await notify_discord(f"\U0001f6a8 緊急停止: {reason}")
+async def notify_emergency_kill(reason: str, goal_id: str = "", step_count: int = 0, cost_jpy: float = 0.0):
+    detail = f"\U0001f6a8 緊急停止: {reason}"
+    if goal_id:
+        detail += f"\n  goal={goal_id} steps={step_count} cost=¥{cost_jpy:.1f}"
+    await notify_discord(detail)
 
 
 async def notify_goal_accepted(goal_text: str):

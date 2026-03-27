@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Optional
 
-import asyncpg
+from tools.db_pool import get_connection
 from dotenv import load_dotenv
 
 from tools.llm_router import choose_best_model_v6, call_llm
@@ -19,7 +19,6 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.verifier")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 
 class VerificationResult:
@@ -65,16 +64,7 @@ class Verifier:
     """検証エンジン — 実行結果の品質検証"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
-
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
+        pass
 
     async def verify(
         self,
@@ -422,10 +412,7 @@ F. 独自価値: 他では得られない視点・情報があるか
 
     async def _check_quality_decline(self):
         """24h平均が7日平均を0.10以上下回っていたらエスカレーション"""
-        pool = await self._get_pool()
-        if not pool:
-            return
-        async with pool.acquire() as conn:
+        async with get_connection() as conn:
             r = await conn.fetchrow(
                 """SELECT
                      AVG(quality_score) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as avg_24h,
@@ -435,7 +422,7 @@ F. 独自価値: 他では得られない視点・情報があるか
             )
             if r and r["avg_24h"] is not None and r["avg_7d"] is not None:
                 delta = float(r["avg_24h"]) - float(r["avg_7d"])
-                if delta < -0.10:
+                if delta < -0.05:
                     # 重複防止: 直近1日以内に同じエスカレーションがなければ
                     existing = await conn.fetchval(
                         """SELECT COUNT(*) FROM claude_code_queue
@@ -455,41 +442,34 @@ F. 独自価値: 他では得られない視点・情報があるか
                            reasoning: str = "", confidence: float = None, context: dict = None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """INSERT INTO agent_reasoning_trace
-                           (agent_name, goal_id, task_id, action, reasoning, confidence, context)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        "verifier", goal_id, task_id, action, reasoning,
-                        confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
-                    )
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO agent_reasoning_trace
+                       (agent_name, goal_id, task_id, action, reasoning, confidence, context)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "verifier", goal_id, task_id, action, reasoning,
+                    confidence, json.dumps(context or {}, ensure_ascii=False, default=str),
+                )
         except Exception as e:
             logger.debug(f"トレース記録失敗（無視）: {e}")
 
     async def _log_quality(self, task_id: str, execution_result: dict, verification: VerificationResult):
-        """品質ログをDBに記録"""
+        """品質ログをDBに記録（learning_managerに一元化、二重書き込み防止）"""
+        # learning_managerにフィードバック（モデル品質学習ループ）
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO model_quality_log
-                            (task_type, model_used, tier, quality_score, total_cost_jpy)
-                        VALUES ($1, $2, $3, $4, $5)
-                        """,
-                        execution_result.get("task_type", "unknown"),
-                        execution_result.get("output", {}).get("model_used", "unknown"),
-                        (execution_result.get("model_selection") or
-                         execution_result.get("output", {}).get("model_selection") or
-                         {}).get("tier", "unknown"),
-                        verification.quality_score,
-                        execution_result.get("cost_jpy", 0.0),
-                    )
+            from agents.learning_manager import get_learning_manager
+            lm = get_learning_manager()
+            await lm.track_model_quality(
+                task_type=execution_result.get("task_type", "unknown"),
+                model_used=execution_result.get("output", {}).get("model_used", "unknown"),
+                tier=(execution_result.get("model_selection") or
+                      execution_result.get("output", {}).get("model_selection") or
+                      {}).get("tier", "unknown"),
+                quality_score=verification.quality_score,
+                total_cost_jpy=execution_result.get("cost_jpy", 0.0),
+            )
         except Exception as e:
-            logger.warning(f"品質ログDB記録失敗: {e}")
+            logger.debug(f"learning_managerフィードバック失敗（無視）: {e}")
 
     async def verify_goal_completion(self, goal_packet: dict, all_results: list[dict]) -> VerificationResult:
         """ゴール全体の達成度を検証"""
@@ -512,11 +492,7 @@ F. 独自価値: 他では得られない視点・情報があるか
         )
 
     async def close(self):
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        pass
 
 
 # ===== AI文体パターン検出（LLM不要、コストゼロ） =====
@@ -637,16 +613,76 @@ def check_ai_patterns(text: str) -> dict:
         if fl in text:
             patterns_found.append(f"L.追従的: 「{fl}」")
 
+    # M. 中国語混入検出（簡体字の直接検出 + 仮名なしCJK検出）
+    # 簡体字で日本語にない文字を直接検出
+    simplified_chinese_chars = re.findall(r'[压热设买卖开关认识说话请问题变这那对个头发视频点击搜索输入确认选择删除编辑保存返回页面]', text)
+    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+    japanese_pattern = re.compile(r'[\u3040-\u309f\u30a0-\u30ff]')  # hiragana + katakana
+    penalty_extra_chinese = 0.0
+    if simplified_chinese_chars:
+        patterns_found.append(f"M.簡体字混入: 「{''.join(simplified_chinese_chars[:5])}」")
+        penalty_extra_chinese = 0.40
+    elif chinese_pattern.search(text) and not japanese_pattern.search(text[:100]):
+        patterns_found.append("M.中国語混入: 仮名なしCJK検出")
+        penalty_extra_chinese = 0.30
+
+    # N. 島原大知の読み間違い検出
+    wrong_readings = ["うらわら", "おおとも", "しまばらだいち", "しまはらたいち",
+                      "とうげんだいち", "しまはらおおち"]
+    penalty_extra_name = 0.0
+    for wr in wrong_readings:
+        if wr in text:
+            patterns_found.append(f"N.名前誤読: 「{wr}」(正: しまはらだいち)")
+            penalty_extra_name = 0.50
+            break
+
+    # N2. 企業名・固有名詞の読み間違い（ハルシネーション検出）
+    penalty_extra_hallucination = 0.0
+    hallucination_patterns = [
+        (r'Nvidia[（(][^）)]*[英ア][^）)]*[）)]', "Nvidia読み間違い"),
+        (r'Google[（(][^）)]*[^グーグル][^）)]*[）)]', "Google読み間違い"),
+        (r'Apple[（(][^）)]*[^アップル][^）)]*[）)]', "Apple読み間違い"),
+        (r'島原大知[（(][^しま][^）)]*[）)]', "島原大知読み間違い"),
+    ]
+    for hp, label in hallucination_patterns:
+        if re.search(hp, text):
+            patterns_found.append(f"N2.ハルシネーション: {label}")
+            penalty_extra_hallucination = 0.40
+            break
+
+    # O. AI自己開示検出
+    ai_disclosure_phrases = [
+        "AIです", "仮の私（AI）", "私はAIが", "AIである私",
+        "AIとして", "私はAI", "AIの私",
+    ]
+    penalty_extra_ai_disclosure = 0.0
+    for adp in ai_disclosure_phrases:
+        if adp in text:
+            patterns_found.append(f"O.AI自己開示: 「{adp}」")
+            penalty_extra_ai_disclosure = 0.40
+            break
+
+    # P. 太字+コロンパターン過多（anti_ai_writing rule G強化）
+    penalty_extra_bold_colon = 0.0
+    if len(bold_colon) >= 3:
+        patterns_found.append(f"P.太字コロン過多: {len(bold_colon)}箇所(3+)")
+        penalty_extra_bold_colon = 0.15
+
     # ペナルティ計算
     count = len(patterns_found)
     if count == 0:
         penalty = -0.05  # ボーナス（負のペナルティ＝加点）
     elif count <= 2:
         penalty = 0.0
-    elif count <= 5:
+    elif count <= 4:
         penalty = 0.10
-    else:
+    elif count <= 6:
         penalty = 0.20
+    else:
+        penalty = 0.30  # 7個以上のAIパターン → 強いペナルティ
+
+    # 追加ペナルティ（重大品質問題）を加算
+    penalty += penalty_extra_chinese + penalty_extra_name + penalty_extra_ai_disclosure + penalty_extra_bold_colon + penalty_extra_hallucination
 
     return {
         "count": count,

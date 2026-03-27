@@ -70,6 +70,25 @@ async def escalate_to_brain_alpha(channel, context_summary: str, original_messag
             pass
 
 
+async def send_instruction_to_brain_alpha(instruction: str, context: dict = None):
+    """Brain-βからBrain-α(Claude Code)にDiscord経由で直接指示を送る。
+
+    自動修復やエスカレーション時に使用。Brain-αのDiscordチャネルに
+    構造化された指示を投稿する。
+    """
+    try:
+        from tools.discord_notify import notify_brain_only
+        msg = f"🤖 **Brain-β → Brain-α 指示**\n"
+        msg += f"内容: {instruction[:500]}\n"
+        if context:
+            import json
+            msg += f"コンテキスト: ```json\n{json.dumps(context, ensure_ascii=False, default=str)[:300]}\n```"
+        await notify_brain_only(msg, username="Brain-β → Brain-α")
+        logger.info(f"Brain-α指示送信: {instruction[:80]}")
+    except Exception as e:
+        logger.error(f"Brain-α指示送信失敗: {e}")
+
+
 async def handle_file_attachment(message) -> str | None:
     """ファイル添付の処理。
 

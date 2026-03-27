@@ -20,7 +20,6 @@ from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncGenerator
 
-import asyncpg
 import jwt
 from fastapi import FastAPI, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +38,24 @@ from tools.discord_notify import notify_discord, notify_goal_accepted
 load_dotenv()
 
 logger = logging.getLogger("syutain.app")
+
+
+def _fire_and_forget(coro) -> asyncio.Task:
+    """asyncio.create_taskのラッパー。例外が握り潰されるのを防ぐ"""
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(_log_task_exception)
+    return task
+
+
+def _log_task_exception(task: asyncio.Task):
+    """fire-and-forgetタスクの例外をログ出力"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error(f"バックグラウンドタスク例外: {exc}", exc_info=exc)
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -176,7 +193,7 @@ async def _heartbeat_listener(msg):
             if was_offline and node == "charlie":
                 _charlie_offline_reason = None
                 logger.info("CHARLIE オンライン復帰検知")
-                asyncio.create_task(_notify_node_online("charlie"))
+                _fire_and_forget(_notify_node_online("charlie"))
             elif was_offline and node in ("bravo", "delta"):
                 logger.info(f"{node.upper()} オンライン復帰検知")
     except Exception:
@@ -229,24 +246,14 @@ async def _notify_node_offline(node: str, reason: str):
 
 # ===== PostgreSQL接続プール =====
 
-_pg_pool: Optional[asyncpg.Pool] = None
-
-
-async def get_pg_pool() -> asyncpg.Pool:
-    """PostgreSQL接続プールを取得"""
-    global _pg_pool
-    if _pg_pool is None:
-        database_url = os.getenv(
-            "DATABASE_URL", "postgresql://localhost:5432/syutain_beta"
-        )
-        try:
-            _pg_pool = await asyncpg.create_pool(
-                database_url, min_size=2, max_size=10
-            )
-        except Exception as e:
-            logger.error(f"PostgreSQL接続プール作成エラー: {e}")
-            raise HTTPException(status_code=503, detail="データベース接続エラー")
-    return _pg_pool
+async def get_pg_pool():
+    """PostgreSQL接続プールを取得（共有db_poolに委譲）"""
+    from tools.db_pool import get_pool
+    try:
+        return await get_pool()
+    except Exception as e:
+        logger.error(f"PostgreSQL接続プール取得エラー: {e}")
+        raise HTTPException(status_code=503, detail="データベース接続エラー")
 
 
 async def _save_chat_message(session_id: str, role: str, content: str, metadata: dict = None):
@@ -345,7 +352,7 @@ async def lifespan(app: FastAPI):
                         return
                     # os_kernelの5段階ループを非同期タスクで起動
                     kernel = get_os_kernel()
-                    asyncio.create_task(kernel.execute_goal(raw_goal))
+                    _fire_and_forget(kernel.execute_goal(raw_goal))
                     logger.info(f"5段階自律ループ起動: goal_id={goal_id}")
                 except Exception as e:
                     logger.error(f"task.createハンドラエラー: {e}")
@@ -396,11 +403,19 @@ async def lifespan(app: FastAPI):
                             _charlie_offline_reason = _charlie_offline_reason or "unreachable"
                             reason = _charlie_offline_reason
                         logger.warning(f"{node.upper()} ハートビートタイムアウト（60秒）")
-                        asyncio.create_task(_notify_node_offline(node, reason))
+                        _fire_and_forget(_notify_node_offline(node, reason))
             except Exception:
                 pass
             await asyncio.sleep(10)
-    asyncio.create_task(_update_alpha_metrics())
+    _fire_and_forget(_update_alpha_metrics())
+
+    # Brain-α起動レビュー（セッション引継ぎ・状態確認）
+    try:
+        from brain_alpha.startup_review import run_startup_review
+        review_result = await run_startup_review()
+        logger.info(f"Brain-α起動レビュー完了: {review_result.get('summary', '')[:120]}")
+    except Exception as e:
+        logger.warning(f"Brain-α起動レビュー失敗（サービスは継続）: {e}")
 
     logger.info("SYUTAINβ FastAPI 起動完了")
 
@@ -432,12 +447,6 @@ async def lifespan(app: FastAPI):
         await nats_client.close()
     except Exception:
         pass
-
-    # PostgreSQLプール終了
-    global _pg_pool
-    if _pg_pool:
-        await _pg_pool.close()
-        _pg_pool = None
 
     # グローバルDB接続プール終了
     try:
@@ -1205,7 +1214,7 @@ async def respond_pending_approval(approval_id: int, body: ApprovalResponse, use
                     if new_id:
                         from tools.embedding_tools import embed_and_store_persona
                         import asyncio
-                        asyncio.create_task(embed_and_store_persona(new_id, persona_text))
+                        _fire_and_forget(embed_and_store_persona(new_id, persona_text))
         except Exception as e:
             logger.warning(f"persona_memory記録エラー: {e}")
 
@@ -1308,7 +1317,7 @@ async def approve_proposal(
                             logger.error(f"提案ゴール実行エラー: {e}")
 
                     import asyncio
-                    asyncio.create_task(_run_goal())
+                    _fire_and_forget(_run_goal())
                     goal_id = "auto-created"
                     logger.info(f"提案承認→ゴール自動作成: {title[:50]}")
             except Exception as e:
@@ -1447,7 +1456,7 @@ async def charlie_shutdown(user: dict = Depends(get_current_user)):
         )
         # バックグラウンドで実行（shutdownは時間がかかる）
         _charlie_offline_reason = "win11"
-        asyncio.create_task(_wait_charlie_shutdown(proc))
+        _fire_and_forget(_wait_charlie_shutdown(proc))
         return {"status": "shutdown_initiated", "message": "CHARLIEの安全シャットダウンを開始しました"}
     except Exception as e:
         logger.error(f"CHARLIEシャットダウンエラー: {e}")
@@ -2087,6 +2096,7 @@ async def get_feature_flags():
     """Feature Flagsを取得（認証不要）"""
     try:
         import yaml
+        from pathlib import Path
         ff_path = Path("feature_flags.yaml")
         if ff_path.exists():
             with open(ff_path, "r") as f:

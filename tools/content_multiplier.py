@@ -248,9 +248,14 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
     if submit_to_approval:
         try:
             from tools.db_pool import get_connection
+            from brain_alpha.sns_batch import _score_multi_axis, _check_ai_cliche
             async with get_connection() as conn:
-                # Bluesky投稿を承認キューに投入
+                # Bluesky投稿を品質チェック後に承認キューに投入
                 for post in bluesky_posts:
+                    quality = _score_multi_axis(post[:300])
+                    if quality < 0.60 or _check_ai_cliche(post[:300]):
+                        logger.info(f"content_multiplier: Bluesky投稿却下 quality={quality:.2f}")
+                        continue
                     await conn.execute(
                         """INSERT INTO approval_queue (request_type, request_data, status)
                         VALUES ('bluesky_post', $1, 'pending')""",
@@ -258,11 +263,50 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                             "content": post[:300],
                             "platform": "bluesky",
                             "auto_generated": True,
+                            "quality_score": quality,
                             "source": f"multiplied:{source_title}",
                         }, ensure_ascii=False),
                     )
-                # Threads投稿を承認キューに投入
+                # X投稿（島原アカウント）を品質チェック後に承認キューに投入
+                for post in x_shimahara:
+                    quality = _score_multi_axis(post[:140])
+                    if quality < 0.60 or _check_ai_cliche(post[:140]):
+                        logger.info(f"content_multiplier: X島原投稿却下 quality={quality:.2f}")
+                        continue
+                    await conn.execute(
+                        """INSERT INTO approval_queue (request_type, request_data, status)
+                        VALUES ('x_post', $1, 'pending')""",
+                        json.dumps({
+                            "content": post[:140],
+                            "platform": "x_shimahara",
+                            "auto_generated": True,
+                            "quality_score": quality,
+                            "source": f"multiplied:{source_title}",
+                        }, ensure_ascii=False),
+                    )
+                # X投稿（SYUTAINβアカウント）を品質チェック後に承認キューに投入
+                for post in x_syutain:
+                    quality = _score_multi_axis(post[:140])
+                    if quality < 0.60 or _check_ai_cliche(post[:140]):
+                        logger.info(f"content_multiplier: Xβ投稿却下 quality={quality:.2f}")
+                        continue
+                    await conn.execute(
+                        """INSERT INTO approval_queue (request_type, request_data, status)
+                        VALUES ('x_post', $1, 'pending')""",
+                        json.dumps({
+                            "content": post[:140],
+                            "platform": "x_syutain",
+                            "auto_generated": True,
+                            "quality_score": quality,
+                            "source": f"multiplied:{source_title}",
+                        }, ensure_ascii=False),
+                    )
+                # Threads投稿を品質チェック後に承認キューに投入
                 for post in threads_posts:
+                    quality = _score_multi_axis(post[:500])
+                    if quality < 0.60 or _check_ai_cliche(post[:500]):
+                        logger.info(f"content_multiplier: Threads投稿却下 quality={quality:.2f}")
+                        continue
                     await conn.execute(
                         """INSERT INTO approval_queue (request_type, request_data, status)
                         VALUES ('threads_post', $1, 'pending')""",
@@ -270,6 +314,7 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                             "content": post[:500],
                             "platform": "threads",
                             "auto_generated": True,
+                            "quality_score": quality,
                             "source": f"multiplied:{source_title}",
                         }, ensure_ascii=False),
                     )

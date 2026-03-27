@@ -21,6 +21,13 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.social_tools")
 
+
+def _safe_fire(coro):
+    """fire-and-forget with exception logging"""
+    t = asyncio.ensure_future(coro)
+    t.add_done_callback(lambda _t: logger.error(f"バックグラウンド例外: {_t.exception()}") if not _t.cancelled() and _t.exception() else None)
+    return t
+
 # X (Twitter) API v2 — SYUTAINβ専用アカウント (@syutain_beta)
 X_CONSUMER_KEY = os.getenv("X_CONSUMER_KEY", "")
 X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET", "")
@@ -56,19 +63,17 @@ def _count_x_chars(text: str) -> int:
 async def _require_approval(action: str, data: dict) -> dict:
     """ApprovalManager承認を要求（CLAUDE.mdルール11: SNS投稿は承認必須）"""
     try:
-        from tools.nats_client import get_nats_client
-        nats = await get_nats_client()
-        response = await nats.request(
-            "approval.request",
-            {
-                "request_type": "social_post",
-                "action": action,
-                "data": data,
-                "requested_at": datetime.now().isoformat(),
-            },
-            timeout=300.0,  # 5分待機
+        from agents.approval_manager import get_approval_manager
+        manager = await get_approval_manager()
+        result = await manager.request_approval(
+            request_type="social_post",
+            request_data={"action": action, **data},
         )
-        return response or {"approved": False, "reason": "タイムアウト"}
+        # Tier 2自動承認の場合はapproved=True
+        if result.get("status") == "approved":
+            return {"approved": True, "approval_id": result.get("approval_id")}
+        # Tier 1保留の場合 — 非同期なのでここではpendingを返す
+        return {"approved": False, "reason": "承認待ち", "approval_id": result.get("approval_id")}
     except Exception as e:
         logger.error(f"承認リクエスト失敗: {e}")
         return {"approved": False, "reason": str(e)}
@@ -314,7 +319,7 @@ async def post_to_bluesky(content: str, skip_approval: bool = False) -> dict:
             logger.info(f"Bluesky投稿成功: {data.get('uri', '')}")
             try:
                 from tools.event_logger import log_event
-                asyncio.ensure_future(log_event(
+                _safe_fire(log_event(
                     "sns.posted", "sns",
                     {"platform": "bluesky", "uri": data.get("uri", ""),
                      "content_preview": content[:80]},
@@ -326,7 +331,7 @@ async def post_to_bluesky(content: str, skip_approval: bool = False) -> dict:
         logger.error(f"Bluesky投稿失敗: {e}")
         try:
             from tools.event_logger import log_event
-            asyncio.ensure_future(log_event(
+            _safe_fire(log_event(
                 "sns.post_failed", "sns",
                 {"platform": "bluesky", "error": str(e)[:200]},
                 severity="error",
@@ -373,7 +378,7 @@ async def execute_approved_bluesky(content: str) -> dict:
             logger.info(f"Bluesky承認済み投稿成功: {data.get('uri', '')}")
             try:
                 from tools.event_logger import log_event
-                asyncio.ensure_future(log_event(
+                _safe_fire(log_event(
                     "sns.posted", "sns",
                     {"platform": "bluesky", "uri": data.get("uri", ""),
                      "content_preview": content[:80], "approved": True},
@@ -385,7 +390,7 @@ async def execute_approved_bluesky(content: str) -> dict:
         logger.error(f"Bluesky承認済み投稿失敗: {e}")
         try:
             from tools.event_logger import log_event
-            asyncio.ensure_future(log_event(
+            _safe_fire(log_event(
                 "sns.post_failed", "sns",
                 {"platform": "bluesky", "error": str(e)[:200]},
                 severity="error",

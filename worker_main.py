@@ -46,7 +46,7 @@ logger = logging.getLogger("syutain.worker")
 NODE_ROLES = {
     "bravo": {
         "description": "Browser操作 / Computer Use / 高品質推論ワーカー / コンテンツ生成",
-        "agents": ["browser_agent", "computer_use_agent", "content_worker"],
+        "agents": ["browser_agent", "computer_use_agent"],
         "subscriptions": [
             "task.assign.bravo",
             # browser.action.bravo と computer.action.bravo は
@@ -56,7 +56,7 @@ NODE_ROLES = {
     },
     "charlie": {
         "description": "推論ワーカー / コンテンツ生成 / Browser操作（段階的有効化）",
-        "agents": ["content_worker"],
+        "agents": [],
         "subscriptions": [
             "task.assign.charlie",
         ],

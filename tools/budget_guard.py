@@ -13,7 +13,6 @@ import logging
 from datetime import datetime, date
 from typing import Optional
 
-import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,14 +29,12 @@ ALERT_THRESHOLD_WARN = float(os.getenv("BUDGET_ALERT_WARN", "0.8"))    # 80%で�
 ALERT_THRESHOLD_STOP = float(os.getenv("BUDGET_ALERT_STOP", "0.9"))    # 90%で停止（Emergency Kill条件）
 SINGLE_CALL_LIMIT_JPY = float(os.getenv("SINGLE_CALL_LIMIT_JPY", "500"))  # 1回の呼び出し上限
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/syutain_beta")
 
 
 class BudgetGuard:
     """日次/月次API支出の追跡・アラート"""
 
     def __init__(self):
-        self._pool: Optional[asyncpg.Pool] = None
         # インメモリ集計（DB接続不可時のフォールバック）
         self._daily_spend_jpy: float = 0.0
         self._monthly_spend_jpy: float = 0.0
@@ -47,26 +44,14 @@ class BudgetGuard:
         self._current_month: int = date.today().month
         self._initialized_from_db: bool = False
 
-    async def _get_pool(self) -> Optional[asyncpg.Pool]:
-        """PostgreSQL接続プールを取得"""
-        if self._pool is None:
-            try:
-                self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-            except Exception as e:
-                logger.error(f"PostgreSQL接続プール作成失敗: {e}")
-                return None
-        return self._pool
-
     async def _load_from_db(self):
         """起動時にDB（llm_cost_log）から当日/当月の支出を復元"""
         if self._initialized_from_db:
             return
         self._initialized_from_db = True
         try:
-            pool = await self._get_pool()
-            if not pool:
-                return
-            async with pool.acquire() as conn:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
                 # 当日の支出合計
                 row = await conn.fetchrow(
                     "SELECT COALESCE(SUM(amount_jpy), 0) AS total FROM llm_cost_log WHERE recorded_at::date = CURRENT_DATE"
@@ -168,16 +153,15 @@ class BudgetGuard:
 
         # DB記録（失敗しても処理は続行）
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
-                        VALUES ($1, $2, $3, $4, $5, NOW())
-                        """,
-                        model, tier, amount_jpy, goal_id, is_info_collection,
-                    )
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    """,
+                    model, tier, amount_jpy, goal_id, is_info_collection,
+                )
         except Exception as e:
             # テーブルが存在しない場合もあるため警告のみ
             logger.warning(f"予算記録DB保存失敗（インメモリで継続）: {e}")
@@ -198,32 +182,31 @@ class BudgetGuard:
         # コスト異常エスカレーション: 24hコスト > 7日平均 * 2
         try:
             if alert_level in ("warn", "stop"):
-                pool = await self._get_pool()
-                if pool:
-                    async with pool.acquire() as conn:
-                        r = await conn.fetchrow(
-                            """SELECT
-                                 COALESCE(SUM(amount_jpy) FILTER (WHERE recorded_at > NOW() - INTERVAL '24 hours'), 0) as cost_24h,
-                                 COALESCE(AVG(daily_total), 0) as avg_7d
-                               FROM (
-                                 SELECT DATE(recorded_at) as d, SUM(amount_jpy) as daily_total
-                                 FROM llm_cost_log
-                                 WHERE recorded_at > NOW() - INTERVAL '7 days'
-                                 GROUP BY DATE(recorded_at)
-                               ) sub"""
+                from tools.db_pool import get_connection
+                async with get_connection() as conn:
+                    r = await conn.fetchrow(
+                        """SELECT
+                             COALESCE(SUM(amount_jpy) FILTER (WHERE recorded_at > NOW() - INTERVAL '24 hours'), 0) as cost_24h,
+                             COALESCE(AVG(daily_total), 0) as avg_7d
+                           FROM (
+                             SELECT DATE(recorded_at) as d, SUM(amount_jpy) as daily_total
+                             FROM llm_cost_log
+                             WHERE recorded_at > NOW() - INTERVAL '7 days'
+                             GROUP BY DATE(recorded_at)
+                           ) sub"""
+                    )
+                    if r and float(r["avg_7d"]) > 0 and float(r["cost_24h"]) > float(r["avg_7d"]) * 2:
+                        existing = await conn.fetchval(
+                            "SELECT COUNT(*) FROM claude_code_queue WHERE category = 'cost_spike' AND created_at > NOW() - INTERVAL '24 hours'"
                         )
-                        if r and float(r["avg_7d"]) > 0 and float(r["cost_24h"]) > float(r["avg_7d"]) * 2:
-                            existing = await conn.fetchval(
-                                "SELECT COUNT(*) FROM claude_code_queue WHERE category = 'cost_spike' AND created_at > NOW() - INTERVAL '24 hours'"
+                        if existing == 0:
+                            from brain_alpha.escalation import escalate_to_queue
+                            await escalate_to_queue(
+                                category="cost_spike",
+                                description=f"APIコスト異常: 24h=¥{float(r['cost_24h']):.0f}, 7日平均=¥{float(r['avg_7d']):.0f} (2倍超過)",
+                                priority="high",
+                                source_agent="budget_guard",
                             )
-                            if existing == 0:
-                                from brain_alpha.escalation import escalate_to_queue
-                                await escalate_to_queue(
-                                    category="cost_spike",
-                                    description=f"APIコスト異常: 24h=¥{float(r['cost_24h']):.0f}, 7日平均=¥{float(r['avg_7d']):.0f} (2倍超過)",
-                                    priority="high",
-                                    source_agent="budget_guard",
-                                )
         except Exception:
             pass
 
@@ -242,16 +225,15 @@ class BudgetGuard:
         self._monthly_spend_jpy += amount_jpy
         # DBにもchat固有マーカー付きで記録
         try:
-            pool = await self._get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
-                        VALUES ($1, 'chat', $2, 'chat', FALSE, NOW())
-                        """,
-                        model, amount_jpy,
-                    )
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO llm_cost_log (model, tier, amount_jpy, goal_id, is_info, recorded_at)
+                    VALUES ($1, 'chat', $2, 'chat', FALSE, NOW())
+                    """,
+                    model, amount_jpy,
+                )
         except Exception as e:
             logger.warning(f"チャット予算DB記録失敗: {e}")
 
@@ -261,6 +243,7 @@ class BudgetGuard:
         推定コストを加算した場合に閾値を超えるかを事前判定する。
         """
         try:
+            await self._load_from_db()
             await self._reset_if_new_day()
 
             projected_daily = self._daily_spend_jpy + estimated_cost_jpy
@@ -334,12 +317,8 @@ class BudgetGuard:
         return self._daily_spend_jpy >= (DAILY_BUDGET_JPY * ALERT_THRESHOLD_STOP)
 
     async def close(self):
-        """接続プールを閉じる"""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.error(f"接続プール終了エラー: {e}")
+        """リソース解放（互換性のため保持）"""
+        pass
 
 
 # シングルトン

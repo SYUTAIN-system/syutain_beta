@@ -1,5 +1,5 @@
 # SYUTAINβ SYSTEM_STATE.md
-> 自動生成: 2026-03-26 23:49:47 JST
+> 自動生成: 2026-03-28 01:04:35 JST
 > このファイルはClaude Codeセッション開始時に最初に読むべきファイル
 
 ## システム概要
@@ -26,20 +26,20 @@
 ## DB統計
 | テーブル | 件数 |
 |----------|------|
-| goal_packets | 67 |
-| tasks | 631 |
-| proposal_history | 39 |
-| intel_items | 617 |
+| goal_packets | 72 |
+| tasks | 690 |
+| proposal_history | 44 |
+| intel_items | 677 |
 | chat_messages | 224 |
-| llm_cost_log | 5940 |
-| approval_queue | 207 |
-| event_log | 15219 |
+| llm_cost_log | 6359 |
+| approval_queue | 231 |
+| event_log | 17136 |
 | revenue_linkage | 0 |
 | browser_action_log | 7282 |
 
 ## LLM使用率
-- api: 778件 (13.1%)
-- local: 5162件 (86.9%)
+- api: 900件 (14.2%)
+- local: 5459件 (85.8%)
 
 ## API接続状態
 - DEEPSEEK_API_KEY: SET
@@ -101,23 +101,21 @@
 | intel_digest生成 | 毎日07:00 |
 | 深掘り記事取得バッチ | 毎日12:00 |
 | 対話学習 | 1時間 |
+| note記事品質チェック | 30分 |
+| 日次サマリーDiscord通知 | 20:30 |
 
 ## 収益パイプライン (Stage 1-11)
-- Stage1 情報収集: 30件(24h)
-- Stage3 提案: 30件(7d)
+- Stage1 情報収集: 60件(24h)
+- Stage3 提案: 32件(7d)
 - Stage5 ゴール: 0件active
-- Stage6 タスク: 417件成功
-- Stage8 品質平均: 0.69
-- Stage9 成果物: 39件
-- Stage10 SNS: 203件
+- Stage6 タスク: 484件成功
+- Stage8 品質平均: 0.70
+- Stage9 成果物: 42件
+- Stage10 SNS: 265件
 - Stage11 収益: ¥0
 
 ## 直近エラー (24h)
-- llm.error [bravo] ConnectTimeout(no message)
 - llm.error [bravo] ReadTimeout(no message)
-- sns.post_failed [alpha] The requested resource does not exist
-- llm.error [bravo] ReadTimeout(no message)
-- node.health [bravo]
 
 ## 自動検出された課題
 - 問題なければここは空
@@ -128,4 +126,4 @@
 - SESSION_HANDOFF_2026-03-20_FINAL.md: *2026-03-20 全日セッション統合。CRITICAL3件修正+SNS 4チャネル自動投稿+品質改善+アンチAI文体+デジタルツイン124件+content_multiplier 17件展開。35ジョブ・4ノード全て稼働中。*
 
 ---
-*自動生成完了: 2026-03-26 23:49:47 JST (     129行)*
+*自動生成完了: 2026-03-28 01:04:35 JST (     127行)*

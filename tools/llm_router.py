@@ -86,17 +86,28 @@ async def refresh_model_quality_cache():
                 ORDER BY task_type, avg_quality DESC
             """)
             cache = {}
+            avoid = {}  # 品質が低いモデルを回避リストに
             for r in rows:
                 tt = r["task_type"]
-                if tt not in cache:  # 各task_typeで最高品質のモデルを記録
+                avg_q = float(r["avg_quality"])
+                # 品質0.4未満 & サンプル5件以上 → 回避リスト
+                if avg_q < 0.4 and int(r["cnt"]) >= 5:
+                    if tt not in avoid:
+                        avoid[tt] = []
+                    avoid[tt].append(r["model_used"])
+                # 各task_typeで最高品質のモデルを記録
+                if tt not in cache:
                     cache[tt] = {
                         "model": r["model_used"], "tier": r["tier"],
-                        "avg_quality": float(r["avg_quality"]),
+                        "avg_quality": avg_q,
                         "sample_count": int(r["cnt"]),
                         "updated": time.time(),
+                        "avoid_models": avoid.get(tt, []),
                     }
+                elif tt in avoid:
+                    cache[tt]["avoid_models"] = avoid[tt]
             _model_quality_cache = cache
-            logger.info(f"モデル品質キャッシュ更新: {len(cache)}タスクタイプ")
+            logger.info(f"モデル品質キャッシュ更新: {len(cache)}タスクタイプ, {sum(len(v) for v in avoid.values())}モデル回避")
     except Exception as e:
         logger.warning(f"モデル品質キャッシュ更新失敗: {e}")
 
@@ -279,18 +290,22 @@ def choose_best_model_v6(
         return {"provider": "local", "model": model, "tier": "L", "node": node,
                 "note": f"quality=low→ローカル強制({node})"}
 
+    # === avoid_models: 品質実績で回避すべきモデル ===
+    avoid_list = _model_quality_cache.get(task_type, {}).get("avoid_models", [])
+
     # === Nemotron-JP 優先ルート（日本語コンテンツ/チャット） ===
 
     if NEMOTRON_JP_ENABLED and local_available:
-        nemotron_node = _pick_nemotron_node()
-        if nemotron_node:
-            if task_type in _NEMOTRON_PRIORITY_TASKS:
-                return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
-                        "node": nemotron_node, "note": f"Nemotron JP優先({task_type})→{nemotron_node}"}
-            if task_type in _NEMOTRON_THINK_TASKS and quality in ("medium", "high"):
-                return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
-                        "node": nemotron_node, "think": True,
-                        "note": f"Nemotron JP /think({task_type})→{nemotron_node}"}
+        if NEMOTRON_JP_MODEL not in avoid_list:
+            nemotron_node = _pick_nemotron_node()
+            if nemotron_node:
+                if task_type in _NEMOTRON_PRIORITY_TASKS:
+                    return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
+                            "node": nemotron_node, "note": f"Nemotron JP優先({task_type})→{nemotron_node}"}
+                if task_type in _NEMOTRON_THINK_TASKS and quality in ("medium", "high"):
+                    return {"provider": "local", "model": NEMOTRON_JP_MODEL, "tier": "L",
+                            "node": nemotron_node, "think": True,
+                            "note": f"Nemotron JP /think({task_type})→{nemotron_node}"}
 
     # === 学習ループキャッシュ ===
 
@@ -301,11 +316,14 @@ def choose_best_model_v6(
             cached_tier = cached.get("tier", "unknown")
             # ローカルモデルの場合のみ学習ループで推奨
             if cached_tier in ("L", "unknown") and cached_model in ("qwen3.5-9b", "qwen3.5-4b", "nemotron-jp"):
-                node = _pick_local_node()
-                if cached_model == "qwen3.5-4b":
-                    node = _pick_local_node(prefer_delta=True)
-                return {"provider": "local", "model": cached_model, "tier": "L", "node": node,
-                        "note": f"学習ループ推奨(品質{cached['avg_quality']:.2f})"}
+                if avoid_list and cached_model in avoid_list:
+                    logger.warning(f"モデル {cached_model} はavoid_modelsリストに該当 (task_type={task_type})、学習ループ推奨スキップ")
+                else:
+                    node = _pick_local_node()
+                    if cached_model == "qwen3.5-4b":
+                        node = _pick_local_node(prefer_delta=True)
+                    return {"provider": "local", "model": cached_model, "tier": "L", "node": node,
+                            "note": f"学習ループ推奨(品質{cached['avg_quality']:.2f})"}
 
     # === Tier L: ローカルで十分なタスク ===
 
@@ -313,15 +331,17 @@ def choose_best_model_v6(
     if local_available and task_type in _DELTA_TASKS:
         node = _pick_local_node(prefer_delta=True)
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
-        return {"provider": "local", "model": model, "tier": "L", "node": node,
-                "note": f"軽量タスク→{node}"}
+        if model not in avoid_list:
+            return {"provider": "local", "model": model, "tier": "L", "node": node,
+                    "note": f"軽量タスク→{node}"}
 
     # 実データでローカル品質が十分なタスク
     if local_available and task_type in _LOCAL_OK_TASKS:
         node = _pick_local_node()
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
-        return {"provider": "local", "model": model, "tier": "L", "node": node,
-                "note": f"ローカル十分({task_type})→{node}"}
+        if model not in avoid_list:
+            return {"provider": "local", "model": model, "tier": "L", "node": node,
+                    "note": f"ローカル十分({task_type})→{node}"}
 
     # === Tier A: APIの方が品質が高いタスク ===
 
@@ -358,6 +378,10 @@ def choose_best_model_v6(
     if local_available:
         node = _pick_local_node()
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
+        if avoid_list and model in avoid_list:
+            logger.warning(f"モデル {model} はavoid_modelsリストに該当 (task_type={task_type})、フォールバック")
+            return {"model": "claude-haiku-4-5", "tier": "A", "provider": "anthropic",
+                    "note": f"avoid_modelsフォールバック({task_type})"}
         return {"provider": "local", "model": model, "tier": "L", "node": node,
                 "note": f"未分類→ローカル({node})"}
 
@@ -370,6 +394,7 @@ async def call_llm(
     prompt: str,
     system_prompt: str = "",
     model_selection: Optional[dict] = None,
+    goal_id: str = "",
     **kwargs,
 ) -> dict:
     """
@@ -481,6 +506,7 @@ async def call_llm(
                 budget_guard = get_budget_guard()
                 await budget_guard.record_spend(
                     amount_jpy=0.0, model=model, tier="L",
+                    goal_id=goal_id,
                 )
                 result["cost_jpy"] = 0.0
             except Exception:
@@ -498,6 +524,7 @@ async def call_llm(
                     amount_jpy=actual_cost,
                     model=model,
                     tier=tier,
+                    goal_id=goal_id,
                 )
                 result["cost_jpy"] = actual_cost
                 result["budget_alert"] = spend_result.get("alert_level", "ok")

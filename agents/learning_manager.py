@@ -126,8 +126,7 @@ class LearningManager:
                     UPDATE proposal_history
                     SET adopted = $2,
                         outcome_type = $3,
-                        revenue_impact_jpy = $4,
-                        updated_at = NOW()
+                        revenue_impact_jpy = $4
                     WHERE proposal_id = $1
                     """,
                     proposal_id, adopted, outcome_type, revenue_impact_jpy,
@@ -447,3 +446,15 @@ class LearningManager:
         except Exception as e:
             logger.error(f"推奨事項生成失敗: {e}")
             return {"error": str(e)}
+
+
+# シングルトン
+_lm_instance: Optional[LearningManager] = None
+
+
+def get_learning_manager() -> LearningManager:
+    """LearningManagerのシングルトンを取得"""
+    global _lm_instance
+    if _lm_instance is None:
+        _lm_instance = LearningManager()
+    return _lm_instance
