@@ -315,10 +315,14 @@ async def run_and_queue() -> dict:
     # イベント記録
     try:
         from tools.event_logger import log_event
+        severity_counts = {}
+        for item in inconsistencies:
+            sev = item.get("severity", "unknown")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
         await log_event(
             "doc_gardening.completed", "harness",
             {"total": len(inconsistencies), "queued": queued,
-             "severities": {item.get("severity", "unknown"): 1 for item in inconsistencies}},
+             "severities": severity_counts},
         )
     except Exception:
         pass

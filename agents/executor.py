@@ -23,6 +23,12 @@ from tools.nats_client import get_nats_client
 from tools.budget_guard import get_budget_guard
 from tools.failure_memory import record_failure, check_similar_failures
 from tools.episodic_memory import get_episodic_memory
+from tools.harness_linter import (
+    APPROVAL_REQUIRED_ACTIONS,
+    lint_output_content,
+    lint_task_execution,
+    sanitize_output,
+)
 from tools.skill_manager import get_skill_manager
 
 load_dotenv()
@@ -154,6 +160,11 @@ class Executor:
             # dangerousツールは承認必須に強制
             task["needs_approval"] = True
             logger.warning(f"タスク {task_id}: dangerousツール使用のため承認を強制")
+        if task_type in APPROVAL_REQUIRED_ACTIONS and not task.get("needs_approval", False):
+            task["needs_approval"] = True
+            logger.warning(
+                f"タスク {task_id}: {task_type} は承認必須のため needs_approval を強制"
+            )
         # 権限レベルをevent_logに記録
         try:
             from tools.event_logger import log_event
@@ -246,6 +257,7 @@ class Executor:
                     status="pending_approval",
                     output={"message": "承認待ち", "approval_id": approval_result.get("approval_id")},
                 )
+            task["approval_id"] = approval_result.get("approval_id")
 
         # ===== browser_action URL事前チェック =====
         # URLがないbrowser_actionタスクはBRAVOにディスパッチせずローカルLLM代替
@@ -328,6 +340,12 @@ class Executor:
         result.task_type = task_type
 
         elapsed = time.time() - start_time
+        harness_lint_summary = await self._apply_harness_lint(
+            task=task,
+            task_type=task_type,
+            result=result,
+            goal_id=goal_packet.get("goal_id", ""),
+        )
 
         # 判断根拠を記録
         model_sel = task.get("model_selection") or {}
@@ -344,6 +362,11 @@ class Executor:
                 "model_reason": f"tier={model_sel.get('tier', 'auto')}, task_type={task_type}",
                 "elapsed_sec": round(elapsed, 1),
                 "cost_jpy": result.cost_jpy,
+                "harness_lint": {
+                    "violations": harness_lint_summary.get("violation_count", 0),
+                    "warnings": harness_lint_summary.get("warning_count", 0),
+                    "sanitized": harness_lint_summary.get("sanitized", False),
+                },
             },
         )
 
@@ -369,6 +392,11 @@ class Executor:
                     "status": result.status,
                     "cost_jpy": result.cost_jpy,
                     "error_class": result.error_class,
+                    "harness_lint": {
+                        "violation_count": harness_lint_summary.get("violation_count", 0),
+                        "warning_count": harness_lint_summary.get("warning_count", 0),
+                        "sanitized": harness_lint_summary.get("sanitized", False),
+                    },
                 },
                 severity="info" if result.status == "success" else "warning",
                 goal_id=goal_packet.get("goal_id", ""),
@@ -705,6 +733,126 @@ class Executor:
                 error_class="auth",
                 error_message=f"承認リクエスト失敗: {e}",
             )
+
+    async def _apply_harness_lint(
+        self,
+        task: dict,
+        task_type: str,
+        result: ExecutionResult,
+        goal_id: str = "",
+    ) -> dict:
+        """実行結果にHarness Linterを適用し、必要なら秘匿情報をマスクする。"""
+        summary = {
+            "passed": True,
+            "violation_count": 0,
+            "warning_count": 0,
+            "sanitized": False,
+        }
+        try:
+            output_text = self._extract_primary_output_text(result)
+            platform = task.get("platform")
+            input_data = task.get("input_data")
+            if isinstance(input_data, dict):
+                platform = input_data.get("platform", platform)
+
+            output_dict = result.output if isinstance(result.output, dict) else {}
+            model_used = (
+                output_dict.get("model_used")
+                or (output_dict.get("model_selection") or {}).get("model", "")
+                or (task.get("model_selection") or {}).get("model", "")
+            )
+            model_selection_method = (
+                output_dict.get("model_selection_method")
+                or (task.get("model_selection") or {}).get("selection_method")
+                or task.get("model_selection_method")
+                or ("v6" if model_used else None)
+            )
+
+            exec_lint = lint_task_execution(
+                task_type=task_type,
+                model_used=model_used or None,
+                model_selection_method=model_selection_method,
+                has_error_handling=True,
+                output_text=output_text,
+                log_text=result.error_message,
+                approval_id=task.get("approval_id"),
+                config_source=task.get("config_source", "env"),
+                strategy_referenced=bool(task.get("strategy_referenced", True)),
+            )
+            content_lint = lint_output_content(output_text, platform=platform)
+
+            violations = exec_lint.violations + content_lint.violations
+            warnings = exec_lint.warnings + content_lint.warnings
+            should_sanitize = self._has_secret_violation(violations)
+
+            if should_sanitize:
+                self._sanitize_execution_result(result)
+
+            summary = {
+                "passed": len(violations) == 0,
+                "violation_count": len(violations),
+                "warning_count": len(warnings),
+                "sanitized": should_sanitize,
+            }
+            if isinstance(result.output, dict):
+                result.output["harness_lint"] = summary
+
+            if violations or warnings:
+                from tools.event_logger import log_event
+                await log_event(
+                    "harness_lint.task_execution",
+                    "harness",
+                    {
+                        "task_type": task_type,
+                        "status": result.status,
+                        "violations": violations,
+                        "warnings": warnings,
+                        "sanitized": should_sanitize,
+                    },
+                    severity="critical" if violations else "warning",
+                    goal_id=goal_id or None,
+                    task_id=task.get("task_id"),
+                )
+        except Exception as e:
+            logger.warning(f"Harnessリント適用失敗（継続）: {e}")
+
+        return summary
+
+    def _extract_primary_output_text(self, result: ExecutionResult) -> str:
+        """結果ペイロードから代表テキストを抽出する。"""
+        if isinstance(result.output, dict):
+            for key in ("text", "message", "summary"):
+                value = result.output.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        return result.error_message or ""
+
+    def _sanitize_execution_result(self, result: ExecutionResult):
+        """ExecutionResult内の文字列を再帰的にマスクする。"""
+        result.output = self._sanitize_value(result.output)
+        result.artifacts = self._sanitize_value(result.artifacts)
+        if result.error_message:
+            result.error_message = sanitize_output(result.error_message)
+
+    def _sanitize_value(self, value):
+        """dict/list/str を再帰的に走査して秘匿情報をマスクする。"""
+        if isinstance(value, str):
+            return sanitize_output(value)
+        if isinstance(value, list):
+            return [self._sanitize_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._sanitize_value(v) for k, v in value.items()}
+        return value
+
+    @staticmethod
+    def _has_secret_violation(violations: list[dict]) -> bool:
+        """違反一覧に秘密情報露出系違反が含まれるか判定する。"""
+        for violation in violations:
+            rule = violation.get("rule")
+            message = violation.get("message", "")
+            if rule == 8 or "APIキー" in message or "シークレット" in message:
+                return True
+        return False
 
     async def _request_approval(self, task: dict) -> dict:
         """ApprovalManager経由で承認を取得（CLAUDE.md ルール11）"""

@@ -74,7 +74,7 @@ async def learn_from_failure(
                     "rule_found": True,
                     "rule_id": existing["id"],
                     "fix_action": existing["fix_action"],
-                    "fix_params": json.loads(existing["fix_params"]) if existing["fix_params"] else {},
+                    "fix_params": _decode_fix_params(existing["fix_params"]),
                     "hit_count": existing["hit_count"] + 1,
                     "effectiveness": existing["effectiveness_score"],
                 }
@@ -125,7 +125,7 @@ async def check_known_pattern(
                 return {
                     "known": True,
                     "fix_action": rule["fix_action"],
-                    "fix_params": json.loads(rule["fix_params"]) if rule["fix_params"] else {},
+                    "fix_params": _decode_fix_params(rule["fix_params"]),
                     "hit_count": rule["hit_count"],
                     "effectiveness": rule["effectiveness_score"],
                 }
@@ -191,6 +191,21 @@ def _normalize_error_pattern(error_type: str, error_detail: str, source_node: Op
     # 詳細からタイムスタンプ等の変動部分を除去
     detail_key = error_detail.split(":")[0].strip()[:80] if error_detail else ""
     return f"{node_prefix}{error_type}:{detail_key}"
+
+
+def _decode_fix_params(raw) -> dict:
+    """JSONBフィールドをdictに正規化する（asyncpgがdictを返すケースを吸収）。"""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def _infer_fix_action(
