@@ -71,6 +71,7 @@ export default function ArtifactsPage() {
   const [stats, setStats] = useState<ArtifactStats | null>(null);
   const [publishableTypes, setPublishableTypes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
@@ -111,7 +112,7 @@ export default function ArtifactsPage() {
           }
         }
       } catch {
-        // ignore
+        setError("成果物の取得に失敗しました");
       } finally {
         setLoading(false);
         setLoadingMore(false);
@@ -128,7 +129,7 @@ export default function ArtifactsPage() {
         setStats(json);
       }
     } catch {
-      // ignore
+      // stats are non-critical, fail silently
     }
   }, []);
 
@@ -182,15 +183,13 @@ export default function ArtifactsPage() {
       if (!res.ok) return;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${type}_${id.slice(0, 8)}.md`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      Object.assign(Object.assign(document.createElement("a"), {
+        href: url,
+        download: `${type}_${id.slice(0, 8)}.md`,
+      }), {}).click();
       URL.revokeObjectURL(url);
     } catch {
-      // ignore
+      setError("ダウンロードに失敗しました");
     }
   };
 
@@ -204,6 +203,14 @@ export default function ArtifactsPage() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="flex items-center justify-between rounded-lg bg-[var(--accent-red)]/10 border border-[var(--accent-red)]/30 px-4 py-3">
+          <span className="text-sm text-[var(--accent-red)]">{error}</span>
+          <button onClick={() => setError(null)} className="min-h-[44px] min-w-[44px] flex items-center justify-center text-[var(--accent-red)]" aria-label="エラーを閉じる">
+            <span className="text-lg">&times;</span>
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div>
         <h1 className="text-xl sm:text-2xl font-bold">商品化可能な成果物</h1>
@@ -344,9 +351,10 @@ export default function ArtifactsPage() {
                   </span>
                   <button
                     onClick={(e) => { e.stopPropagation(); downloadArtifact(a.id, a.type); }}
-                    className="flex items-center justify-center rounded-lg border border-[var(--border-color)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-secondary)] hover:text-white hover:border-[var(--accent-purple)] transition-colors"
+                    aria-label="ダウンロード"
+                    className="flex items-center justify-center rounded-lg border border-[var(--border-color)] min-h-[44px] min-w-[44px] text-[10px] font-medium text-[var(--text-secondary)] hover:text-white hover:border-[var(--accent-purple)] active:bg-[var(--bg-primary)] transition-colors"
                   >
-                    <Download className="h-3 w-3" />
+                    <Download className="h-4 w-4" />
                   </button>
                 </div>
               </div>
@@ -393,7 +401,8 @@ export default function ArtifactsPage() {
               </h2>
               <button
                 onClick={() => setSelectedArtifact(null)}
-                className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--bg-primary)] transition-colors"
+                aria-label="閉じる"
+                className="flex h-11 w-11 items-center justify-center rounded-lg hover:bg-[var(--bg-primary)] transition-colors"
               >
                 <X className="h-5 w-5" />
               </button>

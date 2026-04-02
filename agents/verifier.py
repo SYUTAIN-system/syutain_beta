@@ -3,11 +3,17 @@ SYUTAINβ V25 検証エンジン（Verifier）— Step 8
 設計書 第6章 6.2「④ 検証（Verify）」準拠
 
 タスク実行結果を成功条件に照らして検証し、品質スコアリングを行う。
+
+Generator+Evaluator分離設計:
+- Sprint Contract: 実行前に検証者と実行者が成功基準を合意
+- Independent Evaluation: 実行者とは異なるモデルティアで検証（自己評価バイアス回避）
+- Structured Verification Report: 基準ごとの判定結果を構造化レポートで返却
 """
 
 import os
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 from tools.db_pool import get_connection
@@ -18,6 +24,36 @@ from tools.llm_router import choose_best_model_v6, call_llm
 load_dotenv()
 
 logger = logging.getLogger("syutain.verifier")
+
+
+# ===== モデルティア独立性マッピング =====
+# 実行者が使ったティアとは異なるティアで検証する
+_INDEPENDENT_TIER_MAP = {
+    "L": "S",       # ローカル実行 → API検証（DeepSeek等の安価API）
+    "S": "L",       # API実行 → ローカル検証
+    "A": "L",       # 高品質API実行 → ローカル検証
+    "unknown": "L",  # 不明 → ローカル検証
+}
+
+
+@dataclass
+class CriterionResult:
+    """Sprint Contract内の1基準の検証結果"""
+    criterion: str
+    passed: bool
+    detail: str = ""
+
+
+@dataclass
+class VerificationReport:
+    """構造化検証レポート — Generator+Evaluator分離の透明性を確保"""
+    passed: bool
+    score: float  # 0.0-1.0
+    criteria_results: list = field(default_factory=list)  # list[CriterionResult]
+    issues_found: list = field(default_factory=list)
+    suggestions: list = field(default_factory=list)
+    model_used: str = "unknown"  # 検証に使ったモデル（透明性）
+    executor_model: str = "unknown"  # 実行に使われたモデル（比較用）
 
 
 
@@ -61,10 +97,169 @@ class VerificationResult:
 
 
 class Verifier:
-    """検証エンジン — 実行結果の品質検証"""
+    """検証エンジン — 実行結果の品質検証（Generator+Evaluator分離設計）"""
 
     def __init__(self):
         pass
+
+    # ===== Sprint Contract: 実行前に成功基準を合意 =====
+
+    async def create_sprint_contract(self, task: dict, plan_context: dict) -> dict:
+        """
+        実行前に検証者が成功基準を定義する（Generator+Evaluator分離）。
+
+        Executorが何を達成すべきか、Verifierがどう判定するかを
+        事前に合意することで、自己評価バイアスを排除する。
+
+        Args:
+            task: タスク定義（task_type, description等）
+            plan_context: ゴールパケット（success_definition等を含む）
+
+        Returns:
+            sprint_contract: 検証基準を含む契約dict
+        """
+        task_id = task.get("task_id", "unknown")
+        task_type = task.get("task_type", "unknown")
+        description = task.get("description", "")
+        success_definition = plan_context.get("success_definition", [])
+
+        logger.info(f"Sprint Contract生成開始: {task_id}")
+
+        # LLMで具体的な検証基準を生成（ローカルモデル使用でコスト¥0）
+        model_sel = choose_best_model_v6(
+            task_type="classification",
+            quality="low",
+            budget_sensitive=True,
+            local_available=True,
+        )
+
+        success_str = "\n".join(f"- {s}" for s in success_definition) if success_definition else "なし"
+
+        try:
+            llm_result = await call_llm(
+                prompt=f"""以下のタスクに対する検証基準を3-5項目で定義してください。
+各基準は具体的・計測可能であること。
+
+## タスクタイプ: {task_type}
+## タスク説明: {description[:300]}
+## ゴール成功条件:
+{success_str}
+
+JSON形式で出力:
+{{
+  "criteria": [
+    {{"id": "C1", "description": "基準の説明", "weight": 0.3}},
+    {{"id": "C2", "description": "基準の説明", "weight": 0.3}},
+    {{"id": "C3", "description": "基準の説明", "weight": 0.4}}
+  ],
+  "minimum_pass_score": 0.5,
+  "critical_criteria": ["C1"]
+}}
+
+weightの合計は1.0にすること。critical_criteriaは不合格で即失敗となる基準。""",
+                system_prompt="検証基準設計エージェント。タスクの成功を判定する具体的な基準を定義する。",
+                model_selection=model_sel,
+            )
+
+            import re
+            text = llm_result.get("text", "")
+            # 複数の方法でJSON抽出を試みる
+            contract_data = None
+            # 方法1: ```json ... ``` ブロック
+            code_block = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+            if code_block:
+                try:
+                    contract_data = json.loads(code_block.group(1))
+                except json.JSONDecodeError:
+                    pass
+            # 方法2: 最初の { から最後の } まで
+            if contract_data is None:
+                json_match = re.search(r"\{[\s\S]*\}", text)
+                if json_match:
+                    try:
+                        contract_data = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        # 方法3: 不完全JSON — 末尾の } や ] を補完して再試行
+                        raw = json_match.group().rstrip()
+                        for suffix in ["}", "]}", "]}}", '"]}']:
+                            try:
+                                contract_data = json.loads(raw + suffix)
+                                break
+                            except json.JSONDecodeError:
+                                continue
+
+            if contract_data and isinstance(contract_data, dict):
+                criteria = contract_data.get("criteria", [])
+                if isinstance(criteria, list) and criteria:
+                    contract = {
+                        "task_id": task_id,
+                        "task_type": task_type,
+                        "criteria": criteria,
+                        "minimum_pass_score": contract_data.get("minimum_pass_score", 0.5),
+                        "critical_criteria": contract_data.get("critical_criteria", []),
+                        "model_used_for_contract": model_sel.get("model", "unknown"),
+                    }
+                    logger.info(f"Sprint Contract生成完了: {task_id} ({len(criteria)}基準)")
+                    return contract
+        except Exception as e:
+            logger.debug(f"Sprint Contract LLM生成失敗: {e}")
+
+        # フォールバック: タスクタイプに基づくデフォルト基準
+        contract = self._default_sprint_contract(task_id, task_type, success_definition)
+        logger.info(f"Sprint Contract（デフォルト）生成完了: {task_id}")
+        return contract
+
+    def _default_sprint_contract(self, task_id: str, task_type: str, success_definition: list) -> dict:
+        """タスクタイプに基づくデフォルトSprint Contract"""
+        base_criteria = [
+            {"id": "C1", "description": "タスク説明に対する出力の完成度", "weight": 0.4},
+            {"id": "C2", "description": "出力の正確性・論理的一貫性", "weight": 0.3},
+            {"id": "C3", "description": "出力の実用性・行動可能性", "weight": 0.3},
+        ]
+
+        if task_type in ["content", "drafting", "note_article", "product_desc"]:
+            base_criteria = [
+                {"id": "C1", "description": "成功条件の達成度", "weight": 0.3},
+                {"id": "C2", "description": "文体の自然さ（AI臭くないか）", "weight": 0.25},
+                {"id": "C3", "description": "ICP適合性（28-39歳非エンジニアクリエイター向け）", "weight": 0.25},
+                {"id": "C4", "description": "独自の視点・価値の有無", "weight": 0.2},
+            ]
+        elif task_type in ["research", "analysis", "data_extraction"]:
+            base_criteria = [
+                {"id": "C1", "description": "情報の網羅性・正確性", "weight": 0.4},
+                {"id": "C2", "description": "分析の深さ・洞察", "weight": 0.3},
+                {"id": "C3", "description": "結論の明確さ・実用性", "weight": 0.3},
+            ]
+
+        return {
+            "task_id": task_id,
+            "task_type": task_type,
+            "criteria": base_criteria,
+            "minimum_pass_score": 0.5,
+            "critical_criteria": ["C1"],
+            "model_used_for_contract": "default",
+        }
+
+    # ===== Independent Evaluation: 実行者とは異なるモデルで検証 =====
+
+    def _choose_independent_model(self, executor_tier: str) -> dict:
+        """実行者が使ったティアとは異なるティアで検証モデルを選択"""
+        target_tier = _INDEPENDENT_TIER_MAP.get(executor_tier, "L")
+
+        if target_tier == "L":
+            return choose_best_model_v6(
+                task_type="classification",
+                quality="low",
+                budget_sensitive=True,
+                local_available=True,
+            )
+        else:
+            # ローカル実行の場合、安価なAPIで検証
+            return choose_best_model_v6(
+                task_type="analysis",
+                quality="medium",
+                budget_sensitive=True,
+            )
 
     async def verify(
         self,
@@ -72,18 +267,23 @@ class Verifier:
         goal_packet: dict,
         completed_task_count: int,
         total_task_count: int,
+        sprint_contract: dict = None,
     ) -> VerificationResult:
         """
-        タスク実行結果を検証する。
+        タスク実行結果を検証する（Generator+Evaluator分離）。
+
+        sprint_contractが渡された場合、事前合意した基準に基づいて
+        独立したモデルティアで検証を行う。
 
         Args:
             execution_result: Executorからの実行結果
             goal_packet: ゴールパケット（成功条件を含む）
             completed_task_count: 完了タスク数
             total_task_count: 総タスク数
+            sprint_contract: 事前合意した検証基準（create_sprint_contractの戻り値）
         """
         task_id = execution_result.get("task_id", "unknown")
-        logger.info(f"検証開始: {task_id}")
+        logger.info(f"検証開始: {task_id}" + (" (Sprint Contract付き)" if sprint_contract else ""))
 
         status = execution_result.get("status", "failure")
         error_class = execution_result.get("error_class")
@@ -110,16 +310,34 @@ class Verifier:
         # 成果物の検証
         has_output = bool(output.get("text", "").strip()) or bool(artifacts)
         quality_score = 0.0
+        verification_report = None
+
+        # 実行者が使ったモデルティアを取得
+        executor_model_sel = output.get("model_selection") or {}
+        executor_tier = executor_model_sel.get("tier", "unknown")
+        executor_model_name = output.get("model_used", "unknown")
 
         if has_output:
-            # LLMで品質スコアリング（CLAUDE.md ルール5: choose_best_model_v6使用）
-            try:
-                quality_score = await self._score_quality(
-                    output, goal_packet.get("success_definition", [])
-                )
-            except Exception as e:
-                logger.warning(f"品質スコアリング失敗: {e}")
-                quality_score = 0.5  # デフォルト中間スコア
+            if sprint_contract:
+                # Sprint Contract付き: 独立モデルで基準ごとに検証
+                try:
+                    quality_score, verification_report = await self._evaluate_against_contract(
+                        output, sprint_contract, executor_tier,
+                    )
+                except Exception as e:
+                    logger.warning(f"Sprint Contract検証失敗、従来検証にフォールバック: {e}")
+                    quality_score = await self._score_quality(
+                        output, goal_packet.get("success_definition", [])
+                    )
+            else:
+                # 従来の品質スコアリング（後方互換）
+                try:
+                    quality_score = await self._score_quality(
+                        output, goal_packet.get("success_definition", [])
+                    )
+                except Exception as e:
+                    logger.warning(f"品質スコアリング失敗: {e}")
+                    quality_score = 0.5  # デフォルト中間スコア
 
             # final_publish品質の成果物はTier Sモデルで追加検査
             task_type = execution_result.get("task_type", "")
@@ -140,7 +358,7 @@ class Verifier:
         if has_output and quality_score > 0:
             text_for_check = output.get("text", "")
             if text_for_check and len(text_for_check) > 50:
-                ai_check = check_ai_patterns(text_for_check)
+                ai_check = check_ai_patterns(text_for_check, task_type=execution_result.get("task_type", ""))
                 quality_score = max(0.0, min(1.0, quality_score - ai_check["penalty"]))
                 if ai_check["count"] > 0:
                     logger.info(
@@ -187,24 +405,51 @@ class Verifier:
         if ai_check is not None:
             ai_patterns_info = {"count": ai_check["count"], "patterns": ai_check["patterns"][:5]}
 
+        # VerificationReportのコンテキスト情報
+        report_context = {}
+        if verification_report:
+            report_context = {
+                "verification_report": {
+                    "passed": verification_report.passed,
+                    "score": verification_report.score,
+                    "verifier_model": verification_report.model_used,
+                    "executor_model": verification_report.executor_model,
+                    "criteria_count": len(verification_report.criteria_results),
+                    "issues": verification_report.issues_found[:3],
+                    "suggestions": verification_report.suggestions[:3],
+                },
+            }
+
+        # Verifier confidence = 検証プロセス自体の信頼度（quality_scoreとは別）
+        # 正常に検証完了 → 0.8、Sprint Contract付き → 0.9
+        verifier_confidence = 0.8
+        if sprint_contract and verification_report and verification_report.score > 0:
+            verifier_confidence = 0.9  # 独立モデルによるSprint Contract検証済み
+        elif not has_output:
+            verifier_confidence = 0.5  # 出力なしでの判定は低信頼
+
         await self._record_trace(
             task_id=task_id,
             goal_id=goal_packet.get("goal_id"),
             action="quality_scoring",
-            reasoning=f"品質スコア{result.quality_score:.2f}を付与。status={result.status}",
-            confidence=result.quality_score,
+            reasoning=f"品質スコア{result.quality_score:.2f}を付与。status={result.status}"
+                      + (f"。Sprint Contract検証済み" if sprint_contract else ""),
+            confidence=verifier_confidence,
             context={
                 "quality_score": result.quality_score,
                 "has_output": has_output,
                 "ai_patterns": ai_patterns_info,
-                "model_used": execution_result.get("output", {}).get("model_used", "unknown"),
+                "model_used": executor_model_name,
                 "task_type": execution_result.get("task_type", "unknown"),
+                "independent_evaluation": sprint_contract is not None,
+                **report_context,
             },
         )
 
         logger.info(
             f"検証完了: {task_id} → status={result.status}, "
             f"progress={result.goal_progress:.2f}, quality={result.quality_score:.2f}"
+            + (f", verifier_model={verification_report.model_used}" if verification_report else "")
         )
 
         # 品質低下エスカレーション: 24h平均が7日平均-0.10
@@ -215,8 +460,130 @@ class Verifier:
 
         return result
 
+    # ===== Sprint Contract検証 =====
+
+    async def _evaluate_against_contract(
+        self, output: dict, sprint_contract: dict, executor_tier: str,
+    ) -> tuple[float, VerificationReport]:
+        """
+        Sprint Contractの基準に基づいて独立モデルで検証する。
+
+        Returns:
+            (quality_score, VerificationReport)
+        """
+        text = output.get("text", "")
+        if not text:
+            return 0.0, VerificationReport(passed=False, score=0.0, model_used="none")
+
+        # 独立モデル選択（実行者とは異なるティア）
+        verifier_model_sel = self._choose_independent_model(executor_tier)
+        verifier_model_name = verifier_model_sel.get("model", "unknown")
+
+        criteria = sprint_contract.get("criteria", [])
+        minimum_pass = sprint_contract.get("minimum_pass_score", 0.5)
+        critical_ids = sprint_contract.get("critical_criteria", [])
+
+        # 基準リスト文字列
+        criteria_str = "\n".join(
+            f"- {c['id']}: {c['description']}（重み: {c.get('weight', 0.2)}）"
+            for c in criteria
+        )
+
+        try:
+            llm_result = await call_llm(
+                prompt=f"""以下の出力を事前定義された検証基準で評価してください。
+
+## 検証基準
+{criteria_str}
+
+## 出力（先頭500文字）
+{text[:500]}
+
+各基準について1-5点で採点し、問題点と改善提案を出してください。
+
+JSON形式で出力:
+{{
+  "scores": {{
+    "C1": {{"score": 4, "detail": "理由"}},
+    "C2": {{"score": 3, "detail": "理由"}}
+  }},
+  "issues": ["問題点1", "問題点2"],
+  "suggestions": ["改善提案1"]
+}}""",
+                system_prompt="独立品質検証エージェント。事前定義された基準に基づき厳密に評価する。",
+                model_selection=verifier_model_sel,
+            )
+
+            import re
+            score_text = llm_result.get("text", "")
+            json_match = re.search(r"\{[\s\S]*\}", score_text)
+
+            if json_match:
+                eval_data = json.loads(json_match.group())
+                scores = eval_data.get("scores", {})
+                issues = eval_data.get("issues", [])
+                suggestions = eval_data.get("suggestions", [])
+
+                # 基準ごとの結果を構築
+                criteria_results = []
+                weighted_sum = 0.0
+                total_weight = 0.0
+                critical_failed = False
+
+                for c in criteria:
+                    cid = c["id"]
+                    weight = c.get("weight", 1.0 / len(criteria))
+                    score_entry = scores.get(cid, {})
+                    raw_score = score_entry.get("score", 3) if isinstance(score_entry, dict) else 3
+                    normalized = min(max(raw_score / 5.0, 0.0), 1.0)
+                    passed = normalized >= 0.5
+
+                    if cid in critical_ids and not passed:
+                        critical_failed = True
+
+                    criteria_results.append(CriterionResult(
+                        criterion=f"{cid}: {c['description']}",
+                        passed=passed,
+                        detail=score_entry.get("detail", "") if isinstance(score_entry, dict) else "",
+                    ))
+
+                    weighted_sum += normalized * weight
+                    total_weight += weight
+
+                final_score = weighted_sum / max(total_weight, 0.01)
+                overall_passed = final_score >= minimum_pass and not critical_failed
+
+                report = VerificationReport(
+                    passed=overall_passed,
+                    score=round(final_score, 3),
+                    criteria_results=criteria_results,
+                    issues_found=issues if isinstance(issues, list) else [],
+                    suggestions=suggestions if isinstance(suggestions, list) else [],
+                    model_used=verifier_model_name,
+                    executor_model=output.get("model_used", "unknown"),
+                )
+
+                logger.info(
+                    f"Sprint Contract検証完了: score={final_score:.2f}, "
+                    f"passed={overall_passed}, verifier={verifier_model_name}, "
+                    f"executor_tier={executor_tier}"
+                )
+
+                return final_score, report
+
+        except Exception as e:
+            logger.warning(f"Sprint Contract LLM検証失敗: {e}")
+
+        # フォールバック
+        return 0.5, VerificationReport(
+            passed=True, score=0.5,
+            model_used=verifier_model_name,
+            executor_model=output.get("model_used", "unknown"),
+            issues_found=["Sprint Contract検証でLLM呼び出し失敗、デフォルトスコアを適用"],
+        )
+
     async def _score_quality(self, output: dict, success_definition: list) -> float:
-        """LLMで出力品質をスコアリング（0.0-1.0）— 詳細ルーブリック付き"""
+        """LLMで出力品質をスコアリング（0.0-1.0）— 7軸詳細ルーブリック"""
         text = output.get("text", "")
         if not text:
             return 0.0
@@ -237,7 +604,7 @@ class Verifier:
 
         try:
             llm_result = await call_llm(
-                prompt=f"""以下の出力を5つの基準で各1-5点で評価し、合計点を25点満点で算出してください。
+                prompt=f"""以下の出力を7つの基準で各1-5点で評価し、合計点を35点満点で算出してください。
 
 ## 評価基準（各1-5点）
 
@@ -256,13 +623,19 @@ D. 独自性: テンプレ的でなく価値ある視点があるか
 E. 文体品質: 日本語として自然で読みやすいか
    1=不自然 2=AI臭い 3=普通 4=自然 5=島原大知の声が聞こえる
 
+F. 構造性: 導入→展開→結論の流れが明確か
+   1=破綻 2=分かりにくい 3=一応ある 4=明確 5=引き込まれる構成
+
+G. ICP適合性: ターゲット層（AI活用に関心がある28-39歳の非エンジニアクリエイター）に響くか
+   1=全く響かない 2=やや的外れ 3=普通 4=響く 5=強く共感
+
 ## 成功条件
 {success_str}
 
 ## 出力（先頭500文字）
 {text[:500]}
 
-回答形式: A=X B=X C=X D=X E=X 合計=XX""",
+回答形式: A=X B=X C=X D=X E=X F=X G=X 合計=XX""",
                 system_prompt="品質評価エージェント。指定された形式で回答する。",
                 model_selection=model_sel,
             )
@@ -270,17 +643,17 @@ E. 文体品質: 日本語として自然で読みやすいか
             score_text = llm_result.get("text", "").strip()
             import re
 
-            # 合計点を抽出
+            # 合計点を抽出（35点満点）
             total_match = re.search(r"合計[=:：\s]*(\d+)", score_text)
             if total_match:
                 total = int(total_match.group(1))
-                return min(max(round(total / 25.0, 3), 0.0), 1.0)
+                return min(max(round(total / 35.0, 3), 0.0), 1.0)
 
             # 個別点を合算
-            individual = re.findall(r"[A-E][=:：\s]*(\d)", score_text)
+            individual = re.findall(r"[A-G][=:：\s]*(\d)", score_text)
             if len(individual) >= 3:
-                total = sum(int(x) for x in individual[:5])
-                return min(max(round(total / 25.0, 3), 0.0), 1.0)
+                total = sum(int(x) for x in individual[:7])
+                return min(max(round(total / 35.0, 3), 0.0), 1.0)
 
             # フォールバック: 従来の数値抽出
             match = re.search(r"(0?\.\d+|1\.0|0|1)", score_text)
@@ -497,9 +870,13 @@ F. 独自価値: 他では得られない視点・情報があるか
 
 # ===== AI文体パターン検出（LLM不要、コストゼロ） =====
 
-def check_ai_patterns(text: str) -> dict:
+def check_ai_patterns(text: str, task_type: str = "") -> dict:
     """
     テキストからAI文体パターンを検出する。
+
+    task_typeが内部用途（research, analysis, data_extraction等）の場合、
+    LLM出力で自然に発生するパターン（太字コロン、ハッシュタグ、語尾単調、簡体字）は
+    ペナルティを軽減する。SNS投稿やnote記事など公開コンテンツには厳格適用。
 
     Returns:
         {
@@ -509,6 +886,11 @@ def check_ai_patterns(text: str) -> dict:
         }
     """
     import re
+
+    # 内部タスク（公開しないもの）ではAI文体チェックを緩和
+    _INTERNAL_TASK_TYPES = {"research", "analysis", "data_extraction", "classification",
+                            "strategy", "planning", "summary", "code_review", "debugging"}
+    is_internal = task_type in _INTERNAL_TASK_TYPES
 
     patterns_found = []
 
@@ -614,17 +996,17 @@ def check_ai_patterns(text: str) -> dict:
             patterns_found.append(f"L.追従的: 「{fl}」")
 
     # M. 中国語混入検出（簡体字の直接検出 + 仮名なしCJK検出）
-    # 簡体字で日本語にない文字を直接検出
-    simplified_chinese_chars = re.findall(r'[压热设买卖开关认识说话请问题变这那对个头发视频点击搜索输入确认选择删除编辑保存返回页面]', text)
+    # 内部タスクでは簡体字ペナルティを軽減（LLMが混入させることがある）
+    simplified_chinese_chars = re.findall(r'[压热设买卖开关认识说话请问题变这那对个头发视频点击搜索输入确认选择删除编辑保存返回页面东西南北车门窗户电话网络时间地方学习工作]', text)
     chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
     japanese_pattern = re.compile(r'[\u3040-\u309f\u30a0-\u30ff]')  # hiragana + katakana
     penalty_extra_chinese = 0.0
     if simplified_chinese_chars:
         patterns_found.append(f"M.簡体字混入: 「{''.join(simplified_chinese_chars[:5])}」")
-        penalty_extra_chinese = 0.40
+        penalty_extra_chinese = 0.05 if is_internal else 0.40
     elif chinese_pattern.search(text) and not japanese_pattern.search(text[:100]):
         patterns_found.append("M.中国語混入: 仮名なしCJK検出")
-        penalty_extra_chinese = 0.30
+        penalty_extra_chinese = 0.05 if is_internal else 0.30
 
     # N. 島原大知の読み間違い検出
     wrong_readings = ["うらわら", "おおとも", "しまばらだいち", "しまはらたいち",
@@ -663,15 +1045,46 @@ def check_ai_patterns(text: str) -> dict:
             break
 
     # P. 太字+コロンパターン過多（anti_ai_writing rule G強化）
+    # 内部タスクでは太字コロンはMarkdown構造化として自然なのでスキップ
     penalty_extra_bold_colon = 0.0
-    if len(bold_colon) >= 3:
+    if len(bold_colon) >= 3 and not is_internal:
         patterns_found.append(f"P.太字コロン過多: {len(bold_colon)}箇所(3+)")
         penalty_extra_bold_colon = 0.15
+
+    # Q. 絵文字・ハッシュタグ過多（SNS投稿品質）
+    # 内部タスクではハッシュタグはMarkdownの見出しと混同しやすいのでスキップ
+    penalty_extra_emoji = 0.0
+    emoji_count = len(re.findall(r'[\U0001F300-\U0001F9FF\U00002702-\U000027B0]', text))
+    if emoji_count >= 5 and not is_internal:
+        patterns_found.append(f"Q.絵文字過多: {emoji_count}個")
+        penalty_extra_emoji = 0.10
+    hashtag_count = text.count('#')
+    if hashtag_count >= 4 and not is_internal:
+        patterns_found.append(f"Q.ハッシュタグ過多: {hashtag_count}個")
+        penalty_extra_emoji += 0.10
+
+    # R. 同一語尾の連続（「です。」「ます。」の連打）
+    # 内部タスクでは丁寧語の連続は自然なのでペナルティ軽減
+    penalty_extra_repetitive = 0.0
+    endings = re.findall(r'(?:です|ます|ません|でしょう)[。！？]', text)
+    if len(endings) >= 4:
+        unique_ratio = len(set(endings)) / len(endings) if endings else 1.0
+        if unique_ratio < 0.5:
+            patterns_found.append(f"R.語尾単調: {len(endings)}回中{len(set(endings))}種")
+            penalty_extra_repetitive = 0.0 if is_internal else 0.10
 
     # ペナルティ計算
     count = len(patterns_found)
     if count == 0:
         penalty = -0.05  # ボーナス（負のペナルティ＝加点）
+    elif is_internal:
+        # 内部タスクは基本ペナルティを軽減（構造化出力でAIパターンは自然）
+        if count <= 3:
+            penalty = 0.0
+        elif count <= 6:
+            penalty = 0.05
+        else:
+            penalty = 0.10
     elif count <= 2:
         penalty = 0.0
     elif count <= 4:
@@ -682,7 +1095,7 @@ def check_ai_patterns(text: str) -> dict:
         penalty = 0.30  # 7個以上のAIパターン → 強いペナルティ
 
     # 追加ペナルティ（重大品質問題）を加算
-    penalty += penalty_extra_chinese + penalty_extra_name + penalty_extra_ai_disclosure + penalty_extra_bold_colon + penalty_extra_hallucination
+    penalty += penalty_extra_chinese + penalty_extra_name + penalty_extra_ai_disclosure + penalty_extra_bold_colon + penalty_extra_hallucination + penalty_extra_emoji + penalty_extra_repetitive
 
     return {
         "count": count,

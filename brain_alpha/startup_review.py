@@ -247,16 +247,32 @@ async def _phase5_quality(conn) -> dict:
 
 async def _phase6_errors(conn) -> dict:
     try:
+        # ダウン中・メンテナンス中のノードを取得（これらのエラーは除外）
+        down_nodes = set()
+        try:
+            down_rows = await conn.fetch(
+                """SELECT node_name FROM node_state
+                   WHERE state IN ('win11', 'down', 'maintenance', 'offline', 'charlie_win11')"""
+            )
+            down_nodes = {r["node_name"] for r in down_rows}
+        except Exception:
+            pass
+
         errors = await conn.fetch(
             """SELECT event_type, payload->>'error' as error, source_node, created_at
                FROM event_log
                WHERE severity IN ('error', 'critical')
                  AND created_at > NOW() - INTERVAL '24 hours'
-               ORDER BY created_at DESC LIMIT 15"""
+               ORDER BY created_at DESC LIMIT 30"""
         )
-        # 再発パターン検出
+
+        # ダウン中ノードからのエラーを除外
+        actionable_errors = [r for r in errors if r["source_node"] not in down_nodes]
+        excluded_count = len(errors) - len(actionable_errors)
+
+        # 再発パターン検出（要対応エラーのみ）
         pattern_counts = {}
-        for r in errors:
+        for r in actionable_errors:
             key = r["event_type"]
             pattern_counts[key] = pattern_counts.get(key, 0) + 1
 
@@ -264,12 +280,14 @@ async def _phase6_errors(conn) -> dict:
         recurring.sort(key=lambda x: x["count"], reverse=True)
 
         return {
-            "total_24h": len(errors),
+            "total_24h": len(actionable_errors),
+            "excluded_down_nodes": excluded_count,
+            "down_nodes": list(down_nodes),
             "recurring_patterns": recurring,
             "recent": [
                 {"event_type": r["event_type"], "error": (r["error"] or "")[:100],
                  "node": r["source_node"], "at": r["created_at"].isoformat() if r["created_at"] else None}
-                for r in errors[:5]
+                for r in actionable_errors[:5]
             ],
         }
     except Exception as e:
@@ -370,10 +388,11 @@ def _build_summary(report: dict):
         warnings.append(f"品質スコア低下傾向: {quality.get('last_week_avg', 0):.2f} → {quality.get('this_week_avg', 0):.2f}")
         actions.append("品質低下の原因調査。モデル選択・プロンプト改善を検討")
 
-    # Phase 6: エラー
+    # Phase 6: エラー（ダウン中ノードを除外した要対応エラー）
     errors = report["phases"].get("6_errors", {})
+    excluded = errors.get("excluded_down_nodes", 0)
     if errors.get("total_24h", 0) > 5:
-        warnings.append(f"24hエラー {errors['total_24h']}件。再発パターン確認")
+        warnings.append(f"要対応エラー {errors['total_24h']}件" + (f"（他{excluded}件はダウン中ノード）" if excluded else "") + "。再発パターン確認")
     for pat in errors.get("recurring_patterns", []):
         if pat["count"] >= 3:
             actions.append(f"再発エラー: {pat['event_type']} ({pat['count']}回) → 根本原因修正")
@@ -403,7 +422,7 @@ def _build_summary(report: dict):
     if quality.get("this_week_avg"):
         parts.append(f"品質{quality['this_week_avg']:.2f}")
     if errors.get("total_24h"):
-        parts.append(f"エラー{errors['total_24h']}件")
+        parts.append(f"要対応エラー{errors['total_24h']}件")
     if queue.get("pending_count"):
         parts.append(f"キュー{queue['pending_count']}件")
     report["summary"] = " / ".join(parts)
@@ -456,11 +475,13 @@ def format_discord_report(report: dict) -> str:
         trend_emoji = {"improving": "+", "declining": "-", "stable": "="}
         lines.append(f"**品質**: {q['this_week_avg']:.2f} ({trend_emoji.get(q.get('trend', ''), '?')}{abs(q.get('delta', 0)):.2f}) / {q.get('this_week_count', 0)}件")
 
-    # エラー
+    # エラー（ダウン中ノード除外済み）
     e = phases.get("6_errors", {})
     if e.get("total_24h"):
         recurring = ", ".join(f"{p['event_type']}x{p['count']}" for p in e.get("recurring_patterns", [])[:3])
-        lines.append(f"**エラー**: {e['total_24h']}件 {'(再発: ' + recurring + ')' if recurring else ''}")
+        excluded = e.get("excluded_down_nodes", 0)
+        suffix = f" (除外{excluded}件=ダウン中)" if excluded else ""
+        lines.append(f"**要対応エラー**: {e['total_24h']}件{suffix} {'(再発: ' + recurring + ')' if recurring else ''}")
 
     # SNS
     r = phases.get("7_revenue", {})

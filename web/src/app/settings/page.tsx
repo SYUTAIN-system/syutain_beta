@@ -59,7 +59,7 @@ interface NodeConfig {
 const DEFAULT_NODES: NodeConfig[] = [
   { name: "ALPHA", model: "推論なし（Brain-α専用）", role: "Brain-α + Brain-βインフラ", browser_layer: false },
   { name: "BRAVO", model: "Nemotron 9B JP + Qwen3.5-9B", role: "LLM主力 + ブラウザ操作", browser_layer: true },
-  { name: "CHARLIE", model: "Nemotron 9B JP + Qwen3.5-9B", role: "副推論 + コンテンツ生成", browser_layer: false },
+  { name: "CHARLIE", model: "Nemotron 9B JP + Qwen3.5-9B", role: "副推論 + コンテンツ生成（ブラウザ操作なし）", browser_layer: false },
   { name: "DELTA", model: "Qwen3.5-4B", role: "監視 + 軽量タスク", browser_layer: false },
 ];
 
@@ -157,7 +157,7 @@ function SliderInput({
               const v = Number(e.target.value);
               if (v >= min && v <= max) onChange(v);
             }}
-            className="w-20 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-1 text-right text-sm focus:outline-none focus:ring-1 focus:ring-[var(--accent-purple)]"
+            className="w-24 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-2 text-right text-base sm:text-sm min-h-[44px] focus:outline-none focus:ring-1 focus:ring-[var(--accent-purple)]"
           />
         </div>
       </div>
@@ -168,7 +168,7 @@ function SliderInput({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-[var(--accent-purple)] cursor-pointer"
+        className="w-full accent-[var(--accent-purple)] cursor-pointer h-6 sm:h-auto"
       />
       <div className="flex justify-between text-xs text-[var(--text-secondary)]">
         <span>¥{min.toLocaleString("ja-JP")}</span>
@@ -193,7 +193,7 @@ function ToggleSwitch({
     <button
       type="button"
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3 transition-colors hover:border-[var(--accent-purple)]"
+      className="flex w-full items-center justify-between rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-4 sm:py-3 transition-colors hover:border-[var(--accent-purple)] active:bg-[var(--bg-card)] min-h-[48px]"
     >
       <span className="text-sm font-medium">{label}</span>
       <div className="flex items-center gap-2">
@@ -222,7 +222,7 @@ function SaveButton({ onClick, saving }: { onClick: () => void; saving: boolean 
       type="button"
       onClick={onClick}
       disabled={saving}
-      className="mt-4 flex items-center gap-2 rounded-md bg-[var(--accent-purple)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+      className="mt-4 flex w-full sm:w-auto items-center justify-center gap-2 rounded-lg bg-[var(--accent-purple)] px-6 py-3 text-base sm:text-sm font-medium text-white transition-opacity hover:opacity-90 active:opacity-70 disabled:opacity-50 min-h-[48px]"
     >
       <Save className="h-4 w-4" />
       {saving ? "保存中..." : "保存"}
@@ -267,6 +267,9 @@ export default function SettingsPage() {
   // Feature flags & nodes (read-only)
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
 
+  // Brain-α status from API
+  const [brainStatus, setBrainStatus] = useState<Record<string, string>>({});
+
   const showToast = useCallback((message: string, type: "success" | "error") => {
     setToast({ message, type });
   }, []);
@@ -275,9 +278,10 @@ export default function SettingsPage() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [settingsRes, budgetRes] = await Promise.all([
+        const [settingsRes, budgetRes, brainRes] = await Promise.all([
           apiFetch("/api/settings").catch(() => null),
           apiFetch("/api/budget/status").catch(() => null),
+          apiFetch("/api/brain-alpha/latest-report").catch(() => null),
         ]);
 
         if (settingsRes && settingsRes.ok) {
@@ -295,8 +299,17 @@ export default function SettingsPage() {
           if (json.discord) {
             setDiscord((prev) => ({ ...prev, ...json.discord }));
           }
-          if (json.flags && Array.isArray(json.flags)) {
-            setFlags(json.flags);
+          if (json.flags) {
+            if (Array.isArray(json.flags)) {
+              setFlags(json.flags);
+            } else if (typeof json.flags === "object") {
+              // Handle flat object format: { "flag_name": true, ... }
+              const parsed: FeatureFlag[] = Object.entries(json.flags).map(([key, val]) => ({
+                key,
+                enabled: Boolean(val),
+              }));
+              setFlags(parsed);
+            }
           }
         }
 
@@ -316,6 +329,22 @@ export default function SettingsPage() {
               chat_daily_limit_jpy: json.chat_daily_limit_jpy ?? prev.chat_daily_limit_jpy,
             }));
           }
+        }
+        if (brainRes && brainRes.ok) {
+          const brJson = await brainRes.json();
+          const report = brJson.report;
+          const status: Record<string, string> = {};
+          if (report) {
+            // Derive status from report phases
+            status.channels = "running";
+            status.scrutiny = report.phases ? "running" : "preparing";
+            status.self_healing = report.phases?.["6_errors"] ? "running" : "preparing";
+            status.persona = report.phases?.["1_session_restore"] ? "running" : "running";
+          }
+          if (brJson.brain_alpha_status) {
+            Object.assign(status, brJson.brain_alpha_status);
+          }
+          setBrainStatus(status);
         }
       } catch {
         // graceful fallback - use defaults
@@ -514,7 +543,7 @@ export default function SettingsPage() {
             {CHAT_MODEL_OPTIONS.map((opt) => (
               <label
                 key={opt.value}
-                className={`flex cursor-pointer items-center gap-3 rounded-md border px-4 py-3 transition-colors ${
+                className={`flex cursor-pointer items-center gap-3 rounded-md border px-4 py-4 sm:py-3 min-h-[48px] transition-colors ${
                   chatModel === opt.value
                     ? "border-[var(--accent-purple)] bg-[var(--accent-purple)]/10"
                     : "border-[var(--border-color)] bg-[var(--bg-primary)] hover:border-[var(--accent-purple)]/50"
@@ -629,42 +658,28 @@ export default function SettingsPage() {
             </h3>
           </div>
           <div className="space-y-3">
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">Channels（Discord Bot）</p>
-                  <p className="text-xs text-[var(--text-secondary)]">tmux brain_alpha セッションで永続稼働</p>
+            {[
+              { key: "channels", label: "Channels（Discord Bot）", desc: "tmux brain_alpha セッションで永続稼働" },
+              { key: "scrutiny", label: "精査サイクル", desc: "情報収集・成果物・タスク結果の自動精査" },
+              { key: "self_healing", label: "自律修復", desc: "エラー検出→原因特定→コード修正の自動化" },
+              { key: "persona", label: "人格保持", desc: "persona_memory + daichi_dialogue_log" },
+            ].map((item) => {
+              const st = brainStatus[item.key] ?? "unknown";
+              const isRunning = st === "running" || st === "active" || st === "enabled";
+              const statusLabel = isRunning ? "稼働中" : st === "preparing" ? "準備中" : st === "disabled" ? "無効" : "準備中";
+              const statusColor = isRunning ? "accent-green" : "accent-amber";
+              return (
+                <div key={item.key} className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">{item.label}</p>
+                      <p className="text-xs text-[var(--text-secondary)]">{item.desc}</p>
+                    </div>
+                    <span className={`rounded-full bg-[var(--${statusColor})]/10 px-2 py-0.5 text-xs text-[var(--${statusColor})]`}>{statusLabel}</span>
+                  </div>
                 </div>
-                <span className="rounded-full bg-[var(--accent-green)]/10 px-2 py-0.5 text-xs text-[var(--accent-green)]">稼働中</span>
-              </div>
-            </div>
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">精査サイクル</p>
-                  <p className="text-xs text-[var(--text-secondary)]">情報収集・成果物・タスク結果の自動精査</p>
-                </div>
-                <span className="rounded-full bg-[var(--accent-amber)]/10 px-2 py-0.5 text-xs text-[var(--accent-amber)]">準備中</span>
-              </div>
-            </div>
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">自律修復</p>
-                  <p className="text-xs text-[var(--text-secondary)]">エラー検出→原因特定→コード修正の自動化</p>
-                </div>
-                <span className="rounded-full bg-[var(--accent-amber)]/10 px-2 py-0.5 text-xs text-[var(--accent-amber)]">準備中</span>
-              </div>
-            </div>
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">人格保持</p>
-                  <p className="text-xs text-[var(--text-secondary)]">persona_memory + daichi_dialogue_log</p>
-                </div>
-                <span className="rounded-full bg-[var(--accent-green)]/10 px-2 py-0.5 text-xs text-[var(--accent-green)]">有効</span>
-              </div>
-            </div>
+              );
+            })}
           </div>
 
           {/* Node Configuration */}

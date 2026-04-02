@@ -68,10 +68,16 @@ class StopDecider:
     - loop_guard_triggered → EMERGENCY_STOP
     - semantic_loop_detected → SEMANTIC_STOP
     - cross_goal_interference_detected → INTERFERENCE_STOP
+
+    連続失敗ルール: 同一タスク（task_type+goal_id）が2回連続失敗 → SWITCH_PLAN
     """
 
+    # 連続失敗の閾値
+    CONSECUTIVE_FAILURE_THRESHOLD = 2
+
     def __init__(self):
-        pass
+        # 連続失敗トラッカー: key = (task_type, goal_id), value = consecutive failure count
+        self._consecutive_failures: dict[tuple[str, str], int] = {}
 
     async def decide(
         self,
@@ -165,8 +171,14 @@ class StopDecider:
                 )
 
         except Exception as e:
-            logger.error(f"LoopGuardチェックエラー: {e}")
-            # LoopGuardエラー時も処理を続行可能にする
+            logger.error(f"LoopGuardチェックエラー（安全側に倒してESCALATE）: {e}")
+            # LoopGuardが壊れた場合、安全側に倒す（CLAUDE.md Rule 15/16）
+            return StopDecision(
+                decision="ESCALATE",
+                reason=f"LoopGuardチェック自体がエラー: {e}。安全のためエスカレーション。",
+                remaining_steps=remaining_task_count,
+                fallback_available=fallback_plans_remaining > 0,
+            )
 
         # 判断根拠トレースの準備（最終的な判断をトレース）
         async def _trace_decision(decision_val, reason_val):
@@ -183,10 +195,48 @@ class StopDecider:
             except Exception:
                 pass
 
+        # 1.5. 連続失敗トラッカー: 同一タスクが2回連続失敗 → SWITCH_PLAN
+        task_type = verification_result.get("task_type", action_key or "unknown")
+        failure_key = (task_type, goal_id)
+        if status == "failure":
+            self._consecutive_failures[failure_key] = self._consecutive_failures.get(failure_key, 0) + 1
+            consec_count = self._consecutive_failures[failure_key]
+            if consec_count >= self.CONSECUTIVE_FAILURE_THRESHOLD:
+                self._consecutive_failures[failure_key] = 0  # リセット
+                decision = DECISION_SWITCH_PLAN if fallback_plans_remaining > 0 else DECISION_ESCALATE
+                reason = f"同一タスク({task_type})が{consec_count}回連続失敗。プラン切替を強制"
+                logger.warning(f"連続失敗閾値到達: {reason} → {decision}")
+                await _trace_decision(decision, reason)
+                return StopDecision(
+                    decision=decision,
+                    reason=reason,
+                    remaining_steps=remaining_task_count,
+                    fallback_available=fallback_plans_remaining > 0,
+                )
+        else:
+            # 成功/部分成功時はカウンタをリセット
+            self._consecutive_failures.pop(failure_key, None)
+
         # 2. 設計書 stop_decision_tree に基づく判断
 
         # ゴール完了
         if goal_progress >= 1.0:
+            # Tier 1（ABSOLUTE）価値観チェック: 完了前にtaboo違反がないか検証
+            output_text = action_result_text or verification_result.get("output_text", "")
+            if output_text:
+                taboo_block = await self._check_tier1_values(output_text)
+                if taboo_block:
+                    reason = f"ゴール達成だがtier1価値観違反を検出: {taboo_block}"
+                    logger.warning(f"COMPLETE→ESCALATE: {reason}")
+                    await _trace_decision(DECISION_ESCALATE, reason)
+                    await self._notify_stop(goal_id, DECISION_ESCALATE, reason)
+                    return StopDecision(
+                        decision=DECISION_ESCALATE,
+                        reason=reason,
+                        remaining_steps=remaining_task_count,
+                        fallback_available=fallback_plans_remaining > 0,
+                    )
+
             await _trace_decision(DECISION_COMPLETE, "ゴール達成（progress=1.0）")
             await self._notify_stop(goal_id, DECISION_COMPLETE, "ゴール達成")
             return StopDecision(
@@ -244,6 +294,23 @@ class StopDecider:
             decision=DECISION_COMPLETE,
             reason="全タスク完了",
         )
+
+    async def _check_tier1_values(self, output_text: str) -> Optional[str]:
+        """
+        Tier 1（ABSOLUTE）価値観に違反していないかチェック。
+        harness_linterのtabooチェックを利用。
+        違反があれば違反理由を返す。なければNone。
+        """
+        try:
+            from tools.harness_linter import get_harness_linter
+            linter = get_harness_linter()
+            result = await linter._check_taboo(output_text)
+            if not result.passed:
+                details = "; ".join(v.get("detail", "") for v in result.violations)
+                return details[:200]
+        except Exception as e:
+            logger.warning(f"tier1価値観チェックエラー（安全側でパス）: {e}")
+        return None
 
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""

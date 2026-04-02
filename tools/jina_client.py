@@ -71,51 +71,77 @@ class JinaClient:
         # Jina Reader API: https://r.jina.ai/{url}
         reader_url = f"{JINA_READER_URL}/{url}"
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(reader_url, headers=headers)
-                resp.raise_for_status()
+        # 指数バックオフ付きリトライ（429対応: 5s → 10s → 20s）
+        import asyncio
+        backoff_waits = [5, 10, 20]
+        max_attempts = len(backoff_waits) + 1  # 初回 + リトライ3回
 
-                # 呼び出し成功: カウンタ増加＆コスト追跡
-                self._daily_count += 1
-                try:
-                    from tools.budget_guard import get_budget_guard
-                    budget_guard = get_budget_guard()
-                    await budget_guard.record_spend(
-                        amount_jpy=JINA_COST_PER_CALL_JPY,
-                        model="jina-reader",
-                        tier="info",
-                        is_info_collection=True,
-                    )
-                except Exception as e_budget:
-                    logger.warning(f"Jina予算記録失敗（処理続行）: {e_budget}")
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(reader_url, headers=headers)
 
-                # JSONレスポンスの場合
-                if "application/json" in resp.headers.get("content-type", ""):
-                    data = resp.json()
-                    return {
-                        "url": url,
-                        "title": data.get("data", {}).get("title", ""),
-                        "content": data.get("data", {}).get("content", ""),
-                        "description": data.get("data", {}).get("description", ""),
-                    }
-                else:
-                    # テキストレスポンスの場合
-                    text = resp.text
-                    # タイトルを最初の行から抽出
-                    lines = text.strip().split("\n")
-                    title = lines[0].lstrip("#").strip() if lines else ""
-                    return {
-                        "url": url,
-                        "title": title,
-                        "content": text,
-                    }
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Jina APIエラー ({e.response.status_code}): {url}")
-            return {"url": url, "title": "", "content": "", "error": str(e)}
-        except Exception as e:
-            logger.error(f"Jina読み取り失敗 ({url}): {e}")
-            return {"url": url, "title": "", "content": "", "error": str(e)}
+                    if resp.status_code == 429:
+                        if attempt < len(backoff_waits):
+                            wait = backoff_waits[attempt]
+                            # Retry-Afterヘッダがあればそちらを優先
+                            retry_after = resp.headers.get("retry-after")
+                            if retry_after:
+                                wait = min(float(retry_after), 30)
+                            logger.warning(
+                                f"Jina Reader 429 rate limit（リトライ {attempt + 1}/{len(backoff_waits)}）、{wait}秒後にリトライ: {url}"
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        else:
+                            logger.warning(f"Jina Reader 429 リトライ上限到達（3回）、スキップ: {url}")
+                            return {"url": url, "title": "", "content": "", "error": "Rate limited (429) after retries"}
+
+                    resp.raise_for_status()
+
+                    # 呼び出し成功: カウンタ増加＆コスト追跡
+                    self._daily_count += 1
+                    try:
+                        from tools.budget_guard import get_budget_guard
+                        budget_guard = get_budget_guard()
+                        await budget_guard.record_spend(
+                            amount_jpy=JINA_COST_PER_CALL_JPY,
+                            model="jina-reader",
+                            tier="info",
+                            is_info_collection=True,
+                        )
+                    except Exception as e_budget:
+                        logger.warning(f"Jina予算記録失敗（処理続行）: {e_budget}")
+
+                    # JSONレスポンスの場合
+                    if "application/json" in resp.headers.get("content-type", ""):
+                        data = resp.json()
+                        return {
+                            "url": url,
+                            "title": data.get("data", {}).get("title", ""),
+                            "content": data.get("data", {}).get("content", ""),
+                            "description": data.get("data", {}).get("description", ""),
+                        }
+                    else:
+                        # テキストレスポンスの場合
+                        text = resp.text
+                        # タイトルを最初の行から抽出
+                        lines = text.strip().split("\n")
+                        title = lines[0].lstrip("#").strip() if lines else ""
+                        return {
+                            "url": url,
+                            "title": title,
+                            "content": text,
+                        }
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Jina APIエラー ({e.response.status_code}): {url}")
+                return {"url": url, "title": "", "content": "", "error": str(e)}
+            except Exception as e:
+                logger.error(f"Jina読み取り失敗 ({url}): {e}")
+                return {"url": url, "title": "", "content": "", "error": str(e)}
+
+        # ループ終了（全リトライ消化 — 通常ここには到達しない）
+        return {"url": url, "title": "", "content": "", "error": "Max retries exhausted"}
 
     async def extract_markdown(self, url: str) -> str:
         """URLからMarkdownテキストだけを抽出"""

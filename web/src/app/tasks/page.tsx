@@ -69,6 +69,7 @@ function normalizeStatus(status: string): string {
     failed: "failed",
     failure: "failed",
     error: "failed",
+    cancelled: "cancelled",
     waiting_approval: "approval",
     pending_approval: "approval",
   };
@@ -90,6 +91,7 @@ const statusConfig: Record<string, { icon: typeof Clock; color: string; bg: stri
   approval: { icon: ShieldAlert, color: "text-[var(--accent-amber)]", bg: "bg-[var(--accent-amber)]/10", label: "承認待ち" },
   done: { icon: CheckCircle2, color: "text-[var(--accent-green)]", bg: "bg-[var(--accent-green)]/10", label: "完了" },
   failed: { icon: AlertCircle, color: "text-[var(--accent-red)]", bg: "bg-[var(--accent-red)]/10", label: "失敗" },
+  cancelled: { icon: XCircle, color: "text-[var(--text-secondary)]", bg: "bg-[var(--bg-primary)]", label: "キャンセル" },
 };
 
 function TasksPageInner() {
@@ -177,13 +179,13 @@ function TasksPageInner() {
         <ListChecks className="h-6 w-6 text-[var(--accent-purple)]" />
         <h1 className="text-2xl font-bold">タスク一覧</h1>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto scrollbar-hide -mx-4 px-4">
         <div className="flex gap-1 rounded-lg bg-[var(--bg-card)] p-1 w-max">
-          {["all", "running", "approval", "queued", "done", "failed"].map((f) => (
+          {["all", "running", "approval", "queued", "done", "failed", "cancelled"].map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`rounded-md px-3 py-1 text-xs whitespace-nowrap transition-colors ${
+              className={`rounded-md px-3.5 py-2 text-xs whitespace-nowrap transition-colors min-h-[36px] ${
                 filter === f ? "bg-[var(--accent-purple)] text-white" : "text-[var(--text-secondary)] hover:text-white"
               }`}
             >
@@ -192,6 +194,10 @@ function TasksPageInner() {
           ))}
         </div>
       </div>
+
+      <p className="text-sm text-[var(--text-secondary)]">
+        全{tasks.length}件中{filtered.length}件表示
+      </p>
 
       <div className="space-y-2">
         {filtered.map((task) => {
@@ -207,7 +213,7 @@ function TasksPageInner() {
                 setSelectedTask(task); setOutputExpanded(false); setCopied(false); setTracesOpen(false);
                 apiFetch(`/api/traces?target_id=${task.id}`).then(r => r.ok ? r.json() : {traces:[]}).then(d => setTraces(d.traces || [])).catch(() => setTraces([]));
               }}
-              className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3 hover:border-[var(--accent-purple)]/50 transition-colors"
+              className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-4 sm:py-3 min-h-[56px] hover:border-[var(--accent-purple)]/50 active:bg-[var(--bg-primary)] transition-colors"
             >
               <div className="flex items-center gap-3 min-w-0">
                 <Icon className={`h-5 w-5 flex-shrink-0 ${cfg.color} ${uiStatus === "running" ? "animate-spin" : ""}`} />
@@ -270,7 +276,8 @@ function TasksPageInner() {
                     <button
                       onTouchEnd={(e) => { e.preventDefault(); setSelectedTask(null); }}
                       onClick={() => setSelectedTask(null)}
-                      className="text-[var(--text-secondary)] hover:text-white p-2 -mr-2"
+                      aria-label="閉じる"
+                      className="text-[var(--text-secondary)] hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center -mr-2"
                     >
                       <XCircle className="h-5 w-5" />
                     </button>

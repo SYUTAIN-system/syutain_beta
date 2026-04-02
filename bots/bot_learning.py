@@ -159,6 +159,67 @@ def detect_immediate_instruction(message: str) -> dict | None:
     return None
 
 
+def detect_correction(message: str) -> dict | None:
+    """ユーザーの訂正パターンを検出し、即座にpersona_memoryに保存すべき内容を返す。
+    Returns: {"category": "correction", "content": str} or None
+    """
+    import re
+    correction_patterns = [
+        r"(.{2,50}?)(?:違う|そうじゃない|間違い|修正して|それは違う|訂正)",
+        r"(?:違う|そうじゃない|間違い|修正して|それは違う|訂正)(.{2,50})",
+    ]
+    for pattern in correction_patterns:
+        match = re.search(pattern, message)
+        if match:
+            return {"category": "correction", "content": match.group(0).strip()}
+    return None
+
+
+async def save_immediate_correction(message: str) -> bool:
+    """訂正パターンを検出し、即座にpersona_memoryに高重要度で保存する。
+    Returns: True if saved, False otherwise
+    """
+    correction = detect_correction(message)
+    if not correction:
+        return False
+
+    try:
+        from tools.db_pool import get_connection
+        content = correction["content"]
+        if len(content) < 5:
+            return False
+
+        async with get_connection() as conn:
+            # 重複チェック
+            exists = await conn.fetchval(
+                "SELECT COUNT(*) FROM persona_memory WHERE content = $1",
+                content,
+            )
+            if exists > 0:
+                return False
+
+            new_id = await conn.fetchval(
+                """INSERT INTO persona_memory (category, content, reasoning, importance)
+                   VALUES ($1, $2, $3, $4) RETURNING id""",
+                "correction",
+                content,
+                "Discord対話から即座に検出された訂正指示",
+                0.9,
+            )
+            logger.info(f"即時訂正保存: [correction] {content[:50]}")
+            if new_id:
+                try:
+                    from tools.embedding_tools import embed_and_store_persona
+                    import asyncio
+                    asyncio.create_task(embed_and_store_persona(new_id, content))
+                except Exception:
+                    pass
+            return True
+    except Exception as e:
+        logger.warning(f"即時訂正保存失敗: {e}")
+        return False
+
+
 async def run_chat_learning(hours: int = 1) -> dict:
     """対話学習の実行（スケジューラーから呼ばれる）"""
     learnings = await extract_learnings_from_recent_chat(hours)

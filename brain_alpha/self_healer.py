@@ -72,7 +72,13 @@ def _ssh_exec(ip: str, cmd: str, timeout: int = 15) -> tuple[bool, str]:
 
 
 async def _update_node_state(conn, node: str, state: str, reason: str, changed_by: str = "self_healer"):
-    """node_stateを更新"""
+    """node_stateを更新（手動設定されたノードは上書きしない）"""
+    # manual/web_uiで設定されたwin11/maintenance/offlineは自動上書きしない
+    current = await conn.fetchrow(
+        "SELECT state, changed_by FROM node_state WHERE node_name = $1", node
+    )
+    if current and current["state"] in ("win11", "maintenance", "offline") and current.get("changed_by") in ("manual", "web_ui"):
+        return  # 手動設定を尊重
     await conn.execute(
         """UPDATE node_state SET state = $1, reason = $2, changed_by = $3, changed_at = NOW()
            WHERE node_name = $4""",
@@ -233,12 +239,16 @@ async def _check_alpha_services(conn, fixes: list) -> str:
             status = "degraded"
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.fastapi"], capture_output=True, timeout=10)
-            # 修復後検証（5秒待って再チェック）
+            # 修復後検証（段階的リトライ: 5s→10s→15s）
             import asyncio as _aio
-            await _aio.sleep(5)
-            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                                     "http://localhost:8000/health"], capture_output=True, text=True, timeout=5)
-            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            fix_result = "failed"
+            for wait in (5, 10, 15):
+                await _aio.sleep(wait)
+                verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                         "http://localhost:8000/health"], capture_output=True, text=True, timeout=5)
+                if verify.stdout.strip() == "200":
+                    fix_result = "verified"
+                    break
             await _log_fix(conn, "fastapi_down", "HTTP応答なし", "launchctl_restart", fix_result)
             fixes.append(f"FastAPI再起動({fix_result})")
             if fix_result == "verified":
@@ -255,10 +265,14 @@ async def _check_alpha_services(conn, fixes: list) -> str:
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.nextjs"], capture_output=True, timeout=10)
             import asyncio as _aio
-            await _aio.sleep(5)
-            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                                     "http://localhost:3000/"], capture_output=True, text=True, timeout=5)
-            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            fix_result = "failed"
+            for wait in (5, 10, 15):
+                await _aio.sleep(wait)
+                verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                         "http://localhost:3000/"], capture_output=True, text=True, timeout=5)
+                if verify.stdout.strip() == "200":
+                    fix_result = "verified"
+                    break
             await _log_fix(conn, "nextjs_down", "HTTP応答なし", "launchctl_restart", fix_result)
             fixes.append(f"Next.js再起動({fix_result})")
             if fix_result == "verified":
@@ -275,10 +289,14 @@ async def _check_alpha_services(conn, fixes: list) -> str:
             subprocess.run(["launchctl", "kickstart", "-k",
                             f"gui/{os.getuid()}/com.syutain.nats"], capture_output=True, timeout=10)
             import asyncio as _aio
-            await _aio.sleep(3)
-            verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                                     "http://localhost:8222/varz"], capture_output=True, text=True, timeout=5)
-            fix_result = "verified" if verify.stdout.strip() == "200" else "failed"
+            fix_result = "failed"
+            for wait in (5, 10, 15):
+                await _aio.sleep(wait)
+                verify = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                         "http://localhost:8222/varz"], capture_output=True, text=True, timeout=5)
+                if verify.stdout.strip() == "200":
+                    fix_result = "verified"
+                    break
             await _log_fix(conn, "nats_down", "監視ポート応答なし", "launchctl_restart", fix_result)
             fixes.append(f"NATS再起動({fix_result})")
             if fix_result == "verified":
@@ -297,10 +315,15 @@ async def _check_remote_services(conn, node: str, ip: str, fixes: list) -> str:
     ok, out = _ssh_exec(ip, "curl -s -o /dev/null -w '%{http_code}' http://localhost:11434/api/tags", timeout=10)
     if not ok or "200" not in out:
         status = "degraded"
-        # Ollama再起動
         _ssh_exec(ip, "sudo systemctl restart ollama", timeout=15)
-        await _log_fix(conn, f"ollama_down_{node}", "Ollama API応答なし", "systemctl_restart", "attempted")
-        fixes.append(f"{node.upper()} Ollama再起動")
+        # 再起動後に再検証
+        await asyncio.sleep(8)
+        ok2, out2 = _ssh_exec(ip, "curl -s -o /dev/null -w '%{http_code}' http://localhost:11434/api/tags", timeout=10)
+        fix_result = "verified" if ok2 and "200" in (out2 or "") else "failed"
+        await _log_fix(conn, f"ollama_down_{node}", "Ollama API応答なし", "systemctl_restart", fix_result)
+        fixes.append(f"{node.upper()} Ollama再起動({fix_result})")
+        if fix_result == "verified":
+            status = "healthy"
 
     # Workerチェック
     ok, out = _ssh_exec(ip, "systemctl is-active syutain-worker-*", timeout=10)
@@ -308,8 +331,13 @@ async def _check_remote_services(conn, node: str, ip: str, fixes: list) -> str:
         status = "degraded"
         _ssh_exec(ip, "sudo systemctl restart syutain-worker-alpha.service 2>/dev/null; "
                       "sudo systemctl restart syutain-worker.service 2>/dev/null", timeout=15)
-        await _log_fix(conn, f"worker_down_{node}", "ワーカー非稼働", "systemctl_restart", "attempted")
-        fixes.append(f"{node.upper()} Worker再起動")
+        await asyncio.sleep(5)
+        ok2, out2 = _ssh_exec(ip, "systemctl is-active syutain-worker-*", timeout=10)
+        fix_result = "verified" if ok2 and "active" in (out2 or "") else "failed"
+        await _log_fix(conn, f"worker_down_{node}", "ワーカー非稼働", "systemctl_restart", fix_result)
+        fixes.append(f"{node.upper()} Worker再起動({fix_result})")
+        if fix_result == "verified":
+            status = "healthy"
 
     return status
 

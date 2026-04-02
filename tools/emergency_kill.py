@@ -175,7 +175,7 @@ class EmergencyKill:
             }
 
     def _trigger_kill(self, goal_id: str, reason: str, condition: str, details: dict) -> dict:
-        """Killを発動し、ログに記録＋Discord通知（ゴール単位）"""
+        """Killを発動し、ログに記録＋Discord通知＋失敗記憶（ゴール単位）"""
         self._killed_goals.add(goal_id)
         self._kill_reasons[goal_id] = reason
 
@@ -191,13 +191,30 @@ class EmergencyKill:
         try:
             import asyncio
             from tools.discord_notify import notify_emergency_kill
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(notify_emergency_kill(
-                    reason, goal_id,
-                    details.get("step_count", 0),
-                    details.get("cost_jpy", 0.0),
-                ))
+            loop = asyncio.get_running_loop()
+            loop.create_task(notify_emergency_kill(
+                reason, goal_id,
+                details.get("step_count", 0),
+                details.get("cost_jpy", 0.0),
+            ))
+        except RuntimeError:
+            pass  # イベントループが未起動
+        except Exception:
+            pass
+
+        # 失敗記憶に記録（Harness Engineering）
+        try:
+            import asyncio
+            from tools.failure_memory import record_failure
+            loop = asyncio.get_running_loop()
+            loop.create_task(record_failure(
+                failure_type="emergency_kill",
+                error_message=reason,
+                context=full_details,
+                task_type=condition,
+            ))
+        except RuntimeError:
+            pass  # イベントループが未起動
         except Exception:
             pass
 

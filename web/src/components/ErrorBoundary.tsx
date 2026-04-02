@@ -22,8 +22,9 @@ export default class ErrorBoundary extends React.Component<Props, State> {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error("ErrorBoundary caught:", error, info.componentStack);
+  componentDidCatch(_error: Error, _info: React.ErrorInfo) {
+    // Error state is already captured in getDerivedStateFromError
+    // Production: errors are displayed in the fallback UI
   }
 
   render() {
@@ -42,7 +43,7 @@ export default class ErrorBoundary extends React.Component<Props, State> {
               this.setState({ hasError: false, error: null });
               window.location.reload();
             }}
-            className="rounded-lg bg-[var(--accent-purple)] px-4 py-2 text-sm text-white hover:bg-[var(--accent-purple)]/80 transition-colors"
+            className="rounded-lg bg-[var(--accent-purple)] px-6 py-3 text-sm text-white hover:bg-[var(--accent-purple)]/80 active:bg-[var(--accent-purple)]/60 transition-colors min-h-[44px]"
           >
             再読み込み
           </button>

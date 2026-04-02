@@ -17,8 +17,10 @@ import json
 import signal
 import asyncio
 import logging
+import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
+from pathlib import Path
 
 import httpx
 import psutil
@@ -49,6 +51,8 @@ NODE_ROLES = {
         "agents": ["browser_agent", "computer_use_agent"],
         "subscriptions": [
             "task.assign.bravo",
+            "req.task.bravo",
+            "agent.status.bravo",
             # browser.action.bravo と computer.action.bravo は
             # BrowserAgent / ComputerUseAgent が自前でsubscribeするため
             # ここには含めない（二重subscribeでメッセージ競合を防止）
@@ -59,6 +63,8 @@ NODE_ROLES = {
         "agents": [],
         "subscriptions": [
             "task.assign.charlie",
+            "req.task.charlie",
+            "agent.status.charlie",
         ],
     },
     "delta": {
@@ -66,6 +72,8 @@ NODE_ROLES = {
         "agents": ["monitor_agent", "info_collector"],
         "subscriptions": [
             "task.assign.delta",
+            "req.task.delta",
+            "agent.status.delta",
             "monitor.request.delta",
             "intel.collect.delta",
         ],
@@ -82,6 +90,7 @@ class Worker:
         self._nats_client = None
         self._agents = {}
         self._running = False
+        self._heartbeat_task = None
 
     async def start(self):
         """ワーカーを起動"""
@@ -121,7 +130,7 @@ class Worker:
 
         # ハートビートループ開始
         self._running = True
-        asyncio.create_task(self._heartbeat_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
         logger.info(f"ワーカー '{self.node}' 起動完了。タスク待機中...")
 
@@ -213,6 +222,26 @@ class Worker:
             subject = msg.subject
             logger.info(f"タスク受信: {subject}")
 
+            # agent.status.{node}: Capability Audit応答
+            if subject.startswith("agent.status."):
+                result = {
+                    "node": self.node,
+                    "status": "healthy",
+                    "agents": list(self._agents.keys()),
+                    "cpu_percent": psutil.cpu_percent(interval=None),
+                    "memory_percent": psutil.virtual_memory().percent,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                gpu = self._get_gpu_info()
+                if gpu:
+                    result["gpu"] = gpu
+                if msg.reply:
+                    await self._nats_client.nc.publish(
+                        msg.reply,
+                        json.dumps(result, default=str).encode(),
+                    )
+                return
+
             # タスクタイプに基づいてディスパッチ
             task_type = data.get("type", "unknown")
 
@@ -281,15 +310,57 @@ class Worker:
                 result = {"status": "unhandled", "task_type": task_type}
                 logger.warning(f"未対応タスクタイプ: {task_type}")
 
-            # リプライ
+            # タスク結果をagent_memoryに記録
+            self._save_agent_memory(task_type, result)
+
+            # リプライ（NATSペイロード上限1MBを超えないよう切り詰め）
             if msg.reply:
+                reply_bytes = json.dumps(result, default=str).encode()
+                if len(reply_bytes) > 900_000:
+                    # outputを切り詰めて再シリアライズ
+                    truncated = dict(result)
+                    if "output" in truncated and isinstance(truncated["output"], (str, dict)):
+                        out = truncated["output"]
+                        if isinstance(out, dict) and "text" in out:
+                            out["text"] = out["text"][:50_000] + "...(truncated)"
+                        elif isinstance(out, str):
+                            truncated["output"] = out[:50_000] + "...(truncated)"
+                    truncated["_truncated"] = True
+                    reply_bytes = json.dumps(truncated, default=str).encode()
+                    logger.warning(f"リプライペイロードを切り詰め: {len(reply_bytes)} bytes")
                 await self._nats_client.nc.publish(
                     msg.reply,
-                    json.dumps(result, default=str).encode(),
+                    reply_bytes,
                 )
 
         except Exception as e:
             logger.error(f"メッセージ処理例外: {e}")
+
+    def _save_agent_memory(self, task_type: str, result: dict):
+        """タスク結果をローカルSQLite agent_memoryに記録"""
+        try:
+            db_path = Path(f"data/local_{self.node}.db")
+            if not db_path.exists():
+                return
+            status = result.get("status", "unknown")
+            # エラーは error 型、成功は task_result 型として記録
+            if status == "error":
+                memory_type = "error"
+                content = f"[{task_type}] {result.get('error', 'unknown error')}"[:500]
+                importance = 0.7
+            else:
+                memory_type = "task_result"
+                content = f"[{task_type}] status={status}"[:500]
+                importance = 0.4
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "INSERT INTO agent_memory (agent_name, memory_type, content, importance) VALUES (?, ?, ?, ?)",
+                (self.node, memory_type, content, importance),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass  # メモリ記録失敗は無視
 
     @staticmethod
     def _get_gpu_info() -> dict | None:
@@ -323,7 +394,7 @@ class Worker:
                         "agents": list(self._agents.keys()),
                         "cpu_percent": psutil.cpu_percent(interval=None),
                         "memory_percent": psutil.virtual_memory().percent,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                     gpu = self._get_gpu_info()
                     if gpu:
@@ -340,6 +411,15 @@ class Worker:
         """ワーカーを停止"""
         logger.info(f"ワーカー '{self.node}' 停止中...")
         self._running = False
+
+        # ハートビートタスクをキャンセル
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("ハートビートタスク停止完了")
 
         # エージェント終了
         for name, agent in self._agents.items():

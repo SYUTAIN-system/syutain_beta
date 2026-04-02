@@ -235,7 +235,7 @@ async def consolidate_memories(days: int = 7) -> dict:
                    FROM brain_alpha_session
                    WHERE created_at < $1
                      AND summary IS NOT NULL
-                     AND summary NOT LIKE '%%[compressed]%%'
+                     AND summary NOT LIKE '%[compressed]%'
                    ORDER BY created_at ASC""",
                 cutoff,
             )

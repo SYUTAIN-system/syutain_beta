@@ -80,6 +80,7 @@ export default function AgentOpsPage() {
     summary: Record<string, number>;
   } | null>(null);
   const [goalLoading, setGoalLoading] = useState(false);
+  const [recentlyCompletedGoals, setRecentlyCompletedGoals] = useState<{ id: string; description: string; completed_at: string }[]>([]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -127,6 +128,10 @@ export default function AgentOpsPage() {
         if (eventsRes && eventsRes.ok) {
           const evJson = await eventsRes.json();
           setEvents(evJson.events ?? []);
+        }
+
+        if (opsJson?.recently_completed_goals) {
+          setRecentlyCompletedGoals(opsJson.recently_completed_goals);
         }
 
         setData({
@@ -393,6 +398,34 @@ export default function AgentOpsPage() {
           )}
         </div>
       </div>
+
+      {/* Recently Completed Goals */}
+      {recentlyCompletedGoals.length > 0 && (
+        <div>
+          <h2 className="mb-3 text-lg font-semibold">最近完了したゴール</h2>
+          <div className="space-y-2">
+            {recentlyCompletedGoals.map((goal) => (
+              <div
+                key={goal.id}
+                onClick={() => openGoalDetail(goal.id)}
+                className="cursor-pointer rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3 hover:border-[var(--accent-green)]/50 transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{goal.description}</p>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      {goal.id} &middot; {goal.completed_at ? new Date(goal.completed_at).toLocaleString("ja-JP") : ""}
+                    </p>
+                  </div>
+                  <span className="flex-shrink-0 rounded-full bg-[var(--accent-green)]/10 px-2.5 py-0.5 text-xs font-medium text-[var(--accent-green)]">
+                    完了
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Event Log Stream */}
       <div>

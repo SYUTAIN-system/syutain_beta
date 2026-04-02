@@ -184,6 +184,15 @@ class LoopGuard:
         if action_key:
             count = state.retry_counts.get(action_key, 0) + 1
             state.retry_counts[action_key] = count
+            if count > MAX_RETRIES_PER_ACTION and count < 3:
+                # 2回超→別方式へ切替
+                return {
+                    "allowed": False,
+                    "layer_triggered": 1,
+                    "layer_name": "retry_budget",
+                    "action": "SWITCH_METHOD",
+                    "details": f"同一アクション'{action_key}'の再試行{count}回目（上限{MAX_RETRIES_PER_ACTION}回）→別方式へ切替",
+                }
             if count >= 3:
                 # CLAUDE.md ルール4: 3回繰り返し→エスカレーション
                 return {
@@ -192,14 +201,6 @@ class LoopGuard:
                     "layer_name": "retry_budget_escalation",
                     "action": "ESCALATE",
                     "details": f"同一アクション'{action_key}'が{count}回繰り返し（ルール4: 3回以上→エスカレーション）",
-                }
-            if count > MAX_RETRIES_PER_ACTION:
-                return {
-                    "allowed": False,
-                    "layer_triggered": 1,
-                    "layer_name": "retry_budget",
-                    "action": "SWITCH_METHOD",
-                    "details": f"同一アクション'{action_key}'の再試行{count}回目（上限{MAX_RETRIES_PER_ACTION}回）→別方式へ切替",
                 }
         return {"allowed": True}
 

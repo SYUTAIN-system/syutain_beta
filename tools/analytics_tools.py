@@ -17,8 +17,8 @@ load_dotenv()
 
 logger = logging.getLogger("syutain.analytics_tools")
 
-# 戦略ファイルパス
-STRATEGY_DIR = Path(os.getenv("STRATEGY_DIR", "strategy"))
+# 戦略ファイルパス（絶対パスで安全に解決）
+STRATEGY_DIR = Path(os.getenv("STRATEGY_DIR", "")) or Path(__file__).resolve().parent.parent / "strategy"
 
 
 # ===== 戦略ファイル読み込み（CLAUDE.mdルール10）=====

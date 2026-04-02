@@ -1,0 +1,51 @@
+# SYUTAINβ アフィリエイトリンク設定
+# URLはプレースホルダー。実際のアフィリエイトURLに差し替えてください。
+
+# rate_limit_pct: 1日の投稿のうちアフィリエイトリンクを挿入する最大割合(%)
+rate_limit_pct: 30
+
+programs:
+  - service_name: "Claude"
+    keywords: ["Claude", "claude", "Anthropic", "anthropic", "クロード"]
+    affiliate_url: "https://affiliate.example.com/claude"
+    priority: 9
+
+  - service_name: "ChatGPT"
+    keywords: ["ChatGPT", "chatgpt", "OpenAI", "openai", "GPT-4", "GPT4", "gpt4", "GPT-4o", "o3"]
+    affiliate_url: "https://affiliate.example.com/chatgpt"
+    priority: 8
+
+  - service_name: "Cursor"
+    keywords: ["Cursor", "cursor", "カーソル"]
+    affiliate_url: "https://affiliate.example.com/cursor"
+    priority: 8
+
+  - service_name: "Midjourney"
+    keywords: ["Midjourney", "midjourney", "ミッドジャーニー", "MJ"]
+    affiliate_url: "https://affiliate.example.com/midjourney"
+    priority: 7
+
+  - service_name: "Notion AI"
+    keywords: ["Notion AI", "Notion", "notion", "ノーション"]
+    affiliate_url: "https://affiliate.example.com/notion-ai"
+    priority: 6
+
+  - service_name: "GitHub Copilot"
+    keywords: ["Copilot", "copilot", "コパイロット"]
+    affiliate_url: "https://affiliate.example.com/github-copilot"
+    priority: 7
+
+  - service_name: "Perplexity"
+    keywords: ["Perplexity", "perplexity", "パープレキシティ"]
+    affiliate_url: "https://affiliate.example.com/perplexity"
+    priority: 6
+
+  - service_name: "Claude Code"
+    keywords: ["Claude Code", "claude code", "クロードコード"]
+    affiliate_url: "https://affiliate.example.com/claude-code"
+    priority: 9
+
+  - service_name: "Gemini"
+    keywords: ["Gemini", "gemini", "ジェミニ"]
+    affiliate_url: "https://affiliate.example.com/gemini"
+    priority: 6

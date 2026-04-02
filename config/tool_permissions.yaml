@@ -1,0 +1,50 @@
+# SYUTAINβ ツール権限レベル定義
+# read: 副作用なし（情報取得のみ）
+# write: データ変更あり
+# dangerous: 人間承認が必要（Tier 1）
+
+permissions:
+  read:
+    - info_pipeline
+    - tavily_client
+    - jina_client
+    - embedding_tools
+    - api_quota_monitor
+    - engagement_analyzer
+    - trend_detector
+    - buzz_account_analyzer
+    - competitive_analyzer
+    - overseas_trend_detector
+    - analytics_tools
+    - revenue_researcher
+    - agent_context
+    - intel_digest
+    - intel_reviewer
+    - semantic_cache
+    - budget_guard
+    - model_registry
+    - pw_extract
+  write:
+    - social_tools
+    - content_tools
+    - note_publisher
+    - failure_memory
+    - episodic_memory
+    - event_logger
+    - content_multiplier
+    - documentary_generator
+    - keyword_generator
+    - two_stage_refiner
+    - affiliate_manager
+    - affiliate_inserter
+    - edit_tracker
+    - storage_tools
+    - memory_consolidator
+  dangerous:
+    - commerce_tools
+    - crypto_tools
+    - browser_ops
+    - emergency_kill
+    - payment_manager
+    - x402_protocol
+    - computer_use_tools

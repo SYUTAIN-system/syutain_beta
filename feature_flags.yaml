@@ -1,4 +1,4 @@
-version: "v25"
+version: "v28"
 
 # Phase 1（初期起動）— V25: 全機能有効
 web_ui: true
@@ -38,7 +38,7 @@ delta_inference_mode: "auto"       # auto=GPU優先でCPUフォールバック /
 bluesky_auto_post: true              # ドラフト生成+承認キュー (8h間隔)
 x_auto_post: true                    # X API Pay-Per-Use ($10投入済み)
 threads_auto_post: true              # Threads Graph API (アクセストークン取得済み)
-note_auto_publish: false             # note APIなし（手動ペースト）
+note_auto_publish: true              # BRAVOブラウザ経由で自動公開
 booth_auto_publish: false            # 承認キュー経由で手動出品
 crypto_auto_trading: false           # 価格蓄積のみ、取引は未開始
 stripe_integration: false            # 未設定

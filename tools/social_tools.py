@@ -44,6 +44,28 @@ X_SHIMAHARA_ACCESS_TOKEN_SECRET = os.getenv("X_SHIMAHARA_ACCESS_TOKEN_SECRET", "
 BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "")
 BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD", "")
 
+# Blueskyセッションキャッシュ（2時間有効）
+_bsky_session = {"access_jwt": "", "did": "", "expires_at": 0.0}
+
+
+async def _get_bluesky_session() -> tuple:
+    """Blueskyセッションをキャッシュ付きで取得（2時間有効）"""
+    import time as _time
+    if _bsky_session["access_jwt"] and _time.time() < _bsky_session["expires_at"]:
+        return _bsky_session["access_jwt"], _bsky_session["did"]
+    async with httpx.AsyncClient(timeout=15) as client:
+        auth_resp = await client.post(
+            "https://bsky.social/xrpc/com.atproto.server.createSession",
+            json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_APP_PASSWORD},
+        )
+        auth_resp.raise_for_status()
+        auth_data = auth_resp.json()
+        _bsky_session["access_jwt"] = auth_data["accessJwt"]
+        _bsky_session["did"] = auth_data["did"]
+        _bsky_session["expires_at"] = _time.time() + 7000  # ~2時間
+        return auth_data["accessJwt"], auth_data["did"]
+
+
 # Threads (Meta Graph API)
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "")
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "")
@@ -175,20 +197,15 @@ async def execute_approved_x(content: str, account: str = "syutain") -> dict:
     """承認済みX投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）"""
     creds = _get_x_credentials(account)
 
-    # 280文字制限チェック（CJK=2, ASCII=1でカウント）
-    x_len = _count_x_chars(content)
-    if x_len > 280:
-        logger.warning(f"X投稿: 280文字超過({x_len}加重文字)。切り詰め")
-        # 切り詰め: 加重カウントで277以内に収める
-        trimmed = []
-        cur = 0
-        for ch in content:
-            w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
-            if cur + w > 277:
-                break
-            trimmed.append(ch)
-            cur += w
-        content = "".join(trimmed) + "..."
+    # 日本語150字制限（文が途中で切れないよう文末で切る）
+    if len(content) > 150:
+        logger.warning(f"X投稿: 150字超過({len(content)}字)。文末で切り詰め")
+        # 文末（。！？…）で切れるポイントを探す
+        candidates = [i + 1 for i, ch in enumerate(content[:150]) if ch in "。！？…\n"]
+        if candidates and candidates[-1] >= 75:
+            content = content[:candidates[-1]].rstrip()
+        else:
+            content = content[:149].rstrip() + "…"
 
     # NGワードチェック
     try:
@@ -288,15 +305,8 @@ async def post_to_bluesky(content: str, skip_approval: bool = False) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # セッション作成
-            session_resp = await client.post(
-                "https://bsky.social/xrpc/com.atproto.server.createSession",
-                json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_APP_PASSWORD},
-            )
-            session_resp.raise_for_status()
-            session = session_resp.json()
-            access_jwt = session["accessJwt"]
-            did = session["did"]
+            # セッションキャッシュ利用（2時間有効）
+            access_jwt, did = await _get_bluesky_session()
 
             # 投稿
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -357,18 +367,14 @@ async def execute_approved_bluesky(content: str) -> dict:
         pass
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            session_resp = await client.post(
-                "https://bsky.social/xrpc/com.atproto.server.createSession",
-                json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_APP_PASSWORD},
-            )
-            session_resp.raise_for_status()
-            session = session_resp.json()
+            # セッションキャッシュ利用（2時間有効）
+            access_jwt, did = await _get_bluesky_session()
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             post_resp = await client.post(
                 "https://bsky.social/xrpc/com.atproto.repo.createRecord",
-                headers={"Authorization": f"Bearer {session['accessJwt']}"},
+                headers={"Authorization": f"Bearer {access_jwt}"},
                 json={
-                    "repo": session["did"],
+                    "repo": did,
                     "collection": "app.bsky.feed.post",
                     "record": {"$type": "app.bsky.feed.post", "text": content, "createdAt": now},
                 },
@@ -406,17 +412,13 @@ async def get_bluesky_engagement(post_uri: str) -> dict:
         return {"error": "credentials_missing"}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            session_resp = await client.post(
-                "https://bsky.social/xrpc/com.atproto.server.createSession",
-                json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_APP_PASSWORD},
-            )
-            session_resp.raise_for_status()
-            session = session_resp.json()
+            # セッションキャッシュ利用
+            access_jwt, _ = await _get_bluesky_session()
 
             thread_resp = await client.get(
                 "https://bsky.social/xrpc/app.bsky.feed.getPostThread",
                 params={"uri": post_uri, "depth": 0},
-                headers={"Authorization": f"Bearer {session['accessJwt']}"},
+                headers={"Authorization": f"Bearer {access_jwt}"},
             )
             thread_resp.raise_for_status()
             thread = thread_resp.json()
@@ -634,16 +636,12 @@ async def cross_post_bluesky_to_x(limit: int = 3) -> list:
                     continue
 
                 # 280文字に調整（CJK=2, ASCII=1でカウント）
-                if _count_x_chars(content) > 280:
-                    trimmed = []
-                    cur = 0
-                    for ch in content:
-                        w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
-                        if cur + w > 277:
-                            break
-                        trimmed.append(ch)
-                        cur += w
-                    content = "".join(trimmed) + "..."
+                if len(content) > 150:
+                    candidates = [i + 1 for i, ch in enumerate(content[:150]) if ch in "。！？…\n"]
+                    if candidates and candidates[-1] >= 75:
+                        content = content[:candidates[-1]].rstrip()
+                    else:
+                        content = content[:149].rstrip() + "…"
 
                 # 承認キューに投入
                 import json

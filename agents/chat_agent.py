@@ -18,7 +18,6 @@ from typing import Optional, AsyncIterator
 
 from tools.db_pool import get_connection
 from dotenv import load_dotenv
-from tools.db_pool import get_connection
 
 from tools.llm_router import choose_best_model_v6, call_llm, call_llm_stream
 from tools.budget_guard import get_budget_guard
@@ -688,6 +687,11 @@ class ChatAgent:
                     status_parts.append(f"実行中タスク: {running_tasks}件")
                     status_parts.append(f"承認待ち: {pending_approvals}件")
 
+                    # ノード状態（クイックステータス追加）
+                    system_status = await self._get_system_status_brief()
+                    if system_status:
+                        status_parts.append(system_status)
+
         except Exception as e:
             logger.error(f"状態取得エラー: {e}")
             status_parts.append("状態取得中にエラーが発生しました")
@@ -832,14 +836,14 @@ class ChatAgent:
             from tools.nats_client import get_nats_client
             nats = await get_nats_client()
             node_names = ["alpha", "bravo", "charlie", "delta"]
-            node_statuses = []
-            for n in node_names:
-                try:
-                    resp = await nats.request(f"node.{n}.ping", {}, timeout=3.0)
-                    node_statuses.append(f"{n.upper()}:🟢")
-                except Exception:
-                    node_statuses.append(f"{n.upper()}:🔴")
-            parts.append(f"🖥️ ノード: {' '.join(node_statuses)}")
+            # 並列pingで最大12秒→3秒に短縮
+            ping_tasks = [nats.request(f"node.{n}.ping", {}, timeout=3.0) for n in node_names]
+            results = await asyncio.gather(*ping_tasks, return_exceptions=True)
+            node_statuses = [
+                f"{n.upper()}:\U0001f7e2" if not isinstance(r, Exception) else f"{n.upper()}:\U0001f534"
+                for n, r in zip(node_names, results)
+            ]
+            parts.append(f"\U0001f5a5\ufe0f ノード: {' '.join(node_statuses)}")
         except Exception:
             pass
 

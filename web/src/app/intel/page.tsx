@@ -134,7 +134,7 @@ export default function IntelPage() {
                   </div>
                   <div className="min-w-0">
                     <p className="font-medium truncate">
-                      {item.url ? (
+                      {item.url && (item.url.startsWith("http://") || item.url.startsWith("https://")) ? (
                         <a
                           href={item.url}
                           target="_blank"

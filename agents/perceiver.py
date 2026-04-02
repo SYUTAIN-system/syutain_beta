@@ -8,7 +8,6 @@ SYUTAINβ V25 認識エンジン（Perceiver）— Step 8
 
 import os
 import json
-import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
@@ -19,10 +18,35 @@ from agents.capability_audit import get_capability_audit
 from tools.nats_client import get_nats_client
 from tools.budget_guard import get_budget_guard
 from tools.db_pool import get_connection
+from tools.llm_router import choose_best_model_v6, call_llm
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.perceiver")
+
+# コンテキスト圧縮の閾値（文字数）
+CONTEXT_MAX_CHARS = 8000
+
+# 圧縮対象外（絶対に圧縮してはいけないキー）
+NEVER_COMPRESS_KEYS = {
+    "budget", "approval_boundaries", "persona_context", "goal_id",
+    "raw_goal", "timestamp", "checklist",
+}
+
+# 圧縮優先度（低い数値ほど先に圧縮される）
+COMPRESS_PRIORITY = {
+    "agents_map": 1,          # 大きいが変化少ない → 最優先で圧縮
+    "market_context": 2,      # 古い情報 → 圧縮可
+    "previous_attempts": 3,   # 過去の試行 → 要約可
+    "strategy": 4,            # 戦略ファイル → 要約可
+    "session_memory": 5,      # 古いセッション記憶 → 要約可
+    "capability_snapshot": 6, # ノード情報 → 要約可
+    "intel_context": 7,       # インテリジェンス → 要約可
+    "mcp_tools_available": 8,
+    "api_availability": 9,
+    "browser_capability": 10,
+    "bravo_status": 11,
+}
 
 
 class Perceiver:
@@ -190,10 +214,25 @@ class Perceiver:
             perception["session_memory"] = []
             perception["checklist"]["session_memory_loaded"] = False
 
-        # 13. 直近の重要インテリジェンス（importance_score上位）
+        # 13. AGENTS.md — システム能力マップ（ノード/ツール/制約/障害パターン）
+        try:
+            agents_md_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), "AGENTS.md"
+            )
+            if os.path.isfile(agents_md_path):
+                with open(agents_md_path, "r", encoding="utf-8") as f:
+                    perception["agents_map"] = f.read()
+                perception["checklist"]["agents_map_loaded"] = True
+            else:
+                perception["checklist"]["agents_map_loaded"] = False
+        except Exception as e:
+            logger.warning(f"AGENTS.md読み込み失敗: {e}")
+            perception["checklist"]["agents_map_loaded"] = False
+
+        # 14. 直近の重要インテリジェンス（importance_score上位）
         try:
             from tools.agent_context import build_agent_context
-            intel_context = await build_agent_context("proposal_engine")
+            intel_context = await build_agent_context("perceiver")
             if intel_context:
                 perception["intel_context"] = intel_context
             perception["checklist"]["intel_context_loaded"] = bool(intel_context)
@@ -204,6 +243,12 @@ class Perceiver:
         ok_count = sum(1 for v in perception['checklist'].values() if v)
         total_count = len(perception['checklist'])
         logger.info(f"認識完了: {ok_count}/{total_count} チェック項目OK")
+
+        # コンテキスト圧縮（8000文字超過時にLLMで要約）
+        try:
+            perception = await self._compress_context(perception)
+        except Exception as e:
+            logger.warning(f"コンテキスト圧縮失敗（無視）: {e}")
 
         # 判断根拠トレース
         try:
@@ -217,6 +262,72 @@ class Perceiver:
         except Exception:
             pass
 
+        return perception
+
+    async def _compress_context(self, perception: dict) -> dict:
+        """コンテキスト圧縮: 総サイズが8000文字を超過した場合、
+        優先度の低いセクションをLLMで要約して圧縮する。
+
+        budget, approval_boundaries, persona_context は絶対に圧縮しない。
+        """
+        total = sum(len(str(v)) for v in perception.values())
+        if total <= CONTEXT_MAX_CHARS:
+            return perception
+
+        logger.info(f"コンテキスト圧縮開始: {total}文字 → 目標{CONTEXT_MAX_CHARS}文字")
+
+        # 圧縮対象を優先度順にソート
+        compressible = []
+        for key, value in perception.items():
+            if key in NEVER_COMPRESS_KEYS:
+                continue
+            size = len(str(value))
+            if size < 100:  # 小さいフィールドは圧縮不要
+                continue
+            priority = COMPRESS_PRIORITY.get(key, 50)
+            compressible.append((priority, key, size))
+        compressible.sort(key=lambda x: x[0])
+
+        # 圧縮用モデル選択（低品質・ローカル優先）
+        model_sel = choose_best_model_v6(
+            task_type="compression",
+            quality="low",
+            local_available=True,
+        )
+
+        current_total = total
+        for priority, key, original_size in compressible:
+            if current_total <= CONTEXT_MAX_CHARS:
+                break
+
+            # LLMで要約
+            try:
+                content_str = str(perception[key])
+                if len(content_str) > 4000:
+                    content_str = content_str[:4000]
+
+                result = await call_llm(
+                    prompt=(
+                        f"以下の「{key}」コンテキストを重要な情報を保持しつつ"
+                        f"200文字以内に要約してください。\n\n{content_str}"
+                    ),
+                    system_prompt="簡潔にJSON互換の要約を生成。重要な数値・ステータス・キー情報を保持。",
+                    model_selection=model_sel,
+                )
+                summary_text = result.get("text", "")
+                if summary_text and len(summary_text) < original_size:
+                    perception[key] = f"[compressed] {summary_text}"
+                    new_size = len(perception[key])
+                    current_total -= (original_size - new_size)
+                    logger.info(
+                        f"圧縮: {key} {original_size}→{new_size}文字 "
+                        f"(残り{current_total}文字)"
+                    )
+            except Exception as e:
+                logger.debug(f"コンテキスト圧縮失敗（{key}）: {e}")
+                continue
+
+        logger.info(f"コンテキスト圧縮完了: {total}→{current_total}文字")
         return perception
 
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):

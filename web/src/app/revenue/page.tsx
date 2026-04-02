@@ -63,7 +63,11 @@ export default function RevenuePage() {
   const [summary, setSummary] = useState<RevenueSummary | null>(null);
   const [records, setRecords] = useState<RevenueRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const [monthlyTarget, setMonthlyTarget] = useState<number | null>(null);
+  const [costData, setCostData] = useState<{ monthly_spent_jpy: number; daily_spent_jpy: number }>({ monthly_spent_jpy: 0, daily_spent_jpy: 0 });
 
   // Form state
   const [platform, setPlatform] = useState("");
@@ -74,19 +78,40 @@ export default function RevenuePage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [summaryRes, historyRes] = await Promise.all([
+      const [summaryRes, historyRes, settingsRes, budgetRes] = await Promise.all([
         apiFetch("/api/revenue/summary?days=30").catch(() => null),
         apiFetch("/api/revenue/history?limit=20").catch(() => null),
+        apiFetch("/api/settings").catch(() => null),
+        apiFetch("/api/budget/status").catch(() => null),
       ]);
       if (summaryRes && summaryRes.ok) {
-        setSummary(await summaryRes.json());
+        const summaryJson = await summaryRes.json();
+        setSummary(summaryJson);
+        if (summaryJson.monthly_target != null) {
+          setMonthlyTarget(summaryJson.monthly_target);
+        }
       }
       if (historyRes && historyRes.ok) {
         const data = await historyRes.json();
         setRecords(data.records ?? []);
       }
+      if (settingsRes && settingsRes.ok) {
+        const settingsJson = await settingsRes.json();
+        if (settingsJson.revenue_target != null) {
+          setMonthlyTarget(settingsJson.revenue_target);
+        } else if (settingsJson.monthly_revenue_target != null) {
+          setMonthlyTarget(settingsJson.monthly_revenue_target);
+        }
+      }
+      if (budgetRes && budgetRes.ok) {
+        const budgetJson = await budgetRes.json();
+        setCostData({
+          monthly_spent_jpy: budgetJson.monthly_spent_jpy ?? budgetJson.monthly_used_jpy ?? 0,
+          daily_spent_jpy: budgetJson.daily_spent_jpy ?? budgetJson.daily_used_jpy ?? 0,
+        });
+      }
     } catch {
-      // graceful fallback
+      setError("収益データの取得に失敗しました");
     } finally {
       setLoading(false);
     }
@@ -134,15 +159,13 @@ export default function RevenuePage() {
         await fetchData();
       }
     } catch {
-      // error handled silently
+      setError("売上の記録に失敗しました");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const TARGET = 1000000;
   const monthlyTotal = summary?.total_revenue ?? 0;
-  const progressPercent = Math.min((monthlyTotal / TARGET) * 100, 100);
 
   if (loading) {
     return (
@@ -154,13 +177,21 @@ export default function RevenuePage() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="flex items-center justify-between rounded-lg bg-[var(--accent-red)]/10 border border-[var(--accent-red)]/30 px-4 py-3">
+          <span className="text-sm text-[var(--accent-red)]">{error}</span>
+          <button onClick={() => setError(null)} className="min-h-[44px] min-w-[44px] flex items-center justify-center text-[var(--accent-red)]" aria-label="エラーを閉じる">
+            <span className="text-lg">&times;</span>
+          </button>
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <DollarSign className="h-6 w-6 text-[var(--accent-purple)]" />
         <h1 className="text-2xl font-bold">収益ダッシュボード</h1>
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
           <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
             <TrendingUp className="h-4 w-4" />
@@ -199,24 +230,45 @@ export default function RevenuePage() {
 
       {/* Revenue Target Progress */}
       <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-medium">月間目標: ¥1,000,000</p>
-          <p className="text-sm text-[var(--text-secondary)]">{progressPercent.toFixed(1)}%</p>
-        </div>
-        <div className="h-3 w-full rounded-full bg-[var(--bg-primary)]">
-          <div
-            className={`h-3 rounded-full transition-all ${
-              progressPercent >= 100
-                ? "bg-[var(--accent-green)]"
-                : progressPercent >= 50
-                ? "bg-[var(--accent-purple)]"
-                : "bg-[var(--accent-blue)]"
-            }`}
-            style={{ width: `${progressPercent}%` }}
-          />
-        </div>
-        <p className="mt-2 text-xs text-[var(--text-secondary)]">
-          ¥{monthlyTotal.toLocaleString("ja-JP")} / ¥1,000,000
+        {monthlyTarget != null && monthlyTarget > 0 ? (
+          <>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium">月間目標: ¥{monthlyTarget.toLocaleString("ja-JP")}</p>
+              <p className="text-sm text-[var(--text-secondary)]">{Math.min((monthlyTotal / monthlyTarget) * 100, 100).toFixed(1)}%</p>
+            </div>
+            <div className="h-3 w-full rounded-full bg-[var(--bg-primary)]">
+              <div
+                className={`h-3 rounded-full transition-all ${
+                  monthlyTotal >= monthlyTarget
+                    ? "bg-[var(--accent-green)]"
+                    : monthlyTotal >= monthlyTarget * 0.5
+                    ? "bg-[var(--accent-purple)]"
+                    : "bg-[var(--accent-blue)]"
+                }`}
+                style={{ width: `${Math.min((monthlyTotal / monthlyTarget) * 100, 100)}%` }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-[var(--text-secondary)]">
+              ¥{monthlyTotal.toLocaleString("ja-JP")} / ¥{monthlyTarget.toLocaleString("ja-JP")}
+            </p>
+          </>
+        ) : (
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium">月間売上: ¥{monthlyTotal.toLocaleString("ja-JP")}</p>
+            <span className="rounded-full bg-[var(--bg-primary)] px-2.5 py-0.5 text-xs text-[var(--text-secondary)]">目標未設定</span>
+          </div>
+        )}
+      </div>
+
+      {/* Task 5: Cost vs Revenue */}
+      <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
+        <p className="text-sm font-medium">
+          支出 <span className="text-[var(--accent-red)]">¥{costData.monthly_spent_jpy.toLocaleString("ja-JP")}</span>
+          {" / "}収益 <span className="text-[var(--accent-green)]">¥{monthlyTotal.toLocaleString("ja-JP")}</span>
+          {" = "}損益{" "}
+          <span className={monthlyTotal - costData.monthly_spent_jpy >= 0 ? "text-[var(--accent-green)]" : "text-[var(--accent-red)]"}>
+            ¥{(monthlyTotal - costData.monthly_spent_jpy).toLocaleString("ja-JP")}
+          </span>
         </p>
       </div>
 
@@ -231,7 +283,7 @@ export default function RevenuePage() {
             value={platform}
             onChange={(e) => setPlatform(e.target.value)}
             required
-            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm"
+            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px]"
           >
             <option value="">プラットフォーム</option>
             {PLATFORM_OPTIONS.map((p) => (
@@ -243,7 +295,7 @@ export default function RevenuePage() {
             onChange={(e) => setProductTitle(e.target.value)}
             required
             placeholder="商品名"
-            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm"
+            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px]"
           />
           <div>
             <input
@@ -256,7 +308,7 @@ export default function RevenuePage() {
               required
               min={1}
               placeholder="売上金額（円）"
-              className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm"
+              className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px]"
             />
           </div>
           <div className="flex gap-2">
@@ -267,7 +319,7 @@ export default function RevenuePage() {
                 type="number"
                 min={0}
                 placeholder="手数料（円）"
-                className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm"
+                className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px]"
               />
               <p className="mt-1 text-xs text-[var(--text-secondary)]">自動計算済み（手動変更可）</p>
             </div>
@@ -276,7 +328,7 @@ export default function RevenuePage() {
                 value={netRevenue}
                 readOnly
                 placeholder="純収益"
-                className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm opacity-70"
+                className="w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px] opacity-70"
               />
               <p className="mt-1 text-xs text-[var(--text-secondary)]">純収益（自動）</p>
             </div>
@@ -285,12 +337,12 @@ export default function RevenuePage() {
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="メモ（任意）"
-            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm sm:col-span-2"
+            className="rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 text-base sm:text-sm min-h-[44px] sm:col-span-2"
           />
           <button
             type="submit"
             disabled={submitting}
-            className="col-span-full rounded-md bg-[var(--accent-green)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent-green)]/80 disabled:opacity-50"
+            className="col-span-full rounded-md bg-[var(--accent-green)] px-4 py-3 text-base sm:text-sm font-medium text-white hover:bg-[var(--accent-green)]/80 active:bg-[var(--accent-green)]/60 disabled:opacity-50 min-h-[48px]"
           >
             {submitting ? "記録中..." : "売上を記録"}
           </button>
@@ -298,21 +350,21 @@ export default function RevenuePage() {
       </div>
 
       {/* Platform Breakdown */}
-      {summary && summary.platform_breakdown.length > 0 && (
+      {summary && summary.platform_breakdown && summary.platform_breakdown.length > 0 && (
         <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
           <h2 className="mb-3 text-lg font-semibold">プラットフォーム別（今月）</h2>
           <div className="space-y-2">
             {summary.platform_breakdown.map((p) => (
               <div
                 key={p.platform}
-                className="flex items-center justify-between rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2"
+                className="flex flex-col sm:flex-row sm:items-center justify-between rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3 gap-1"
               >
                 <span className="text-sm font-medium">{p.platform || "不明"}</span>
-                <div className="flex items-center gap-4 text-sm">
+                <div className="flex items-center gap-3 text-sm">
                   <span className="text-[var(--text-secondary)]">{p.count}件</span>
-                  <span className="font-bold">¥{p.revenue.toLocaleString("ja-JP")}</span>
+                  <span className="font-bold">&yen;{p.revenue.toLocaleString("ja-JP")}</span>
                   <span className="text-[var(--accent-green)]">
-                    (純 ¥{p.net_revenue.toLocaleString("ja-JP")})
+                    (純 &yen;{p.net_revenue.toLocaleString("ja-JP")})
                   </span>
                 </div>
               </div>

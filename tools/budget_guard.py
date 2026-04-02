@@ -43,6 +43,7 @@ class BudgetGuard:
         self._current_date: date = date.today()
         self._current_month: int = date.today().month
         self._initialized_from_db: bool = False
+        self._warn_logged_today: bool = False
 
     async def _load_from_db(self):
         """起動時にDB（llm_cost_log）から当日/当月の支出を復元"""
@@ -86,6 +87,7 @@ class BudgetGuard:
         if today != self._current_date:
             self._daily_spend_jpy = 0.0
             self._chat_spend_jpy = 0.0
+            self._warn_logged_today = False
             self._current_date = today
             logger.info(f"日次予算リセット: {today}")
         if today.month != self._current_month:
@@ -174,7 +176,12 @@ class BudgetGuard:
         if max_ratio >= ALERT_THRESHOLD_WARN:
             alert_level = "warn"
             msg = f"予算80%警告: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{self._monthly_spend_jpy:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
-            logger.warning(msg)
+            # 同じ警告を繰り返さない（1日1回のみlogger.warning）
+            if not getattr(self, '_warn_logged_today', False):
+                logger.warning(msg)
+                self._warn_logged_today = True
+            else:
+                logger.debug(msg)
         else:
             alert_level = "ok"
             msg = f"予算正常: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円"
@@ -219,7 +226,12 @@ class BudgetGuard:
         }
 
     async def record_chat_spend(self, amount_jpy: float, model: str = ""):
-        """チャット経由のAPI支出を記録（日次/月次にも加算）"""
+        """チャット経由のAPI支出を記録（日次/月次にも加算、予算チェック付き）"""
+        # 予算チェック（90%制限）
+        daily_pct = (self._daily_spend_jpy + amount_jpy) / self._daily_budget * 100
+        if daily_pct >= self._stop_pct:
+            logger.warning(f"チャット予算超過: 日次{daily_pct:.1f}%（停止閾値{self._stop_pct}%）")
+            return  # 加算しない
         self._chat_spend_jpy += amount_jpy
         self._daily_spend_jpy += amount_jpy
         self._monthly_spend_jpy += amount_jpy

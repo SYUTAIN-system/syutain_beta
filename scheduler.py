@@ -13,23 +13,28 @@ import os
 import sys
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ログ設定
+# ログ設定（RotatingFileHandler: 10MB x 5世代）
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+_log_formatter = logging.Formatter("%(asctime)s [SCHEDULER] %(name)s %(levelname)s: %(message)s")
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(_log_formatter)
+_file_handler = RotatingFileHandler(
+    f"{LOG_DIR}/scheduler.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_file_handler.setFormatter(_log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [SCHEDULER] %(name)s %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(f"{LOG_DIR}/scheduler.log"),
-    ],
+    handlers=[_stream_handler, _file_handler],
 )
 logger = logging.getLogger("syutain.scheduler")
 
@@ -168,6 +173,7 @@ class SyutainScheduler:
                 id="redispatch_orphan",
                 name="孤立タスク再ディスパッチ（5分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # SNS投稿49件/日 分割生成（4バッチ）
@@ -200,13 +206,34 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # 日次コンテンツ生成（09:30 JST）
+            # 日次コンテンツ生成 #1（07:30 JST — 海外トレンド先取り）
             self._scheduler.add_job(
-                self.generate_daily_content,
-                CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
-                id="daily_content",
-                name="日次コンテンツ生成（09:30）",
+                self.generate_daily_content_morning,
+                CronTrigger(hour=7, minute=30, timezone="Asia/Tokyo"),
+                id="daily_content_morning",
+                name="日次コンテンツ#1 海外トレンド先取り（07:30）",
                 replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # 日次コンテンツ生成 #2（12:00 JST — SYUTAINβ実データベース）
+            self._scheduler.add_job(
+                self.generate_daily_content_midday,
+                CronTrigger(hour=12, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_midday",
+                name="日次コンテンツ#2 実データベース（12:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # 日次コンテンツ生成 #3（18:00 JST — 自由テーマ）
+            self._scheduler.add_job(
+                self.generate_daily_content_evening,
+                CronTrigger(hour=18, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_evening",
+                name="日次コンテンツ#3 自由テーマ（18:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
             )
 
             # SYSTEM_STATE.md定期更新（1時間）
@@ -243,6 +270,7 @@ class SyutainScheduler:
                 id="crypto_price",
                 name="暗号通貨価格取得（30分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # コスト予測チェック（6時間間隔）
@@ -252,6 +280,7 @@ class SyutainScheduler:
                 id="cost_forecast",
                 name="コスト予測（6時間）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # エンゲージメント取得（12時間間隔、起動5分後に初回実行）
@@ -281,6 +310,15 @@ class SyutainScheduler:
                 name="Threadsエンゲージメント取得（12時間）",
                 replace_existing=True,
                 next_run_time=_eng_first_run + timedelta(minutes=2),
+            )
+
+            # エンゲージメント分析（毎日06:30）
+            self._scheduler.add_job(
+                self.daily_engagement_analysis,
+                CronTrigger(hour=6, minute=30),
+                id="daily_engagement_analysis",
+                name="エンゲージメント分析（毎日06:30）",
+                replace_existing=True,
             )
 
             # モデル品質キャッシュ更新（1時間間隔、起動1分後に初回実行）
@@ -347,13 +385,14 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # note記事ドラフト自動生成（23:45 JST）
+            # note記事ドラフト自動生成（23:45 JST — 翌日向け）
             self._scheduler.add_job(
                 self.note_draft_generation,
-                CronTrigger(hour=23, minute=45),
+                CronTrigger(hour=23, minute=45, timezone="Asia/Tokyo"),
                 id="note_draft",
-                name="note記事ドラフト生成（23:45）",
+                name="note記事ドラフト生成 翌日向け（23:45）",
                 replace_existing=True,
+                misfire_grace_time=60,
             )
 
             # 競合分析（日曜 03:00 JST）
@@ -372,6 +411,7 @@ class SyutainScheduler:
                 id="approval_timeout",
                 name="承認タイムアウトチェック（1時間）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # 提案自動承認→ゴール変換（30分間隔）
@@ -381,6 +421,7 @@ class SyutainScheduler:
                 id="process_proposals",
                 name="提案自動承認→ゴール変換（30分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # brain_handoff期限切れ処理（日次）
@@ -399,6 +440,7 @@ class SyutainScheduler:
                 id="posting_queue_process",
                 name="posting_queue自動投稿（毎分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # Brain-α相互評価（毎日06:00）
@@ -417,6 +459,7 @@ class SyutainScheduler:
                 id="self_heal_check",
                 name="自律修復チェック（5分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # データ整合性チェック（毎日04:00）
@@ -435,6 +478,7 @@ class SyutainScheduler:
                 id="brain_alpha_health",
                 name="Brain-αセッション監視（10分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # ノードヘルスチェック（5分間隔）
@@ -444,6 +488,7 @@ class SyutainScheduler:
                 id="node_health_check",
                 name="ノードヘルスチェック（5分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # 異常検知→Discord通知（5分間隔）
@@ -453,6 +498,7 @@ class SyutainScheduler:
                 id="anomaly_detection",
                 name="異常検知（5分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # 動的キーワード更新（毎日06:00 JST）
@@ -489,6 +535,7 @@ class SyutainScheduler:
                 id="chat_learning",
                 name="対話学習（1時間）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # note記事品質チェック（30分間隔、コストガード付き）
@@ -498,6 +545,7 @@ class SyutainScheduler:
                 id="note_quality_check",
                 name="note記事品質チェック（30分）",
                 replace_existing=True,
+                misfire_grace_time=30,
             )
 
             # 日次サマリーDiscord通知（毎日 20:30 JST）
@@ -516,6 +564,7 @@ class SyutainScheduler:
                 id="product_packaging",
                 name="商品パッケージング（1時間）",
                 replace_existing=True,
+                misfire_grace_time=60,
             )
 
             # 経営日報（毎日 07:05 JST）
@@ -525,6 +574,219 @@ class SyutainScheduler:
                 id="executive_briefing",
                 name="経営日報（毎日07:05）",
                 replace_existing=True,
+            )
+
+            # === 収益・コンテンツ強化ジョブ ===
+
+            # エンゲージメント分析（毎日06:30 JST）
+            self._scheduler.add_job(
+                self.engagement_analysis,
+                CronTrigger(hour=6, minute=30, timezone="Asia/Tokyo"),
+                id="engagement_analysis",
+                name="エンゲージメント分析（毎日06:30）",
+                replace_existing=True,
+            )
+
+            # 海外トレンド検出（毎日08:00 JST）
+            self._scheduler.add_job(
+                self.overseas_trend_detection,
+                CronTrigger(hour=8, minute=0, timezone="Asia/Tokyo"),
+                id="overseas_trend_detection",
+                name="海外トレンド検出（毎日08:00）",
+                replace_existing=True,
+            )
+
+            # ドキュメンタリー記事生成 #1（毎週水曜10:00 JST）
+            self._scheduler.add_job(
+                self.documentary_generation,
+                CronTrigger(day_of_week="wed", hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="documentary_generation_wed",
+                name="ドキュメンタリー記事生成#1（毎週水曜10:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # ドキュメンタリー記事生成 #2（毎週土曜10:00 JST）
+            self._scheduler.add_job(
+                self.documentary_generation,
+                CronTrigger(day_of_week="sat", hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="documentary_generation_sat",
+                name="ドキュメンタリー記事生成#2（毎週土曜10:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # バズアカウント分析（毎週月曜07:30 JST）
+            self._scheduler.add_job(
+                self.buzz_account_analysis,
+                CronTrigger(day_of_week="mon", hour=7, minute=30, timezone="Asia/Tokyo"),
+                id="buzz_account_analysis",
+                name="バズ分析（毎週月曜07:30）",
+                replace_existing=True,
+            )
+
+            # 収益機会リサーチ（毎月1日04:00 JST）
+            self._scheduler.add_job(
+                self.revenue_research,
+                CronTrigger(day=1, hour=4, minute=0, timezone="Asia/Tokyo"),
+                id="revenue_research",
+                name="収益機会リサーチ（毎月1日04:00）",
+                replace_existing=True,
+            )
+
+            # セマンティックキャッシュクリーンアップ（毎日04:15 JST）
+            self._scheduler.add_job(
+                self.semantic_cache_cleanup,
+                CronTrigger(hour=4, minute=15, timezone="Asia/Tokyo"),
+                id="semantic_cache_cleanup",
+                name="セマンティックキャッシュ清掃（毎日04:15）",
+                replace_existing=True,
+            )
+
+            # Karpathy Loop（毎日05:00 JST）
+            self._scheduler.add_job(
+                self.karpathy_loop_cycle,
+                CronTrigger(hour=5, minute=0, timezone="Asia/Tokyo"),
+                id="karpathy_loop",
+                name="Karpathy自律改善（毎日05:00）",
+                replace_existing=True,
+            )
+
+            # 収益パイプラインヘルスチェック（毎日07:30 JST）
+            self._scheduler.add_job(
+                self.revenue_health_check,
+                CronTrigger(hour=7, minute=30, timezone="Asia/Tokyo"),
+                id="revenue_health_check",
+                name="収益パイプラインチェック（毎日07:30）",
+                replace_existing=True,
+            )
+
+            # === Harness Engineering ジョブ ===
+
+            # ゴミ収集（毎週月曜 05:00 JST）
+            self._scheduler.add_job(
+                self.garbage_collection,
+                CronTrigger(day_of_week="mon", hour=5, minute=0, timezone="Asia/Tokyo"),
+                id="garbage_collection",
+                name="ゴミ収集（毎週月曜05:00）",
+                replace_existing=True,
+            )
+
+            # フィーチャーテスト（毎日 05:30 JST）
+            self._scheduler.add_job(
+                self.feature_test_run,
+                CronTrigger(hour=5, minute=30, timezone="Asia/Tokyo"),
+                id="feature_test_run",
+                name="フィーチャーテスト（毎日05:30）",
+                replace_existing=True,
+            )
+
+            # ドキュメントガーデニング（毎週日曜 04:00 JST）
+            self._scheduler.add_job(
+                self.doc_gardening,
+                CronTrigger(day_of_week="sun", hour=4, minute=0, timezone="Asia/Tokyo"),
+                id="doc_gardening",
+                name="ドキュメントガーデニング（日曜04:00）",
+                replace_existing=True,
+            )
+
+            # note.com自動公開チェック（30分間隔）
+            self._scheduler.add_job(
+                self.note_auto_publish,
+                IntervalTrigger(minutes=30),
+                id="note_auto_publish",
+                name="note.com自動公開チェック（30分）",
+                replace_existing=True,
+                misfire_grace_time=30,
+            )
+
+            # ログクリーンアップ（毎日04:30 JST）— 7日超のログファイルを削除
+            self._scheduler.add_job(
+                self.log_cleanup,
+                CronTrigger(hour=4, minute=30, timezone="Asia/Tokyo"),
+                id="log_cleanup",
+                name="ログクリーンアップ（毎日04:30）",
+                replace_existing=True,
+            )
+
+            # 承認キュー自動クリーンアップ（毎日05:00 JST）
+            self._scheduler.add_job(
+                self.approval_queue_cleanup,
+                CronTrigger(hour=5, minute=0, timezone="Asia/Tokyo"),
+                id="approval_queue_cleanup",
+                name="承認キュー自動クリーンアップ（毎日05:00）",
+                replace_existing=True,
+            )
+
+            # 夜間メモリ統合（毎日03:45 JST）
+            self._scheduler.add_job(
+                self.memory_consolidation,
+                CronTrigger(hour=3, minute=45, timezone="Asia/Tokyo"),
+                id="memory_consolidation",
+                name="メモリ統合（毎日03:45）",
+                replace_existing=True,
+            )
+
+            # 海外トレンド先取り検出（毎日08:00 JST）
+            self._scheduler.add_job(
+                self.detect_overseas_trends,
+                CronTrigger(hour=8, minute=0, timezone="Asia/Tokyo"),
+                id="overseas_trend_detection",
+                name="海外トレンド検出（毎日08:00）",
+                replace_existing=True,
+            )
+
+            # === スキル形式化 & ハーネス健全性 ===
+
+            # スキル抽出（毎日04:00 JST）
+            self._scheduler.add_job(
+                self.skill_extraction,
+                CronTrigger(hour=4, minute=0, timezone="Asia/Tokyo"),
+                id="skill_extraction",
+                name="スキル抽出（毎日04:00）",
+                replace_existing=True,
+            )
+
+            # ハーネス健全性スコア（毎時）
+            self._scheduler.add_job(
+                self.harness_health_check,
+                IntervalTrigger(hours=1),
+                id="harness_health",
+                name="ハーネス健全性スコア（毎時）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # === 自動テスト & 依存関係マッピング ===
+
+            # 自動テスト（毎日06:00 JST）— フルスイート
+            self._scheduler.add_job(
+                self.self_test_full,
+                CronTrigger(hour=6, minute=0, timezone="Asia/Tokyo"),
+                id="self_test_full",
+                name="自動テスト（毎日06:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # 構文チェック（毎時）— 軽量
+            self._scheduler.add_job(
+                self.self_test_syntax,
+                IntervalTrigger(hours=1),
+                id="self_test_syntax",
+                name="構文チェック（毎時）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # 依存関係マッピング（毎週月曜06:30 JST）
+            self._scheduler.add_job(
+                self.dependency_mapping,
+                CronTrigger(day_of_week="mon", hour=6, minute=30, timezone="Asia/Tokyo"),
+                id="dependency_mapping",
+                name="依存関係マッピング（毎週月曜06:30）",
+                replace_existing=True,
+                misfire_grace_time=60,
             )
 
             self._scheduler.start()
@@ -541,6 +803,13 @@ class SyutainScheduler:
             else:
                 _current_power_mode = "day"
                 logger.info(f"起動時刻 {jst_now.strftime('%H:%M')} JST → 日中モードで開始")
+
+            # Karpathy Loop: 再起動時に実行中実験のパラメータを復元
+            try:
+                from agents.karpathy_loop import restore_running_experiments
+                await restore_running_experiments()
+            except Exception as e:
+                logger.warning(f"Karpathy実験復元スキップ: {e}")
 
             # ジョブ一覧表示
             for job in self._scheduler.get_jobs():
@@ -750,6 +1019,19 @@ class SyutainScheduler:
                 logger.info(f"情報収集パイプライン（ALPHA直接実行）完了: {result.get('total_items', 0)}件")
             except Exception as e:
                 logger.error(f"情報収集パイプライン（ALPHA直接実行）失敗: {e}")
+
+    async def detect_overseas_trends(self):
+        """海外トレンド先取り検出: 毎日08:00 JSTに実行"""
+        logger.info("海外トレンド先取り検出開始")
+        try:
+            from tools.trend_detector import run_trend_detection_and_save
+            result = await run_trend_detection_and_save()
+            logger.info(
+                f"海外トレンド検出完了: 検出{result.get('detected', 0)}件, "
+                f"保存{result.get('saved', 0)}件, 通知{result.get('notified', 0)}件"
+            )
+        except Exception as e:
+            logger.error(f"海外トレンド検出失敗: {e}")
 
     async def daily_proposal(self):
         """日次提案生成: 毎日7:00 JSTに提案を生成"""
@@ -1054,10 +1336,12 @@ class SyutainScheduler:
 
                 if forecast > monthly_budget * 0.8:
                     try:
-                        from tools.discord_notify import notify_discord
-                        await notify_discord(
-                            f"⚠️ コスト予測警告: 月末推定¥{forecast:.0f} / 予算¥{monthly_budget:.0f} "
-                            f"({forecast/monthly_budget*100:.0f}%)"
+                        from tools.discord_notify import notify_error
+                        await notify_error(
+                            "budget_forecast_warn",
+                            f"コスト予測警告: 月末推定¥{forecast:.0f} / 予算¥{monthly_budget:.0f} "
+                            f"({forecast/monthly_budget*100:.0f}%)",
+                            severity="error",
                         )
                     except Exception:
                         pass
@@ -1157,6 +1441,21 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"Threadsエンゲージメント取得失敗: {e}")
 
+    async def daily_engagement_analysis(self):
+        """毎日06:30にエンゲージメント分析を実行し、結果をevent_logに保存"""
+        try:
+            from tools.engagement_analyzer import run_daily_analysis
+            result = await run_daily_analysis()
+            if result.get("error"):
+                logger.warning(f"エンゲージメント分析エラー: {result['error']}")
+            else:
+                logger.info(
+                    f"エンゲージメント分析完了: {result.get('total_posts_analyzed', 0)}件, "
+                    f"推奨テーマ={result.get('best_themes', [])[:3]}"
+                )
+        except Exception as e:
+            logger.error(f"日次エンゲージメント分析失敗: {e}")
+
     async def refresh_model_quality(self):
         """1時間間隔でモデル品質キャッシュを更新"""
         try:
@@ -1176,6 +1475,22 @@ class SyutainScheduler:
             )
             if result.returncode == 0:
                 logger.info(f"SYSTEM_STATE.md更新完了: {result.stdout.strip()}")
+
+                # ハーネス健全性スコアをSYSTEM_STATE.mdに追記
+                try:
+                    from tools.harness_health import calculate_health_score
+                    health = await calculate_health_score()
+                    state_path = os.path.join(os.path.dirname(__file__), "SYSTEM_STATE.md")
+                    with open(state_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n## Harness Health Score: {health['overall']}/100 (Grade {health['grade']})\n")
+                        for name, comp in health.get("components", {}).items():
+                            f.write(f"- {name}: {comp['score']}/100 — {comp['detail']}\n")
+                        if health.get("recommendations"):
+                            f.write("\n**Recommendations:**\n")
+                            for rec in health["recommendations"]:
+                                f.write(f"- {rec}\n")
+                except Exception as he:
+                    logger.debug(f"健全性スコア追記失敗: {he}")
             else:
                 logger.warning(f"SYSTEM_STATE.md更新失敗: {result.stderr[:200]}")
         except Exception as e:
@@ -1446,39 +1761,78 @@ class SyutainScheduler:
             logger.error(f"週次商品化候補生成失敗: {e}")
 
     async def note_draft_generation(self):
-        """23:45 JST: note記事ドラフト自動生成（曜日別テーマ）"""
+        """23:45 JST: note記事ドラフト自動生成（翌日向け — エンゲージメント分析結果ベース）"""
         if _current_power_mode != "night":
             return
-        logger.info("note記事ドラフト生成開始")
+        logger.info("note記事ドラフト生成開始（翌日向け）")
         try:
             from tools.llm_router import call_llm, choose_best_model_v6
             import os as _os
 
+            # エンゲージメント分析結果から翌日向けテーマを決定
+            engagement_hint = ""
+            try:
+                from tools.db_pool import get_connection as _gc_eng
+                async with _gc_eng() as _conn_eng:
+                    # 直近のエンゲージメント分析結果（高反応テーマ）を取得
+                    eng_rows = await _conn_eng.fetch(
+                        """SELECT topic, avg_engagement, platform FROM (
+                            SELECT theme_category AS topic,
+                                   AVG(COALESCE(likes, 0) + COALESCE(reposts, 0) + COALESCE(replies, 0)) AS avg_engagement,
+                                   platform
+                            FROM posting_queue
+                            WHERE status = 'posted' AND posted_at > NOW() - INTERVAL '7 days'
+                            AND theme_category IS NOT NULL
+                            GROUP BY theme_category, platform
+                            ORDER BY avg_engagement DESC
+                            LIMIT 5
+                        ) sub"""
+                    )
+                    if eng_rows:
+                        engagement_hint = "\n\n## 直近7日の高エンゲージメントテーマ（翌日向け参考）\n"
+                        for r in eng_rows:
+                            engagement_hint += f"- {r['topic']} ({r['platform']}): 平均エンゲージメント{float(r['avg_engagement']):.1f}\n"
+            except Exception as e:
+                logger.warning(f"note_draft エンゲージメント分析取得失敗: {e}")
+
             weekday = datetime.now().weekday()  # 0=月曜
             theme_map = {
-                0: ("週次収益報告", "今週のSYUTAINβの活動と収益状況をまとめる"),
-                1: ("AI活用Tips", "非エンジニアでも使えるAI活用のコツを共有する"),
-                2: ("AI開発失敗談", "SYUTAINβ開発で経験した失敗と学びを共有する"),
-                3: ("AI開発失敗談", "SYUTAINβ開発で経験した失敗と学びを共有する"),
-                4: ("AI活用Tips", "非エンジニアでも使えるAI活用のコツを共有する"),
-                5: ("週末まとめ", "今週の振り返りと来週の展望"),
-                6: ("自由テーマ", "AIと個人事業の未来について自由に書く"),
+                0: ("翌日向け_収益×AI", "エンゲージメント分析に基づき、読者が最も反応するAI×収益テーマで書く"),
+                1: ("翌日向け_実践Tips", "エンゲージメント分析に基づき、すぐ使えるAI活用の具体的Tipsを書く"),
+                2: ("翌日向け_失敗談", "エンゲージメント分析に基づき、共感を得やすい失敗と学びを書く"),
+                3: ("翌日向け_データ公開", "エンゲージメント分析に基づき、具体的な数字を含む分析記事を書く"),
+                4: ("翌日向け_未来予測", "エンゲージメント分析に基づき、AI・テクノロジーの未来予測を書く"),
+                5: ("翌日向け_週末読み物", "エンゲージメント分析に基づき、じっくり読める深掘り記事を書く"),
+                6: ("翌日向け_新週スタート", "エンゲージメント分析に基づき、月曜に読みたい前向きな記事を書く"),
             }
-            theme_name, theme_desc = theme_map.get(weekday, ("自由テーマ", "AIについて自由に書く"))
+            theme_name, theme_desc = theme_map.get(weekday, ("翌日向け_自由テーマ", "エンゲージメント分析に基づくテーマ"))
 
             # intel_itemsから直近トレンドを取得してプロンプトに注入（Q7修正）
             intel_hint = ""
             try:
                 from tools.db_pool import get_connection
                 async with get_connection() as _conn_nd:
+                    # 海外トレンド先取り（trend_detector検出分を最優先）
+                    trend_rows = await _conn_nd.fetch(
+                        """SELECT title, summary FROM intel_items
+                        WHERE source = 'trend_detector' AND review_flag = 'actionable'
+                        ORDER BY importance_score DESC, created_at DESC LIMIT 3"""
+                    )
+                    if trend_rows:
+                        intel_hint = "\n\n## 海外トレンド先取り（日本語記事が少ない注目トピック）\n"
+                        for r in trend_rows:
+                            intel_hint += f"- {r['title']}: {(r['summary'] or '')[:120]}\n"
+
+                    # 通常のintel_items
                     intel_rows = await _conn_nd.fetch(
                         """SELECT title, summary, source FROM intel_items
                         WHERE importance_score >= 0.4
                         AND created_at > NOW() - INTERVAL '48 hours'
+                        AND source != 'trend_detector'
                         ORDER BY importance_score DESC LIMIT 5"""
                     )
                     if intel_rows:
-                        intel_hint = "\n\n## 直近の市場動向（記事に活用できる素材）\n"
+                        intel_hint += "\n\n## 直近の市場動向（記事に活用できる素材）\n"
                         for r in intel_rows:
                             intel_hint += f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:80]}\n"
             except Exception as e:
@@ -1489,18 +1843,37 @@ class SyutainScheduler:
                 budget_sensitive=True, local_available=True, needs_japanese=True,
             )
             result = await call_llm(
-                prompt=f"note記事のドラフトを書いてください。\n\n"
+                prompt=f"note有料記事（500円）のドラフトを書いてください。\n\n"
                        f"テーマ: {theme_name}\n"
                        f"方針: {theme_desc}\n\n"
                        f"{intel_hint}\n"
-                       f"注意事項:\n"
-                       f"- 1000-2000文字\n"
-                       f"- 見出し（##）を3-4個\n"
-                       f"- 島原大知の一人称「僕」で書く\n"
-                       f"- 読者は技術者ではない。平易な言葉で\n"
-                       f"- 具体的な数字やエピソードを入れる\n"
-                       f"- 上記の市場動向がテーマに関連すれば、具体例として言及する\n",
-                system_prompt=f"SYUTAINβのnote記事ドラフト生成。島原大知のドキュメンタリースタイル。\n\n{self._load_anti_ai_guide()}",
+                       f"{engagement_hint}\n"
+                       f"## noteの有料記事フォーマット（厳守）:\n\n"
+                       f"### 【無料パート】冒頭〜「---ここから有料---」まで（1000-1500字）\n"
+                       f"- 衝撃的な冒頭3行（数字・事実で「え？」と立ち止まらせる）\n"
+                       f"- 読者の悩みに具体的に共感（「こんなことありませんか？」3つ列挙）\n"
+                       f"- 島原の資格証明（VTuber業界8年、4台PCでAI事業OS構築等の数字）\n"
+                       f"- 「この記事で得られること」箇条書き3-5個\n"
+                       f"- クリフハンガー（「でも本当に大事なのはこの先にある」的な引き）\n\n"
+                       f"### 本文中に必ず以下のマーカーを入れる:\n"
+                       f"---ここから有料---\n\n"
+                       f"### 【有料パート】マーカー以降（4500-6500字）\n"
+                       f"- 島原大知の実体験を3つ以上（日時・場所・感情を含む）\n"
+                       f"- 具体的な数値・コスト・時間のデータ\n"
+                       f"- 読者が今日から試せる実践ステップ3-5個（コスト・時間付き）\n"
+                       f"- 失敗談と教訓を正直に\n"
+                       f"- 「なぜそうなるのか」の構造分析（表面的解説×）\n"
+                       f"- ## 見出し5-7個、各セクション800-1200字\n"
+                       f"- **太字**で核心の一文\n"
+                       f"- 最後に要点3-5個の箇条書きまとめ\n\n"
+                       f"## 絶対禁止:\n"
+                       f"- 架空のエピソード（「カフェで友人が」等の作り話）\n"
+                       f"- AI定型句（「考えてみました」「いかがでしょうか」「深掘り」）\n"
+                       f"- 島原がやっていないこと（音楽の仕事等）を事実として語ること\n"
+                       f"- 抽象的な一般論だけで具体性がない段落\n",
+                system_prompt=f"SYUTAINβのnote有料記事(500円)ドラフト生成。島原大知のドキュメンタリースタイル。\n"
+                              f"noteでは無料パートの魅力が売上を決める。読者が「この先を読みたい」と思うフック設計が最重要。\n"
+                              f"架空のエピソードは禁止。島原大知の実際の経験（映像制作、VTuber支援、SYUTAINβ開発、挫折と再起）から書く。\n\n{self._load_anti_ai_guide()}",
                 model_selection=model_sel,
             )
 
@@ -1642,18 +2015,70 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"提案自動承認処理失敗: {e}")
 
+    # ノード別サービス名マッピング
+    _NODE_SERVICES = {
+        "bravo": ["syutain-worker-bravo"],
+        "charlie": ["syutain-worker-charlie"],
+        "delta": ["syutain-worker-delta"],
+    }
+
     async def node_health_check(self):
-        """5分間隔でノードのヘルスチェックを実行しevent_logに記録"""
+        """5分間隔でノードのヘルスチェックを実行しevent_logに記録。
+        障害検出時はサービス自動再起動を試行し、失敗ならnode_stateを'down'に更新。
+        """
         try:
             import json
             import httpx
+            import subprocess
 
             from tools.event_logger import log_event
 
             for node, ip in REMOTE_NODES.items():
                 health = {"node": node, "ip": ip, "status": "unknown"}
+                node_has_failure = False
 
-                # Ollama応答確認
+                # 1. SSH疎通確認（タイムアウト5秒）
+                ssh_ok = False
+                try:
+                    proc = subprocess.run(
+                        ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                         f"shimahara@{ip}", "echo ok"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if proc.returncode == 0 and "ok" in proc.stdout:
+                        ssh_ok = True
+                        health["ssh"] = "ok"
+                    else:
+                        health["ssh"] = f"failed: {proc.stderr[:80]}"
+                        node_has_failure = True
+                except Exception as e:
+                    health["ssh"] = f"unreachable: {str(e)[:50]}"
+                    node_has_failure = True
+
+                # 2. systemctl is-active チェック（各ワーカー）
+                services = self._NODE_SERVICES.get(node, [])
+                health["services"] = {}
+                for svc in services:
+                    if not ssh_ok:
+                        health["services"][svc] = "ssh_unavailable"
+                        node_has_failure = True
+                        continue
+                    try:
+                        proc = subprocess.run(
+                            ["ssh", "-o", "ConnectTimeout=5", f"shimahara@{ip}",
+                             f"export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus; "
+                             f"sudo systemctl is-active {svc}"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        status = proc.stdout.strip()
+                        health["services"][svc] = status
+                        if status != "active":
+                            node_has_failure = True
+                    except Exception as e:
+                        health["services"][svc] = f"check_failed: {str(e)[:50]}"
+                        node_has_failure = True
+
+                # 3. Ollama応答確認
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
                         resp = await client.get(f"http://{ip}:11434/api/tags")
@@ -1663,55 +2088,139 @@ class SyutainScheduler:
                             health["ollama_models"] = [m.get("name", "") for m in models[:3]]
                         else:
                             health["ollama"] = f"error_{resp.status_code}"
+                            node_has_failure = True
                 except Exception as e:
                     health["ollama"] = f"unreachable: {str(e)[:50]}"
+                    node_has_failure = True
 
-                # GPU温度チェック（SSH経由）
-                try:
-                    import subprocess
-                    gpu_temp_out = subprocess.check_output(
-                        ["ssh", "-o", "ConnectTimeout=3", f"shimahara@{ip}",
-                         "nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null"],
-                        timeout=8, stderr=subprocess.DEVNULL,
-                    ).decode().strip()
-                    parts = [p.strip() for p in gpu_temp_out.split(",")]
-                    if len(parts) >= 4:
-                        health["gpu_temp_c"] = int(parts[0])
-                        health["gpu_util_pct"] = int(parts[1])
-                        health["gpu_mem_used_mb"] = int(parts[2])
-                        health["gpu_mem_total_mb"] = int(parts[3])
-                        health["status"] = "alive"
-                        # GPU温度閾値チェック
-                        config = get_power_config()
-                        if health["gpu_temp_c"] > config.get("gpu_temp_limit", 80):
-                            health["gpu_throttled"] = True
-                            logger.warning(f"{node.upper()} GPU温度{health['gpu_temp_c']}℃ > 閾値{config['gpu_temp_limit']}℃")
-                except Exception:
-                    pass
+                # 4. GPU温度チェック（SSH経由）
+                if ssh_ok:
+                    try:
+                        gpu_temp_out = subprocess.check_output(
+                            ["ssh", "-o", "ConnectTimeout=3", f"shimahara@{ip}",
+                             "nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null"],
+                            timeout=8, stderr=subprocess.DEVNULL,
+                        ).decode().strip()
+                        parts = [p.strip() for p in gpu_temp_out.split(",")]
+                        if len(parts) >= 4:
+                            health["gpu_temp_c"] = int(parts[0])
+                            health["gpu_util_pct"] = int(parts[1])
+                            health["gpu_mem_used_mb"] = int(parts[2])
+                            health["gpu_mem_total_mb"] = int(parts[3])
+                            health["status"] = "alive"
+                            config = get_power_config()
+                            if health["gpu_temp_c"] > config.get("gpu_temp_limit", 80):
+                                health["gpu_throttled"] = True
+                                logger.warning(f"{node.upper()} GPU温度{health['gpu_temp_c']}℃ > 閾値{config['gpu_temp_limit']}℃")
+                    except Exception:
+                        pass
 
-                # CPU/MEM（SSH経由）
-                try:
-                    import subprocess
-                    cpu_out = subprocess.check_output(
-                        ["ssh", "-o", "ConnectTimeout=3", f"shimahara@{ip}",
-                         "python3 -c \"import psutil;print(f'{psutil.cpu_percent()}:{psutil.virtual_memory().percent}')\" 2>/dev/null || "
-                         "echo \"$(top -bn1 | grep 'Cpu(s)' | awk '{print $2}'):$(free | awk '/Mem:/{printf(\\\"%.1f\\\", $3/$2*100)}')\""],
-                        timeout=8, stderr=subprocess.DEVNULL,
-                    ).decode().strip()
-                    if ":" in cpu_out:
-                        cpu_val, mem_val = cpu_out.split(":")
-                        health["cpu_percent"] = float(cpu_val)
-                        health["memory_percent"] = float(mem_val)
-                        health["status"] = "alive"
-                except Exception:
-                    pass
+                # 5. CPU/MEM（SSH経由）
+                if ssh_ok:
+                    try:
+                        cpu_out = subprocess.check_output(
+                            ["ssh", "-o", "ConnectTimeout=3", f"shimahara@{ip}",
+                             "python3 -c \"import psutil;print(f'{psutil.cpu_percent()}:{psutil.virtual_memory().percent}')\" 2>/dev/null || "
+                             "echo \"$(top -bn1 | grep 'Cpu(s)' | awk '{print $2}'):$(free | awk '/Mem:/{printf(\\\"%.1f\\\", $3/$2*100)}')\""],
+                            timeout=8, stderr=subprocess.DEVNULL,
+                        ).decode().strip()
+                        if ":" in cpu_out:
+                            cpu_val, mem_val = cpu_out.split(":")
+                            health["cpu_percent"] = float(cpu_val)
+                            health["memory_percent"] = float(mem_val)
+                            health["status"] = "alive"
+                    except Exception:
+                        pass
+
+                # 6. 障害検出時の自動復旧試行
+                if node_has_failure and ssh_ok:
+                    health["auto_recovery"] = {}
+                    # 停止しているサービスの再起動を試行
+                    for svc, svc_status in health.get("services", {}).items():
+                        if svc_status not in ("active", "ssh_unavailable"):
+                            try:
+                                restart_proc = subprocess.run(
+                                    ["ssh", "-o", "ConnectTimeout=5", f"shimahara@{ip}",
+                                     f"sudo systemctl restart {svc}"],
+                                    capture_output=True, text=True, timeout=15,
+                                )
+                                if restart_proc.returncode == 0:
+                                    health["auto_recovery"][svc] = "restarted"
+                                    logger.info(f"{node.upper()} {svc} 自動再起動成功")
+                                else:
+                                    health["auto_recovery"][svc] = f"restart_failed: {restart_proc.stderr[:80]}"
+                                    logger.error(f"{node.upper()} {svc} 自動再起動失敗: {restart_proc.stderr[:80]}")
+                            except Exception as e:
+                                health["auto_recovery"][svc] = f"restart_error: {str(e)[:50]}"
+
+                    # 再起動後に状態を再確認
+                    if health["auto_recovery"]:
+                        await asyncio.sleep(3)
+                        for svc in health["auto_recovery"]:
+                            if health["auto_recovery"][svc] == "restarted":
+                                try:
+                                    verify_proc = subprocess.run(
+                                        ["ssh", "-o", "ConnectTimeout=5", f"shimahara@{ip}",
+                                         f"export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus; "
+                                         f"sudo systemctl is-active {svc}"],
+                                        capture_output=True, text=True, timeout=10,
+                                    )
+                                    new_status = verify_proc.stdout.strip()
+                                    health["auto_recovery"][svc] = f"verified_{new_status}"
+                                    if new_status != "active":
+                                        node_has_failure = True  # まだ障害
+                                    else:
+                                        health["services"][svc] = "active"
+                                except Exception:
+                                    pass
+
+                # 7. node_state DB更新（障害 & 復旧失敗時）
+                if node_has_failure:
+                    try:
+                        from tools.db_pool import get_connection
+                        async with get_connection() as conn:
+                            current = await conn.fetchval(
+                                "SELECT status FROM node_state WHERE node_name = $1", node
+                            )
+                            if current == "healthy":
+                                # healthy→downに更新
+                                await conn.execute(
+                                    "UPDATE node_state SET state = 'down', reason = 'ヘルスチェック失敗', changed_by = 'node_health_check', changed_at = NOW() WHERE node_name = $1",
+                                    node,
+                                )
+                                health["node_state_changed"] = "healthy -> down"
+                                logger.warning(f"{node.upper()} node_state: healthy -> down")
+                    except Exception as e:
+                        logger.error(f"{node.upper()} node_state更新失敗: {e}")
+                else:
+                    # 正常時: downならhealthyに復帰
+                    try:
+                        from tools.db_pool import get_connection
+                        async with get_connection() as conn:
+                            current = await conn.fetchval(
+                                "SELECT status FROM node_state WHERE node_name = $1", node
+                            )
+                            if current == "down":
+                                await conn.execute(
+                                    "UPDATE node_state SET state = 'healthy', reason = 'ヘルスチェック復帰', changed_by = 'node_health_check', changed_at = NOW() WHERE node_name = $1",
+                                    node,
+                                )
+                                health["node_state_changed"] = "down -> healthy"
+                                logger.info(f"{node.upper()} node_state: down -> healthy (復帰)")
+                    except Exception:
+                        pass
 
                 severity = "info"
-                if health.get("ollama", "").startswith("unreachable"):
+                if not ssh_ok:
+                    severity = "error"
+                    health["status"] = "unreachable"
+                elif health.get("ollama", "").startswith("unreachable"):
                     severity = "error"
                 elif health.get("ollama", "").startswith("error"):
                     severity = "warning"
                 elif health.get("gpu_throttled"):
+                    severity = "warning"
+                elif node_has_failure:
                     severity = "warning"
 
                 await log_event(
@@ -1720,6 +2229,27 @@ class SyutainScheduler:
                     severity=severity,
                     source_node=node,
                 )
+
+                # 障害時Discord通知
+                if node_has_failure:
+                    try:
+                        from tools.discord_notify import notify_error
+                        failed_items = []
+                        if not ssh_ok:
+                            failed_items.append("SSH不通")
+                        for svc, st in health.get("services", {}).items():
+                            if st != "active":
+                                recovery = health.get("auto_recovery", {}).get(svc, "")
+                                failed_items.append(f"{svc}={st}" + (f" (再起動: {recovery})" if recovery else ""))
+                        if health.get("ollama", "").startswith(("unreachable", "error")):
+                            failed_items.append(f"Ollama={health['ollama'][:40]}")
+                        await notify_error(
+                            f"node_health_{node}",
+                            f"{node.upper()} 障害検出: {', '.join(failed_items[:5])}",
+                            severity="error",
+                        )
+                    except Exception:
+                        pass
 
             # ALPHAのヘルスチェック
             import psutil
@@ -1773,34 +2303,71 @@ class SyutainScheduler:
                     AND created_at > NOW() - INTERVAL '10 minutes'"""
                 )
 
+                # 既知のダウン状態を除外（charlie_win11等）
+                known_down = set()
+                node_states = await conn.fetch("SELECT node_name, state FROM node_state")
+                for ns in node_states:
+                    if ns["state"] in ("charlie_win11", "win11", "down", "recovering", "maintenance", "offline"):
+                        known_down.add(ns["node_name"])
+
                 notifications = []
 
-                # severity=errorが5分間に3件以上
+                # severity=errorが5分間に3件以上（既知ダウンノードのエラーは除外）
                 if error_count >= 3:
-                    notifications.append(
-                        f"⚠️ 異常検知: 直近5分でエラー{error_count}件発生"
-                    )
+                    # 既知ダウンノード由来のエラーを除いた実エラー数をチェック
+                    real_errors = await conn.fetchval(
+                        """SELECT COUNT(*) FROM event_log
+                        WHERE severity = 'error'
+                        AND created_at > NOW() - INTERVAL '5 minutes'
+                        AND (source_node IS NULL OR source_node NOT IN (
+                            SELECT node_name FROM node_state WHERE state NOT IN ('healthy', 'degraded')
+                        ))"""
+                    ) or 0
+                    if real_errors >= 3:
+                        notifications.append(
+                            f"⚠️ 異常検知: 直近5分でエラー{real_errors}件発生"
+                        )
 
-                # severity=criticalは即座に通知
+                # severity=criticalは即座に通知（既知ダウンノードは除外）
                 for row in critical_rows:
+                    if row["source_node"] in known_down:
+                        continue
                     payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
                     notifications.append(
                         f"🚨 CRITICAL: {row['event_type']} on {row['source_node']} — "
                         f"{payload.get('reason', payload.get('error', ''))[:100]}"
                     )
 
-                # Ollamaダウン
+                # Ollamaダウン（既知ダウンノードは除外）
                 for row in ollama_down_nodes:
+                    if row["node"] in known_down:
+                        continue
                     notifications.append(
                         f"🔴 {row['node'].upper()}: Ollamaダウン検知"
                     )
 
-                # Discord通知
+                # 復帰検知（charlie.auto_restore等）
+                recoveries = await conn.fetch(
+                    """SELECT event_type, payload FROM event_log
+                    WHERE event_type IN ('charlie.auto_restore', 'self_heal.executed')
+                    AND created_at > NOW() - INTERVAL '5 minutes'"""
+                )
+                for row in recoveries:
+                    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+                    node = payload.get("node", "unknown")
+                    notifications.append(
+                        f"✅ {node.upper()}: 復帰確認"
+                    )
+
+                # Discord通知（dedup付き — 同じ種類は1時間に1回のみ）
                 if notifications:
                     try:
-                        from tools.discord_notify import notify_discord
-                        msg = "\n".join(notifications[:5])
-                        await notify_discord(msg)
+                        from tools.discord_notify import notify_error
+                        for note in notifications[:3]:
+                            # 安定したdedupキー（ノード名+種別で固定）
+                            import re as _re
+                            dedup_key = _re.sub(r'[^a-zA-Z_]', '', note[:40])
+                            await notify_error(dedup_key, note, severity="error")
                     except Exception as e:
                         logger.error(f"異常検知Discord通知失敗: {e}")
 
@@ -2004,7 +2571,7 @@ class SyutainScheduler:
                         "platform": "bluesky",
                         "auto_generated": True,
                         "pattern": current_pattern,
-                        "quality_score": quality_score if 'quality_score' in dir() else None,
+                        "quality_score": quality_score if 'quality_score' in locals() else None,
                     }, ensure_ascii=False),
                 )
 
@@ -2114,7 +2681,7 @@ class SyutainScheduler:
             result = await call_llm(
                 prompt=(
                     f"Xに投稿するドラフトを1つ作ってください。\n"
-                    f"- 280文字以内（厳守）\n"
+                    f"- 日本語150文字以内（厳守。途中で切れないよう150字以内で文を完結させる）\n"
                     f"- 一人称は「私」\n"
                     f"- パターン: 【{current_pattern}】\n"
                     f"- 結論→根拠→示唆の構造\n"
@@ -2135,9 +2702,13 @@ class SyutainScheduler:
                 logger.warning("Xドラフト生成: テキストが空または短すぎ")
                 return
 
-            # 280文字超過時は切り詰め
-            if len(draft) > 280:
-                draft = draft[:277] + "..."
+            # 150文字超過時は文末で切り詰め（文が途中で切れないよう）
+            if len(draft) > 150:
+                candidates = [i + 1 for i, ch in enumerate(draft[:150]) if ch in "。！？…\n"]
+                if candidates and candidates[-1] >= 75:
+                    draft = draft[:candidates[-1]].rstrip()
+                else:
+                    draft = draft[:149].rstrip() + "…"
 
             # NGワードチェック
             try:
@@ -2240,7 +2811,7 @@ class SyutainScheduler:
             result = await call_llm(
                 prompt=(
                     f"Xに投稿するドラフトを1つ作ってください。\n"
-                    f"- 280文字以内（厳守）\n"
+                    f"- 日本語150文字以内（厳守。途中で切れないよう150字以内で文を完結させる）\n"
                     f"- 一人称は「僕」\n"
                     f"- パターン: 【{current_pattern}】\n"
                     f"- 感情・失敗・数字のフックを入れる\n"
@@ -2475,25 +3046,80 @@ class SyutainScheduler:
     async def night_batch_sns_4(self):
         await self._run_sns_batch(4)
 
-    async def generate_daily_content(self):
-        """日次コンテンツ生成: 5段パイプラインでnote記事候補を1本生成"""
+    async def _generate_daily_content_impl(self, slot_name: str, theme_hint: str, extra_kwargs: dict = None):
+        """日次コンテンツ生成共通実装: 5段パイプラインでnote記事候補を1本生成"""
         try:
             from brain_alpha.content_pipeline import generate_publishable_content
-            result = await generate_publishable_content(content_type="note_article", target_length=3000)
-            if result.get("quality_score", 0) >= 0.65:
+            kwargs = {"content_type": "note_article", "target_length": 6000, "theme": theme_hint}
+            if extra_kwargs:
+                kwargs.update(extra_kwargs)
+            result = await generate_publishable_content(**kwargs)
+            content = result.get("content", "")
+            title = result.get("title", "無題")
+            quality = result.get("quality_score", 0)
+
+            # note_draftsに保存して品質チェッカー→商品パッケージングチェーンに乗せる
+            if content and len(content) > 500 and quality >= 0.50:
+                try:
+                    import os as _os
+                    drafts_dir = _os.path.join(
+                        _os.path.dirname(__file__), "data", "artifacts", "note_drafts"
+                    )
+                    _os.makedirs(drafts_dir, exist_ok=True)
+                    safe_title = "".join(
+                        c for c in title[:30] if c.isalnum() or c in "ぁ-んァ-ヶ亜-熙_- "
+                    ).strip() or "pipeline"
+                    filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M')}_{slot_name}_{safe_title}.md"
+                    filepath = _os.path.join(drafts_dir, filename)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(f"# {title}\n\n{content}")
+                    logger.info(f"content_pipeline記事をnote_draftsに保存: {filepath} (slot={slot_name})")
+                except Exception as e:
+                    logger.warning(f"note_drafts保存失敗（タスクDBには記録済み）: {e}")
+
+            if quality >= 0.70:
                 try:
                     from tools.discord_notify import notify_discord
                     await notify_discord(
-                        f"📝 コンテンツ生成完了: {result.get('title', '無題')} (品質: {result['quality_score']:.2f})"
+                        f"コンテンツ生成完了 [{slot_name}]: {title} (品質: {quality:.2f})"
                     )
                 except Exception as e:
                     logger.warning(f"Discord通知失敗: {e}")
             logger.info(
-                f"日次コンテンツ生成完了: {result.get('title', '無題')} "
-                f"(品質: {result.get('quality_score', 0):.2f})"
+                f"日次コンテンツ生成完了 [{slot_name}]: {title} "
+                f"(品質: {quality:.2f})"
             )
         except Exception as e:
-            logger.error(f"日次コンテンツ生成失敗: {e}")
+            logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
+
+    async def generate_daily_content_morning(self):
+        """07:30 JST: 海外トレンド先取り — trend_detector結果をベースに記事生成"""
+        await self._generate_daily_content_impl(
+            slot_name="morning",
+            theme_hint="海外トレンド先取り: trend_detectorが検出した日本語記事が少ない海外トレンドを元に、"
+                       "日本の読者向けに先取り解説する記事を書く。具体的なツール名・サービス名・数字を含めること。",
+        )
+
+    async def generate_daily_content_midday(self):
+        """12:00 JST: SYUTAINβ実データベース — システム運用データから記事生成"""
+        await self._generate_daily_content_impl(
+            slot_name="midday",
+            theme_hint="SYUTAINβ実データベース: SYUTAINβの実際の運用データ（コスト・収益・エラー率・"
+                       "LLM使用量・SNSエンゲージメント等）を元に、AIシステム運用のリアルを語る記事を書く。"
+                       "数値の裏付けがある内容を優先すること。",
+        )
+
+    async def generate_daily_content_evening(self):
+        """18:00 JST: 自由テーマ — intel_items + persona driven"""
+        await self._generate_daily_content_impl(
+            slot_name="evening",
+            theme_hint="自由テーマ: intel_itemsで収集した最新情報とpersona_memoryの価値観を組み合わせて、"
+                       "島原大知の独自視点で書く自由テーマの記事。他のメディアにない切り口を重視すること。",
+        )
+
+    async def generate_daily_content(self):
+        """後方互換: 旧generate_daily_contentはmorningスロットにフォールバック"""
+        await self.generate_daily_content_morning()
 
     async def posting_queue_process(self):
         """毎分: posting_queueからscheduled_at<=NOWの投稿を実行"""
@@ -2506,7 +3132,7 @@ class SyutainScheduler:
                        WHERE id IN (
                            SELECT id FROM posting_queue
                            WHERE status = 'pending' AND scheduled_at <= NOW()
-                             AND (quality_score >= 0.75 OR quality_score IS NULL)
+                             AND (quality_score >= 0.55 OR quality_score IS NULL)
                            ORDER BY scheduled_at ASC LIMIT 3
                            FOR UPDATE SKIP LOCKED
                        )
@@ -2580,9 +3206,18 @@ class SyutainScheduler:
                             )
                             if retry_count and retry_count >= 3:
                                 await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
-                                from tools.discord_notify import notify_discord
-                                await notify_discord(f"❌ 投稿失敗(3回リトライ後): {platform}/{account} (ID: {post_id})")
+                                from tools.discord_notify import notify_error
+                                await notify_error(
+                                    f"sns_fail_{platform}_{post_id}",
+                                    f"投稿失敗(3回リトライ後): {platform}/{account} (ID: {post_id})",
+                                    severity="error",
+                                )
                             else:
+                                # pendingに戻してスケジュールを10分後にずらす（次のリトライ）
+                                await conn.execute(
+                                    "UPDATE posting_queue SET status='pending', scheduled_at = NOW() + INTERVAL '10 minutes' WHERE id=$1",
+                                    post_id,
+                                )
                                 from tools.event_logger import log_event
                                 await log_event("sns.post_retry", "sns", {
                                     "posting_queue_id": str(post_id), "platform": platform,
@@ -2699,6 +3334,389 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"note品質チェックエラー: {e}")
 
+    async def engagement_analysis(self):
+        """エンゲージメント分析→投稿改善ループ"""
+        try:
+            from tools.engagement_analyzer import analyze_engagement_patterns
+            result = await analyze_engagement_patterns()
+            logger.info(f"エンゲージメント分析: {len(result.get('patterns', []))}パターン, top={result.get('top_themes', [])[:3]}")
+        except Exception as e:
+            logger.error(f"エンゲージメント分析失敗: {e}")
+
+    async def overseas_trend_detection(self):
+        """海外トレンド先取り検出"""
+        try:
+            from tools.overseas_trend_detector import detect_overseas_trends
+            findings = await detect_overseas_trends()
+            if findings:
+                from tools.discord_notify import notify_discord
+                high = [f for f in findings if f.get("opportunity") == "high"]
+                if high:
+                    await notify_discord(f"🌍 海外トレンド検出: {len(high)}件の先行者チャンス\n" +
+                        "\n".join(f"  - {f['keyword']}: {f['title'][:60]}" for f in high[:3]))
+            logger.info(f"海外トレンド: {len(findings)}件検出")
+        except Exception as e:
+            logger.error(f"海外トレンド検出失敗: {e}")
+
+    async def documentary_generation(self):
+        """週次ドキュメンタリー記事生成: SYUTAINβ自身の運用データからnote記事を生成"""
+        try:
+            from tools.documentary_generator import generate_documentary_article
+            result = await generate_documentary_article()
+            content = result.get("content", "")
+            title = result.get("title", "無題")
+            quality = result.get("quality_score", 0)
+            article_type = result.get("article_type", "unknown")
+
+            # note_draftsに保存（通常のコンテンツパイプラインと同じパスに乗せる）
+            if content and len(content) > 500 and quality >= 0.50:
+                try:
+                    import os as _os
+                    drafts_dir = _os.path.join(
+                        _os.path.dirname(__file__), "data", "artifacts", "note_drafts"
+                    )
+                    _os.makedirs(drafts_dir, exist_ok=True)
+                    safe_title = "".join(
+                        c for c in title[:30] if c.isalnum() or c in "ぁ-んァ-ヶ亜-熙_- "
+                    ).strip() or "documentary"
+                    filename = f"doc_{datetime.now().strftime('%Y%m%d_%H%M')}_{safe_title}.md"
+                    filepath = _os.path.join(drafts_dir, filename)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(f"# {title}\n\n{content}")
+                    logger.info(f"ドキュメンタリー記事をnote_draftsに保存: {filepath}")
+                except Exception as e:
+                    logger.warning(f"ドキュメンタリー記事note_drafts保存失敗: {e}")
+
+            if quality >= 0.50:
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"[Documentary] {title} (type={article_type}, score={quality:.2f})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Discord通知失敗: {e}")
+            logger.info(
+                f"ドキュメンタリー記事生成完了: {title} "
+                f"(type={article_type}, score={quality:.2f})"
+            )
+        except Exception as e:
+            logger.error(f"ドキュメンタリー記事生成失敗: {e}")
+
+    async def buzz_account_analysis(self):
+        """バズアカウント分析（Jina Search + LLMパターン分析）"""
+        try:
+            from tools.buzz_account_analyzer import analyze_buzz_accounts
+            result = await analyze_buzz_accounts()
+            logger.info(
+                f"バズ分析完了: {result.get('posts_collected', 0)}件収集, "
+                f"トレンド{len(result.get('trending_topics', []))}件, "
+                f"ギャップ{len(result.get('content_gaps', []))}件"
+            )
+        except Exception as e:
+            logger.error(f"バズ分析失敗: {e}")
+
+    async def revenue_research(self):
+        """月次収益機会リサーチ"""
+        try:
+            from tools.revenue_researcher import research_revenue_opportunities
+            from tools.discord_notify import notify_discord
+            report = await research_revenue_opportunities()
+            ready = [o["model"] for o in report.get("opportunities", []) if o.get("syutain_readiness") == "ready"]
+            if ready:
+                await notify_discord(f"💰 収益リサーチ完了: 即開始可能={', '.join(ready)}")
+            logger.info(f"収益リサーチ: {len(report.get('opportunities', []))}件")
+        except Exception as e:
+            logger.error(f"収益リサーチ失敗: {e}")
+
+    async def semantic_cache_cleanup(self):
+        """セマンティックキャッシュの期限切れエントリ削除"""
+        try:
+            from tools.semantic_cache import cleanup_expired
+            deleted = await cleanup_expired()
+            logger.info(f"セマンティックキャッシュ清掃: {deleted}件削除")
+        except Exception as e:
+            logger.error(f"キャッシュ清掃失敗: {e}")
+
+    async def memory_consolidation(self):
+        """夜間メモリ統合: 低Q値削除・類似統合・ペルソナ重複除去・キャッシュ清掃"""
+        try:
+            from tools.memory_consolidator import consolidate_memory
+            stats = await consolidate_memory()
+            total = (
+                stats.get("low_q_deleted", 0)
+                + stats.get("similar_merged", 0)
+                + stats.get("persona_deduped", 0)
+                + stats.get("cache_cleaned", 0)
+            )
+            logger.info(f"メモリ統合完了: 合計{total}件処理")
+        except Exception as e:
+            logger.error(f"メモリ統合失敗: {e}")
+
+    async def karpathy_loop_cycle(self):
+        """Karpathy自律改善サイクル（1日1パラメータ最適化）"""
+        try:
+            from agents.karpathy_loop import run_karpathy_cycle
+            result = await run_karpathy_cycle()
+            actions = result.get("actions", [])
+            if actions:
+                lines = []
+                for a in actions:
+                    if a["type"] == "experiment_started":
+                        lines.append(
+                            f"  実験開始: {a.get('param_key', '')} "
+                            f"{a.get('old_value', ''):.4f}→{a.get('new_value', ''):.4f}"
+                        )
+                    elif a["type"] == "evaluated":
+                        lines.append(
+                            f"  評価完了: {a.get('param_key', '')} → {a.get('outcome', '')}"
+                        )
+                    elif a["type"] == "skipped":
+                        lines.append(f"  {a.get('reason', 'スキップ')}")
+                from tools.discord_notify import notify_discord
+                await notify_discord(
+                    f"🔄 Karpathy Loop: {len(actions)}アクション\n" + "\n".join(lines[:5])
+                )
+            logger.info(f"Karpathy: {len(actions)}アクション")
+        except Exception as e:
+            logger.error(f"Karpathyサイクル失敗: {e}")
+
+    async def revenue_health_check(self):
+        """収益パイプラインヘルスチェック"""
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                # 各段階の状態確認
+                content = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE status = 'success' AND created_at > NOW() - INTERVAL '24 hours'") or 0
+                posted = await conn.fetchval("SELECT COUNT(*) FROM posting_queue WHERE status = 'posted' AND posted_at > NOW() - INTERVAL '24 hours'") or 0
+                revenue = await conn.fetchval("SELECT COALESCE(SUM(revenue_jpy), 0) FROM revenue_linkage WHERE created_at > NOW() - INTERVAL '7 days'") or 0
+                logger.info(f"収益パイプライン: tasks={content}, posted={posted}, revenue_7d=¥{revenue}")
+        except Exception as e:
+            logger.error(f"収益ヘルスチェック失敗: {e}")
+
+    async def garbage_collection(self):
+        """週次ゴミ収集（Harness Engineering）"""
+        try:
+            from agents.garbage_collector import run_garbage_collection, format_gc_report
+            from tools.discord_notify import notify_discord
+            report = await run_garbage_collection()
+            logger.info(f"ゴミ収集完了: findings={len(report.get('findings', []))}")
+            if report.get("findings"):
+                md = format_gc_report(report)
+                await notify_discord(md)
+        except Exception as e:
+            logger.error(f"ゴミ収集エラー: {e}")
+
+    async def feature_test_run(self):
+        """日次フィーチャーテスト（Harness Engineering）"""
+        try:
+            from tools.feature_test_runner import run_feature_tests
+            results = await run_feature_tests()
+            logger.info(f"フィーチャーテスト: passing={results['passing']}, failing={results['failing']}")
+            if results.get("changed"):
+                from tools.discord_notify import notify_discord
+                changes = ", ".join(f"{c['id']}: {c['from']}→{c['to']}" for c in results["changed"][:5])
+                await notify_discord(f"⚡ フィーチャーテスト変更検出: {changes}")
+        except Exception as e:
+            logger.error(f"フィーチャーテストエラー: {e}")
+
+    async def doc_gardening(self):
+        """週次ドキュメントガーデニング（Harness Engineering）"""
+        try:
+            from tools.doc_gardener import run_and_queue
+            result = await run_and_queue()
+            logger.info(f"ドキュメントガーデニング完了: {result['total']}件検出, {result['queued']}件キュー登録")
+        except Exception as e:
+            logger.error(f"ドキュメントガーデニングエラー: {e}")
+
+    async def note_auto_publish(self):
+        """承認済みnoteパッケージを自動公開（30分間隔）"""
+        try:
+            from tools.note_publisher import note_auto_publish_check
+            result = await note_auto_publish_check()
+            if result.get("skipped") == -1:
+                logger.debug("note自動公開: feature flag無効")
+            elif result.get("published", 0) > 0:
+                logger.info(
+                    f"note自動公開: 成功{result['published']}件, "
+                    f"失敗{result['failed']}件"
+                )
+            else:
+                logger.debug("note自動公開: 対象なし")
+        except Exception as e:
+            logger.error(f"note自動公開エラー: {e}")
+
+    async def log_cleanup(self):
+        """7日超の古いログファイルを削除（毎日04:30 JST）"""
+        import glob
+        import time as _time
+
+        log_dir = os.getenv("LOG_DIR", "logs")
+        max_age_days = 7
+        cutoff = _time.time() - (max_age_days * 86400)
+        deleted = 0
+
+        try:
+            for filepath in glob.glob(os.path.join(log_dir, "*.log*")):
+                # .gitkeepは除外
+                if os.path.basename(filepath) == ".gitkeep":
+                    continue
+                # RotatingFileHandlerのバックアップ(.log.1, .log.2等)も対象
+                try:
+                    mtime = os.path.getmtime(filepath)
+                    if mtime < cutoff:
+                        os.remove(filepath)
+                        deleted += 1
+                        logger.debug(f"古いログ削除: {filepath}")
+                except OSError as e:
+                    logger.warning(f"ログ削除失敗 ({filepath}): {e}")
+
+            if deleted > 0:
+                logger.info(f"ログクリーンアップ完了: {deleted}ファイル削除（{max_age_days}日超）")
+            else:
+                logger.debug("ログクリーンアップ: 削除対象なし")
+        except Exception as e:
+            logger.error(f"ログクリーンアップエラー: {e}")
+
+    async def approval_queue_cleanup(self):
+        """承認キュー自動クリーンアップ（毎日05:00 JST）
+
+        - 72時間超過のpending承認をexpiredに変更
+        - 7日超過のexpired承認を削除
+        - クリーンアップ結果をDiscord通知
+        """
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                # 72時間超過のpending → expired
+                expired_result = await conn.execute(
+                    """UPDATE approval_queue
+                       SET status = 'expired', responded_at = NOW()
+                       WHERE status = 'pending'
+                       AND requested_at < NOW() - INTERVAL '72 hours'"""
+                )
+                expired_count = int(expired_result.split()[-1]) if expired_result else 0
+
+                # 7日超過のexpired → 削除
+                deleted_result = await conn.execute(
+                    """DELETE FROM approval_queue
+                       WHERE status = 'expired'
+                       AND responded_at < NOW() - INTERVAL '7 days'"""
+                )
+                deleted_count = int(deleted_result.split()[-1]) if deleted_result else 0
+
+                if expired_count > 0 or deleted_count > 0:
+                    logger.info(
+                        f"承認キュークリーンアップ: {expired_count}件期限切れ, {deleted_count}件削除"
+                    )
+
+                    # イベントログ記録
+                    try:
+                        from tools.event_logger import log_event
+                        await log_event(
+                            "approval.cleanup",
+                            "system",
+                            {"expired": expired_count, "deleted": deleted_count},
+                            severity="info",
+                        )
+                    except Exception:
+                        pass
+
+                    # Discord通知
+                    try:
+                        from tools.discord_notify import notify_discord
+                        await notify_discord(
+                            f"承認キュークリーンアップ完了\n"
+                            f"  期限切れ（72h超過→expired）: {expired_count}件\n"
+                            f"  削除（7日超過expired）: {deleted_count}件"
+                        )
+                    except Exception as e:
+                        logger.debug(f"クリーンアップ通知失敗: {e}")
+                else:
+                    logger.debug("承認キュークリーンアップ: 対象なし")
+
+        except Exception as e:
+            logger.error(f"承認キュークリーンアップエラー: {e}")
+
+    async def skill_extraction(self):
+        """毎日04:00: 高Q値エピソードからスキルを抽出"""
+        try:
+            from tools.skill_manager import get_skill_manager
+            sm = get_skill_manager()
+            created = await sm.extract_skills()
+            if created:
+                from tools.event_logger import log_event
+                await log_event(
+                    "system.skill_extraction", "system",
+                    {"created_count": len(created), "skills": [s["name"] for s in created]},
+                )
+                logger.info(f"スキル抽出完了: {len(created)}件作成")
+            else:
+                logger.info("スキル抽出: 新規スキルなし")
+        except Exception as e:
+            logger.error(f"スキル抽出エラー: {e}")
+
+    async def harness_health_check(self):
+        """毎時: ハーネス健全性スコアを算出しevent_logに記録"""
+        try:
+            from tools.harness_health import calculate_health_score
+            result = await calculate_health_score()
+
+            from tools.event_logger import log_event
+            await log_event(
+                "system.harness_health", "system",
+                {
+                    "overall": result["overall"],
+                    "grade": result["grade"],
+                    "components": {
+                        k: {"score": v["score"], "detail": v["detail"]}
+                        for k, v in result.get("components", {}).items()
+                    },
+                    "recommendations": result.get("recommendations", []),
+                },
+                severity="warning" if result["overall"] < 50 else "info",
+            )
+            logger.info(
+                f"ハーネス健全性: {result['overall']}/100 "
+                f"(Grade {result['grade']})"
+            )
+        except Exception as e:
+            logger.error(f"ハーネス健全性チェックエラー: {e}")
+
+    async def self_test_full(self):
+        """日次フルテストスイート（毎日06:00）— API消費ゼロ"""
+        try:
+            from tests.test_runner import run_all_tests
+            results = await run_all_tests(include_remote=True)
+            logger.info(
+                f"自動テスト完了: passed={results['total_passed']}, "
+                f"failed={results['total_failed']}, "
+                f"elapsed={results['elapsed_sec']}s"
+            )
+        except Exception as e:
+            logger.error(f"自動テストエラー: {e}")
+
+    async def self_test_syntax(self):
+        """毎時構文チェック（軽量）"""
+        try:
+            from tests.test_runner import run_syntax_only
+            results = await run_syntax_only()
+            if results["failed"] > 0:
+                logger.warning(f"構文エラー検出: {results['failed']}件")
+            else:
+                logger.debug(f"構文チェックOK: {results['passed']}ファイル")
+        except Exception as e:
+            logger.error(f"構文チェックエラー: {e}")
+
+    async def dependency_mapping(self):
+        """週次依存関係マッピング（毎週月曜06:30）"""
+        try:
+            from tools.dependency_mapper import generate_code_map
+            content = await generate_code_map()
+            lines_count = len(content.splitlines())
+            logger.info(f"依存関係マッピング完了: CODE_MAP.md ({lines_count}行)")
+        except Exception as e:
+            logger.error(f"依存関係マッピングエラー: {e}")
+
     def stop(self):
         """スケジューラーを停止"""
         if self._scheduler:
@@ -2706,15 +3724,64 @@ class SyutainScheduler:
             logger.info("スケジューラー停止")
 
 
+async def _restore_session():
+    """起動時: 最新のbrain_alpha_sessionを復元しログに出力"""
+    try:
+        from brain_alpha.memory_manager import load_session_memory
+        sessions = await load_session_memory(limit=1)
+        if sessions:
+            s = sessions[0]
+            logger.info(
+                f"セッション復元: {s.get('session_id', 'unknown')} "
+                f"(未解決: {len(s.get('unresolved_issues', []))}件)"
+            )
+            issues = s.get("unresolved_issues", [])
+            if issues:
+                for issue in issues[:5]:
+                    logger.info(f"  未解決: {issue}")
+        else:
+            logger.info("セッション復元: 前回セッションなし（初回起動）")
+    except Exception as e:
+        logger.warning(f"セッション復元失敗（続行）: {e}")
+
+
+async def _save_session_on_shutdown():
+    """シャットダウン時: 現在の状態をセッション保存"""
+    try:
+        from brain_alpha.session_save import save_session
+        await save_session()
+        logger.info("シャットダウン時セッション保存完了")
+    except Exception as e:
+        logger.warning(f"シャットダウン時セッション保存失敗: {e}")
+
+
 async def main():
     scheduler = SyutainScheduler()
     await scheduler.start()
 
+    # 起動時セッション復元
+    await _restore_session()
+
+    # SIGTERM/SIGINTハンドラ登録（グレースフルシャットダウン）
+    import signal
+
+    _shutdown_event = asyncio.Event()
+
+    def _signal_handler(sig, frame):
+        logger.info(f"シグナル受信: {signal.Signals(sig).name}")
+        _shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     # メインループ（スケジューラーはバックグラウンドで動作）
     try:
-        while True:
-            await asyncio.sleep(1)
+        await _shutdown_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        logger.info("グレースフルシャットダウン開始")
+        await _save_session_on_shutdown()
         scheduler.stop()
 
 

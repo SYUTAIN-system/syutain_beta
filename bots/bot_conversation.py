@@ -31,8 +31,8 @@ async def _get_system_status() -> str:
             cost = await conn.fetchval(
                 "SELECT COALESCE(SUM(amount_jpy),0) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE"
             ) or 0
-            nodes = await conn.fetch("SELECT node_name, state FROM node_state ORDER BY node_name")
-            node_str = ", ".join(f"{r['node_name']}={r['state']}" for r in nodes)
+            nodes = await conn.fetch("SELECT node_name, state, reason FROM node_state ORDER BY node_name")
+            node_str = ", ".join(f"{r['node_name']}={r['state']}" + (f"({r['reason']})" if r.get('reason') else "") for r in nodes)
             approvals = await conn.fetchval(
                 "SELECT COUNT(*) FROM approval_queue WHERE status='pending'"
             ) or 0
@@ -50,18 +50,74 @@ async def _get_system_status() -> str:
                    FROM tasks WHERE goal_id='content_pipeline'
                    ORDER BY created_at DESC LIMIT 1"""
             )
-        status = f"SNS: {posted}件投稿済/{pending}件待ち。エラー24h: {errors}件。コスト: ¥{float(cost):.0f}。ノード: {node_str}。"
+        # 動作モード判定
+        from datetime import datetime
+        now_hour = datetime.now().hour
+        mode = "夜間モード" if (now_hour >= 23 or now_hour < 7) else "日中モード"
+
+        lines = []
+        lines.append(f"動作モード: {mode}（夜間=23:00-07:00/日中=07:00-23:00）")
+        lines.append(f"SNS: {posted}件投稿済 / {pending}件待ち")
+        lines.append(f"エラー(24h): {errors}件")
+        lines.append(f"コスト: ¥{float(cost):.0f}")
+        lines.append(f"ノード: {node_str}")
         if approvals > 0:
-            status += f" 承認待ち: {approvals}件。"
+            lines.append(f"承認待ち: {approvals}件")
         if handoff_pending > 0:
-            status += f" brain_handoff待ち: {handoff_pending}件。"
+            lines.append(f"brain_handoff待ち: {handoff_pending}件")
         if auto_fix_count > 0:
-            status += f" auto_fix(24h): {auto_fix_count}件。"
+            lines.append(f"auto_fix(24h): {auto_fix_count}件")
         if cp_last:
             cp_status = cp_last['status']
             cp_score = f" Q={cp_last['quality_score']:.2f}" if cp_last['quality_score'] else ""
-            status += f" content_pipeline最終: {cp_status}{cp_score}。"
-        return status
+            lines.append(f"content_pipeline最終: {cp_status}{cp_score}")
+        status = "\n".join(lines)
+
+        # 収益パイプライン状況
+        async with get_connection() as conn2:
+            revenue = await conn2.fetchval("SELECT COALESCE(SUM(revenue_jpy),0) FROM revenue_linkage") or 0
+            products = await conn2.fetchval("SELECT COUNT(*) FROM revenue_linkage") or 0
+            intel_actionable = await conn2.fetchval(
+                "SELECT COUNT(*) FROM intel_items WHERE review_flag='actionable'"
+            ) or 0
+            intel_total = await conn2.fetchval("SELECT COUNT(*) FROM intel_items") or 0
+            proposals_active = await conn2.fetchval(
+                "SELECT COUNT(*) FROM proposal_history WHERE review_flag IN ('approved','pending_review')"
+            ) or 0
+            goals_active = await conn2.fetchval(
+                "SELECT COUNT(*) FROM goal_packets WHERE status IN ('active','pending')"
+            ) or 0
+        lines.append(f"収益: ¥{float(revenue):,.0f}（{products}商品）")
+        lines.append(f"intel: {intel_actionable}/{intel_total}件活用可能")
+        lines.append(f"提案: {proposals_active}件 / ゴール: {goals_active}件稼働中")
+        status = "\n".join(lines)
+
+        # タスク実行状況(今日)
+        async with get_connection() as conn3:
+            tasks_today = await conn3.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE created_at::date=CURRENT_DATE AND status='completed'"
+            ) or 0
+            tasks_running = await conn3.fetchval(
+                "SELECT COUNT(*) FROM tasks WHERE status='running'"
+            ) or 0
+            # Brain-α指示キュー
+            ccq_pending = await conn3.fetchval(
+                "SELECT COUNT(*) FROM claude_code_queue WHERE status='pending'"
+            ) or 0
+            # LLM呼び出し数(今日)
+            llm_today = await conn3.fetchval(
+                "SELECT COUNT(*) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE"
+            ) or 0
+            local_today = await conn3.fetchval(
+                "SELECT COUNT(*) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE AND tier='L'"
+            ) or 0
+        local_pct = (local_today * 100 // max(llm_today, 1)) if llm_today else 0
+        lines.append(f"タスク: {tasks_today}件完了 / {tasks_running}件実行中")
+        lines.append(f"LLM: {llm_today}回（ローカル{local_pct}%）")
+        if ccq_pending > 0:
+            lines.append(f"Brain-α指示キュー: {ccq_pending}件待ち")
+        lines.append(f"スケジュール: SNS生成22:00-23:30, 朝レポ07:00, 夜サマリ22:00")
+        return "\n".join(lines)
     except Exception as e:
         logger.error(f"システム状態取得失敗: {e}")
         return ""
@@ -215,47 +271,51 @@ async def _get_full_system_report() -> str:
 
             # --- auto_fix_log サマリー (24h) ---
             auto_fixes = await conn.fetch(
-                """SELECT fix_type, success, COUNT(*) FROM auto_fix_log
+                """SELECT error_type, fix_result, COUNT(*) FROM auto_fix_log
                    WHERE created_at > NOW() - INTERVAL '24 hours'
-                   GROUP BY fix_type, success ORDER BY count DESC LIMIT 10"""
+                   GROUP BY error_type, fix_result ORDER BY count DESC LIMIT 10"""
             )
             if auto_fixes:
                 lines.append("**auto_fix_log (24h)**")
                 for af in auto_fixes:
-                    result_str = "成功" if af['success'] else "失敗"
-                    lines.append(f"  {af['fix_type'] or '不明'}: {result_str}={af['count']}件")
+                    lines.append(f"  {af['error_type'] or '不明'}: {af['fix_result'] or '不明'}={af['count']}件")
             else:
                 lines.append("**auto_fix_log (24h): なし**")
 
             # --- brain_cross_evaluation ---
-            cross_eval = await conn.fetch(
-                """SELECT evaluation_type, verdict, COUNT(*),
-                     ROUND(AVG(score)::numeric, 2) as avg_score
-                   FROM brain_cross_evaluation
-                   WHERE created_at > NOW() - INTERVAL '7 days'
-                   GROUP BY evaluation_type, verdict ORDER BY count DESC LIMIT 10"""
-            )
-            if cross_eval:
-                lines.append("**brain_cross_evaluation (7日)**")
-                for ce in cross_eval:
-                    lines.append(f"  {ce['evaluation_type']}/{ce['verdict']}: {ce['count']}件 (平均スコア:{ce['avg_score']})")
-            else:
-                lines.append("**brain_cross_evaluation (7日): なし**")
+            try:
+                cross_eval = await conn.fetch(
+                    """SELECT evaluation_type, verdict, COUNT(*),
+                         ROUND(AVG(score)::numeric, 2) as avg_score
+                       FROM brain_cross_evaluation
+                       WHERE created_at > NOW() - INTERVAL '7 days'
+                       GROUP BY evaluation_type, verdict ORDER BY count DESC LIMIT 10"""
+                )
+                if cross_eval:
+                    lines.append("**brain_cross_evaluation (7日)**")
+                    for ce in cross_eval:
+                        lines.append(f"  {ce['evaluation_type']}/{ce['verdict']}: {ce['count']}件 (平均スコア:{ce['avg_score']})")
+                else:
+                    lines.append("**brain_cross_evaluation (7日): なし**")
+            except Exception:
+                lines.append("**brain_cross_evaluation: テーブル未作成**")
 
             # --- note_quality_reviews ---
-            note_reviews = await conn.fetch(
-                """SELECT verdict, COUNT(*),
-                     ROUND(AVG(total_cost_jpy)::numeric, 1) as avg_cost
-                   FROM note_quality_reviews
-                   WHERE created_at > NOW() - INTERVAL '7 days'
-                   GROUP BY verdict ORDER BY count DESC"""
-            )
-            if note_reviews:
-                lines.append("**note_quality_reviews (7日)**")
-                for nr in note_reviews:
-                    lines.append(f"  {nr['verdict']}: {nr['count']}件 (平均コスト¥{nr['avg_cost'] or 0})")
-            else:
-                lines.append("**note_quality_reviews (7日): なし**")
+            try:
+                note_reviews = await conn.fetch(
+                    """SELECT final_status as verdict, COUNT(*)
+                       FROM note_quality_reviews
+                       WHERE checked_at > NOW() - INTERVAL '7 days'
+                       GROUP BY final_status ORDER BY count DESC"""
+                )
+                if note_reviews:
+                    lines.append("**note_quality_reviews (7日)**")
+                    for nr in note_reviews:
+                        lines.append(f"  {nr['verdict'] or '未評価'}: {nr['count']}件")
+                else:
+                    lines.append("**note_quality_reviews (7日): なし**")
+            except Exception:
+                lines.append("**note_quality_reviews: テーブル未作成**")
 
             # --- persona_memory 統計 ---
             persona_stats = await conn.fetch(
@@ -295,6 +355,40 @@ async def _get_full_system_report() -> str:
                 lines.append("**posting_queue (全期間)**")
                 for pq in pq_detail:
                     lines.append(f"  {pq['status']}: {pq['count']}件")
+
+            # --- Brain-α指示キュー ---
+            ccq = await conn.fetch(
+                """SELECT status, COUNT(*) FROM claude_code_queue
+                   GROUP BY status ORDER BY count DESC"""
+            )
+            if ccq:
+                lines.append("**Brain-α指示キュー (claude_code_queue)**")
+                for c in ccq:
+                    lines.append(f"  {c['status']}: {c['count']}件")
+            else:
+                lines.append("**Brain-α指示キュー: なし**")
+
+            # --- 今日のLLM使用量 ---
+            llm_today = await conn.fetchval(
+                "SELECT COUNT(*) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE"
+            ) or 0
+            local_today = await conn.fetchval(
+                "SELECT COUNT(*) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE AND tier='L'"
+            ) or 0
+            cost_today = await conn.fetchval(
+                "SELECT COALESCE(SUM(amount_jpy),0) FROM llm_cost_log WHERE recorded_at::date=CURRENT_DATE"
+            ) or 0
+            local_pct = (local_today * 100 // max(llm_today, 1)) if llm_today else 0
+            lines.append(f"**LLM使用量 (今日)** {llm_today}回 (ローカル{local_pct}%) コスト¥{float(cost_today):.0f}")
+
+            # --- 今日のタスク実行 ---
+            tasks_today = await conn.fetch(
+                "SELECT status, COUNT(*) FROM tasks WHERE created_at::date=CURRENT_DATE GROUP BY status ORDER BY count DESC"
+            )
+            if tasks_today:
+                lines.append("**タスク (今日)**")
+                for t in tasks_today:
+                    lines.append(f"  {t['status']}: {t['count']}件")
 
         return "\n".join(lines)
     except Exception as e:
@@ -550,23 +644,37 @@ async def generate_response(user_message: str, history: list[dict], extra_contex
     system_prompt = f"""あなたはSYUTAINβ。島原大知（大知さん）とDiscordで会話中。
 
 【絶対ルール】
-- 聞かれたことだけ答える。不要な哲学・自己紹介を語らない
 - 事実ベース。捏造禁止。わからないことは「わからない」と言う
 - 短く。50文字で済むなら50文字。最大でも300文字以内を目安に
 - 雑談は雑談として応じる。仕事に無理に繋げない
 - 間違いを指摘されたら認めて修正
 - 同じ表現を繰り返さない
+- 不要な哲学・自己紹介を語らない
 
 【人格】一人称「自分」。「大知さん」と呼ぶ。冷静・正直・自然体。敬語ベースだが堅くない。哲学はトーンに滲ませる。
+有能なCOOとして振る舞う。重要情報を先に出し、聞かれる前に動く。データダンプではなくアクション可能な要約を出す。
 {f"【大知さんの特徴】{daichi_short}" if daichi_short else ""}
 
 【状態】{status}
 {learnings_section}
+
+【プロアクティブ行動 — 状態を見て自律的に判断せよ】
+上記【状態】を読み、以下に該当する場合は応答に1-2行で自然に織り込め（聞かれていなくても）:
+- エラー24h > 0件 → 🔴「エラーN件出てます」＋必要なら[ACTION:error_check]で詳細取得
+- 承認待ち > 0件 → 🟡「承認待ちN件あります」と伝える
+- コストが¥500/日超過 → 🟡 コスト注意を1行で
+- ノードがdown/degraded → 🔴 該当ノードを報告
+- brain_handoff待ち > 0件 → 🔵 Brain-α連携の状況を一言
+- content_pipeline最終がfailed → 🔴 パイプライン異常を報告
+- タスク実行中が多い(5件以上) → 🔵 稼働状況を一言
+ただし: 雑談中は控えめに。全て正常なら何も言わない。毎回同じ報告を繰り返さない（直近の対話で既に報告済みなら省略）。
+問題の重要度: 🔴 即対応が必要 🟡 注意・確認推奨 🔵 参考情報
+
 【直近の対話】
 {hist_text[-1500:]}
 {extra_context}
 
-ACTIONタグ（データ取得・操作が必要な場合のみ。複数同時OK）:
+ACTIONタグ（データ取得・操作が必要な場合。複数同時OK。自律的に使ってよい）:
 ■ 状態: [ACTION:status_check] [ACTION:daily_report] [ACTION:weekly_report]
 ■ SNS: [ACTION:posting_status] [ACTION:sns_preview] [ACTION:sns_preview:明日]
   編集: [ACTION:sns_edit:ID|新しい内容] 削除: [ACTION:sns_delete:ID]
@@ -585,7 +693,8 @@ ACTIONタグ（データ取得・操作が必要な場合のみ。複数同時OK
 ■ 生成: [ACTION:generate:指示内容]
 ■ ジョブ実行: [ACTION:run_job:情報収集] (情報収集/SNS再生成/提案/キーワード/エンゲージメント/バックアップ)
 ■ リマインダー: [ACTION:remind:7:00|内容] [ACTION:remind:30m|内容]
-不要なら応答文のみ出力。"""
+■ Brain-α: [ACTION:escalate_alpha:指示内容] [ACTION:alpha_queue_status]
+自律判断: 状態に異常があればACTIONで詳細を取得し報告せよ。不要なら応答文のみ出力。"""
 
     try:
         # 3段階自動モデル選択（キーワード→文脈→品質フィードバック）

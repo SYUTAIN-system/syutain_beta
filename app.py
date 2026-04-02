@@ -16,6 +16,7 @@ import uuid
 import time
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncGenerator
@@ -34,6 +35,7 @@ from agents.proposal_engine import get_proposal_engine
 from agents.approval_manager import get_approval_manager
 from agents.chat_agent import get_chat_agent
 from tools.discord_notify import notify_discord, notify_goal_accepted
+from tools.mcp_server import router as mcp_router
 
 load_dotenv()
 
@@ -56,9 +58,19 @@ def _log_task_exception(task: asyncio.Task):
         logger.error(f"バックグラウンドタスク例外: {exc}", exc_info=exc)
 
 
+# ログ設定（RotatingFileHandler: 10MB x 5世代）
+_app_log_dir = os.getenv("LOG_DIR", "logs")
+os.makedirs(_app_log_dir, exist_ok=True)
+_app_log_fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+_app_stream = logging.StreamHandler()
+_app_stream.setFormatter(_app_log_fmt)
+_app_file = RotatingFileHandler(
+    f"{_app_log_dir}/fastapi.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_app_file.setFormatter(_app_log_fmt)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    handlers=[_app_stream, _app_file],
 )
 
 # ===== 設定（.envから読み込み、ハードコードしない）=====
@@ -486,6 +498,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ===== MCP Server エンドポイント =====
+app.include_router(mcp_router)
+
 
 # ===== 認証エンドポイント =====
 
@@ -632,8 +647,54 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
                 })
             dashboard["recent_artifacts"] = artifacts
 
+            # SNS投稿データ
+            try:
+                dashboard["sns_posted_today"] = await conn.fetchval(
+                    "SELECT COUNT(*) FROM posting_queue WHERE status = 'posted' AND posted_at::date = CURRENT_DATE"
+                ) or 0
+            except Exception:
+                dashboard["sns_posted_today"] = 0
+
+            try:
+                dashboard["sns_pending_today"] = await conn.fetchval(
+                    "SELECT COUNT(*) FROM posting_queue WHERE status = 'pending' AND scheduled_at::date = CURRENT_DATE"
+                ) or 0
+            except Exception:
+                dashboard["sns_pending_today"] = 0
+
+            # エラー件数（down/win11/maintenance状態のノードを除外）
+            try:
+                dashboard["error_count_today"] = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM event_log
+                    WHERE severity IN ('error', 'critical')
+                      AND created_at::date = CURRENT_DATE
+                      AND (node IS NULL OR node NOT IN (
+                          SELECT name FROM node_status
+                          WHERE status IN ('down', 'win11', 'maintenance')
+                      ))
+                    """
+                ) or 0
+            except Exception:
+                # node_statusテーブルが無い場合はシンプルにカウント
+                try:
+                    dashboard["error_count_today"] = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM event_log
+                        WHERE severity IN ('error', 'critical')
+                          AND created_at::date = CURRENT_DATE
+                        """
+                    ) or 0
+                except Exception:
+                    dashboard["error_count_today"] = 0
+
     except Exception as e:
         logger.error(f"ダッシュボードデータ取得エラー: {e}")
+
+    # デフォルト値の保証
+    dashboard.setdefault("sns_posted_today", 0)
+    dashboard.setdefault("sns_pending_today", 0)
+    dashboard.setdefault("error_count_today", 0)
 
     return dashboard
 
@@ -825,7 +886,7 @@ async def get_artifact_stats(user: dict = Depends(get_current_user)):
             row = await conn.fetchrow(
                 """SELECT
                     COUNT(*) as total,
-                    ROUND(AVG(quality_score)::numeric, 2) as avg_quality,
+                    ROUND(AVG(quality_score) FILTER (WHERE quality_score > 0)::numeric, 2) as avg_quality,
                     ROUND(SUM(cost_jpy)::numeric, 2) as total_cost,
                     COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) as today_count,
                     COUNT(*) FILTER (WHERE quality_score >= 0.65) as high_quality,
@@ -1049,8 +1110,34 @@ async def get_pending_approvals_public(
                         description = f"[{platform}] {req_data.get('content', '')[:200]}"
                     elif row["request_type"] == "task_approval":
                         description = req_data.get("task_type", "") or "タスク承認リクエスト"
+                    elif row["request_type"] == "product_publish":
+                        title = req_data.get("title", "")
+                        price = req_data.get("price_jpy", 0)
+                        platform = req_data.get("platform", "note")
+                        description = f"[{platform}] {title} (¥{price})" if title else f"商品公開リクエスト ({platform})"
+                    elif row["request_type"] == "doc_gardening":
+                        description = req_data.get("inconsistency", req_data.get("detail", "ドキュメント整合性チェック"))[:300]
                     else:
-                        description = json.dumps(req_data, ensure_ascii=False)[:200]
+                        # raw JSONを人間が読める形に変換
+                        parts = []
+                        for k, v in (req_data if isinstance(req_data, dict) else {}).items():
+                            if k in ("content", "body_full", "body_preview"):
+                                parts.append(f"{k}: {str(v)[:100]}...")
+                            elif isinstance(v, str) and len(v) > 200:
+                                parts.append(f"{k}: {v[:100]}...")
+                            else:
+                                parts.append(f"{k}: {v}")
+                        description = "\n".join(parts)[:500] if parts else "承認リクエスト"
+
+                # プレビュー生成: SNS投稿は全文、商品公開はタイトル+本文プレビュー
+                preview = None
+                rtype = row["request_type"]
+                if rtype in ("sns_post", "bluesky_post", "x_post", "threads_post", "sns_posting", "social_post"):
+                    preview = req_data.get("content", "")
+                elif rtype == "product_publish":
+                    title = req_data.get("title", "")
+                    body_preview = req_data.get("body_preview", "") or req_data.get("body_full", "")[:500]
+                    preview = f"{title}\n\n{body_preview}" if title else body_preview
 
                 approvals.append({
                     "approval_id": row["approval_id"],
@@ -1059,6 +1146,7 @@ async def get_pending_approvals_public(
                     "task_id": req_data.get("task_id", ""),
                     "description": description,
                     "content": req_data.get("content", ""),
+                    "preview": preview,
                     "task_type": row["task_type"],
                     "goal_id": row["goal_id"],
                     "assigned_node": row["assigned_node"],
@@ -1169,6 +1257,17 @@ async def respond_pending_approval(approval_id: int, body: ApprovalResponse, use
                     except Exception as e:
                         logger.error(f"Threads投稿実行エラー: {e}")
 
+            elif req_type == "product_publish":
+                # 商品パッケージを承認→公開待ちキューに追加
+                pkg_id = rd.get("package_id") or rd.get("product_id")
+                if pkg_id:
+                    try:
+                        from brain_alpha.product_packager import approve_package
+                        result = await approve_package(int(pkg_id))
+                        logger.info(f"product_publish承認: pkg_id={pkg_id}, result={result.get('status')}")
+                    except Exception as e:
+                        logger.error(f"product_publish承認処理失敗: {e}")
+
         # event_log記録
         try:
             from tools.event_logger import log_event
@@ -1184,6 +1283,27 @@ async def respond_pending_approval(approval_id: int, body: ApprovalResponse, use
             )
         except Exception:
             pass
+
+        # 却下時: failure_memoryに記録（同じ失敗を繰り返さない）
+        if not body.approved:
+            try:
+                from tools.failure_memory import record_failure
+                rd_fm = row["request_data"] if row else {}
+                if isinstance(rd_fm, str):
+                    rd_fm = json.loads(rd_fm)
+                data_summary = json.dumps(rd_fm, ensure_ascii=False, default=str)[:300]
+                await record_failure(
+                    failure_type="approval_rejected",
+                    error_message=body.reason or "却下（理由なし）",
+                    context={
+                        "request_type": req_type,
+                        "request_data_summary": data_summary,
+                        "approval_id": approval_id,
+                    },
+                    task_type=req_type,
+                )
+            except Exception as e:
+                logger.debug(f"却下理由のfailure_memory記録失敗（無視）: {e}")
 
         # persona_memoryに判断パターンを蓄積（接続#15修正）
         try:
@@ -1557,13 +1677,50 @@ async def get_agent_ops_status(user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"active_goals取得エラー: {e}")
 
+    # Emergency Kill件数を実データから取得
+    emergency_kills = 0
+    try:
+        emergency_kills = await conn.fetchval(
+            """SELECT COUNT(*) FROM event_log
+               WHERE event_type LIKE 'loop.%kill%'
+               AND created_at::date = CURRENT_DATE"""
+        ) or 0
+    except Exception:
+        pass
+
+    # 最近完了したゴール5件
+    recently_completed_goals = []
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            completed_rows = await conn.fetch(
+                """
+                SELECT goal_id, raw_goal, parsed_objective, updated_at
+                FROM goal_packets
+                WHERE status IN ('completed', 'done', 'success')
+                ORDER BY updated_at DESC
+                LIMIT 5
+                """
+            )
+            for cr in completed_rows:
+                title = cr["raw_goal"] or cr["parsed_objective"] or cr["goal_id"]
+                recently_completed_goals.append({
+                    "id": cr["goal_id"][:12],
+                    "title": str(title)[:100],
+                    "completed_at": cr["updated_at"].isoformat() if cr["updated_at"] else None,
+                })
+    except Exception as e:
+        logger.error(f"recently_completed_goals取得エラー: {e}")
+
     return {
         "nats_connected": nats_connected,
+        "nats_status_note": "ノードハートビートに基づく近似値（NATS直接接続状態ではありません）",
         "loop_guard_active": True,
-        "emergency_kills_today": 0,
-        "total_steps_today": int(total_steps),
+        "emergency_kills_today": int(emergency_kills),
+        "total_tasks_today": int(total_steps),
         "daily_budget_used": round(daily_pct, 1),
         "active_goals": active_goals,
+        "recently_completed_goals": recently_completed_goals,
     }
 
 
@@ -1599,6 +1756,30 @@ async def get_nodes_status(user: dict = Depends(get_current_user)):
 # ===== モデル使用統計 =====
 
 @app.get("/api/models/usage")
+def _resolve_provider(model_name: str) -> str:
+    """モデル名からプロバイダーを推定"""
+    if not model_name:
+        return "Unknown"
+    m = model_name.lower()
+    if m.startswith("claude-"):
+        return "Anthropic"
+    if m.startswith("gpt-"):
+        return "OpenAI"
+    if m.startswith("gemini-"):
+        return "Google"
+    if m.startswith("deepseek-"):
+        return "DeepSeek"
+    if m.startswith("qwen"):
+        return "Local (Ollama)"
+    if m.startswith("nemotron"):
+        return "Local (Ollama)"
+    if m.startswith("jina-"):
+        return "Jina"
+    if m.startswith("tavily-"):
+        return "Tavily"
+    return "Unknown"
+
+
 async def get_model_usage(user: dict = Depends(get_current_user)):
     """モデル使用統計を取得"""
     usage = {"models": [], "tier_summary": {}, "total_cost_jpy": 0}
@@ -1618,7 +1799,7 @@ async def get_model_usage(user: dict = Depends(get_current_user)):
                 """
             )
             usage["models"] = [
-                {**dict(r), "total_cost": float(r["total_cost"] or 0), "call_count": int(r["call_count"] or 0)}
+                {**dict(r), "total_cost": float(r["total_cost"] or 0), "call_count": int(r["call_count"] or 0), "provider": _resolve_provider(r["model_used"])}
                 for r in rows
             ]
 
@@ -1641,6 +1822,7 @@ async def get_model_usage(user: dict = Depends(get_current_user)):
                         "tier": cr["tier"],
                         "call_count": int(cr["call_count"] or 0),
                         "total_cost": float(cr["total_cost"] or 0),
+                        "provider": _resolve_provider(cr["model"]),
                     })
 
             # Tier別サマリー
@@ -2128,14 +2310,6 @@ async def get_all_settings(user: dict = Depends(get_current_user)):
     try:
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
-            # Ensure settings table exists
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value JSONB NOT NULL,
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
             rows = await conn.fetch("SELECT key, value FROM settings")
             for row in rows:
                 try:
@@ -2144,6 +2318,59 @@ async def get_all_settings(user: dict = Depends(get_current_user)):
                     pass
     except Exception as e:
         logger.error(f"設定取得エラー: {e}")
+
+    # Feature Flags を読み込んで含める
+    try:
+        import yaml
+        from pathlib import Path
+        ff_path = Path("feature_flags.yaml")
+        if ff_path.exists():
+            with open(ff_path, "r") as f:
+                flags = yaml.safe_load(f)
+            settings["feature_flags"] = flags or {}
+        else:
+            settings["feature_flags"] = {}
+    except Exception as e:
+        logger.error(f"Feature Flags読み込みエラー: {e}")
+        settings["feature_flags"] = {}
+
+    # Brain-α ステータス
+    brain_alpha = {
+        "self_healing_count_24h": 0,
+        "persona_memory_count": 0,
+        "last_session": None,
+    }
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            try:
+                brain_alpha["self_healing_count_24h"] = await conn.fetchval(
+                    "SELECT COUNT(*) FROM auto_fix_log WHERE created_at > NOW() - INTERVAL '24 hours'"
+                ) or 0
+            except Exception:
+                pass
+            try:
+                brain_alpha["persona_memory_count"] = await conn.fetchval(
+                    "SELECT COUNT(*) FROM persona_memory"
+                ) or 0
+            except Exception:
+                pass
+            try:
+                session_row = await conn.fetchrow(
+                    "SELECT session_id, started_at, ended_at FROM brain_alpha_session ORDER BY started_at DESC LIMIT 1"
+                )
+                if session_row:
+                    brain_alpha["last_session"] = {
+                        "session_id": str(session_row["session_id"]) if session_row["session_id"] else None,
+                        "started_at": session_row["started_at"].isoformat() if session_row["started_at"] else None,
+                        "ended_at": session_row["ended_at"].isoformat() if session_row["ended_at"] else None,
+                    }
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Brain-αステータス取得エラー: {e}")
+    settings["brain_alpha"] = brain_alpha
+
     return settings
 
 
@@ -3304,6 +3531,113 @@ async def get_node_state_history(
     except Exception as e:
         logger.error(f"ノード履歴取得エラー: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== A2A Protocol Endpoints =====
+
+class A2AInvokeRequest(BaseModel):
+    capability: str
+    parameters: dict = {}
+
+
+async def _verify_api_key(request: Request) -> str:
+    """A2AリクエストからAPIキーを取得・検証"""
+    api_key = request.headers.get("X-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+    # キーの存在確認
+    try:
+        pool = await get_pg_pool()
+        row = await pool.fetchrow(
+            "SELECT 1 FROM api_credits WHERE api_key = $1", api_key
+        )
+        if not row:
+            raise HTTPException(status_code=403, detail="Unknown API key")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"APIキー検証エラー: {e}")
+        raise HTTPException(status_code=503, detail="Database error")
+    return api_key
+
+
+def _load_agent_card() -> dict:
+    """agent_card.jsonを読み込む"""
+    import pathlib
+    card_path = pathlib.Path(__file__).parent / "config" / "agent_card.json"
+    try:
+        return json.loads(card_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Agent Card読み込みエラー: {e}")
+        return {"error": "Agent Card not found"}
+
+
+@app.get("/.well-known/agent.json")
+async def get_agent_card():
+    """A2A Discovery — Agent Card（認証不要）"""
+    return _load_agent_card()
+
+
+@app.get("/a2a/capabilities")
+async def get_a2a_capabilities():
+    """A2A — 詳細ケイパビリティ一覧と料金（認証不要）"""
+    from tools.payment_manager import PaymentManager
+    card = _load_agent_card()
+    capabilities = card.get("capabilities", {})
+    # コスト情報を付加
+    result = {}
+    for name, info in capabilities.items():
+        cost = PaymentManager.DEFAULT_COSTS.get(name, 10.0)
+        result[name] = {
+            **info,
+            "credit_cost": cost,
+        }
+    return {
+        "agent": card.get("name", "SYUTAINβ"),
+        "version": card.get("version", ""),
+        "capabilities": result,
+        "authentication": card.get("authentication", {}),
+        "protocols": card.get("protocols", []),
+    }
+
+
+@app.post("/a2a/invoke")
+async def invoke_a2a_capability(req: A2AInvokeRequest, request: Request):
+    """A2A — ケイパビリティを呼び出す（APIキー認証 + クレジット課金）"""
+    api_key = await _verify_api_key(request)
+
+    card = _load_agent_card()
+    available = card.get("capabilities", {})
+    if req.capability not in available:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown capability: {req.capability}. "
+                   f"Available: {list(available.keys())}",
+        )
+
+    # クレジット課金
+    from tools.payment_manager import PaymentManager
+    pm = PaymentManager(get_pg_pool)
+    try:
+        charge = await pm.validate_and_charge(api_key, req.capability)
+    except ValueError as e:
+        raise HTTPException(status_code=402, detail=str(e))
+
+    # ケイパビリティ実行（現段階ではスタブ応答）
+    result = {
+        "status": "accepted",
+        "capability": req.capability,
+        "parameters": req.parameters,
+        "charge": charge,
+        "message": f"Capability '{req.capability}' invoked successfully. "
+                   "Full execution pipeline coming in next iteration.",
+    }
+
+    logger.info(
+        f"A2A invoke: capability={req.capability} "
+        f"key={api_key[:8]}... cost={charge.get('credits_deducted', 0)}"
+    )
+    return result
 
 
 # ===== 開発用起動 =====

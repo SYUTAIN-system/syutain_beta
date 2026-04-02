@@ -15,19 +15,36 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 BRAIN_WEBHOOK_URL = os.getenv("DISCORD_BRAIN_WEBHOOK_URL", "")
 
 # ===== 重複排除 =====
-DEDUP_INTERVAL = 300  # 5分
+DEDUP_INTERVAL = 300  # 5分（デフォルト）
+DEDUP_INTERVAL_LONG = 3600  # 1時間（予算警告等の繰り返し抑制）
 _recent_notifications: dict[str, float] = {}  # error_type -> last_sent_timestamp
+
+# 長い間隔（1時間）で抑制するエラータイプのプレフィックス/キーワード
+_LONG_DEDUP_PREFIXES = ("budget_", "cost_", "予算", "Ollama", "proactive", "node", "BRAVO", "CHARLIE", "DELTA", "health")
 
 
 def _should_send(error_type: str, severity: str) -> bool:
-    """severity-based dedup判定。CRITICALは常に送信、ERRORは5分dedup"""
+    """severity-based dedup判定。CRITICALは常に送信、ERRORは5分/1時間dedup"""
     if severity == "critical":
         return True
     now = time.time()
     last = _recent_notifications.get(error_type, 0.0)
-    if now - last < DEDUP_INTERVAL:
+    # 予算系は1時間dedup、それ以外は5分dedup
+    interval = DEDUP_INTERVAL_LONG if any(error_type.startswith(p) for p in _LONG_DEDUP_PREFIXES) else DEDUP_INTERVAL
+    if now - last < interval:
         return False
     _recent_notifications[error_type] = now
+    # メモリリーク防止: 200件超で古いエントリを削除、500件でハード上限（半分削除）
+    n = len(_recent_notifications)
+    if n > 500:
+        sorted_keys = sorted(_recent_notifications, key=_recent_notifications.get)
+        for k in sorted_keys[: n // 2]:
+            del _recent_notifications[k]
+    elif n > 200:
+        cutoff = now - DEDUP_INTERVAL * 2
+        stale = [k for k, v in _recent_notifications.items() if v < cutoff]
+        for k in stale:
+            del _recent_notifications[k]
     return True
 
 

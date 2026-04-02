@@ -239,6 +239,14 @@ class NodeRouter:
                 )
         except Exception as e:
             logger.error(f"LLM推論処理エラー: {e}")
+            if msg.reply:
+                try:
+                    await self._nats_client.nc.publish(
+                        msg.reply,
+                        json.dumps({"error": str(e)}, ensure_ascii=False).encode(),
+                    )
+                except Exception:
+                    pass
 
     async def _on_heartbeat(self, msg) -> None:
         """ハートビートから負荷情報を更新"""

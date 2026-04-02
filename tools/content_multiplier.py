@@ -144,7 +144,7 @@ JSONリスト形式で出力: ["投稿1", "投稿2", ...]""",
 【記事】{source_title}: {source_text[:1500]}
 {intel_context}
 要件:
-- 140文字以内
+- 日本語150文字以内（厳守。途中で切れないよう150字以内で文を完結させる）
 - 一人称「僕」
 - 感情・失敗・数字のいずれかのフックを入れる
 - 共感を誘う内容
@@ -164,7 +164,7 @@ JSONリスト形式で出力: ["投稿1", "投稿2", "投稿3"]""",
 {intel_context}
 
 要件:
-- 140文字以内
+- 日本語150文字以内（厳守。途中で切れないよう150字以内で文を完結させる）
 - 一人称「私」
 - 結論→根拠→示唆の構造
 - 分析・構造のフック
@@ -253,7 +253,7 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                 # Bluesky投稿を品質チェック後に承認キューに投入
                 for post in bluesky_posts:
                     quality = _score_multi_axis(post[:300])
-                    if quality < 0.60 or _check_ai_cliche(post[:300]):
+                    if quality < 0.70 or _check_ai_cliche(post[:300]):
                         logger.info(f"content_multiplier: Bluesky投稿却下 quality={quality:.2f}")
                         continue
                     await conn.execute(
@@ -269,15 +269,15 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                     )
                 # X投稿（島原アカウント）を品質チェック後に承認キューに投入
                 for post in x_shimahara:
-                    quality = _score_multi_axis(post[:140])
-                    if quality < 0.60 or _check_ai_cliche(post[:140]):
+                    quality = _score_multi_axis(post[:150])
+                    if quality < 0.70 or _check_ai_cliche(post[:150]):
                         logger.info(f"content_multiplier: X島原投稿却下 quality={quality:.2f}")
                         continue
                     await conn.execute(
                         """INSERT INTO approval_queue (request_type, request_data, status)
                         VALUES ('x_post', $1, 'pending')""",
                         json.dumps({
-                            "content": post[:140],
+                            "content": post[:150],
                             "platform": "x_shimahara",
                             "auto_generated": True,
                             "quality_score": quality,
@@ -286,15 +286,15 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                     )
                 # X投稿（SYUTAINβアカウント）を品質チェック後に承認キューに投入
                 for post in x_syutain:
-                    quality = _score_multi_axis(post[:140])
-                    if quality < 0.60 or _check_ai_cliche(post[:140]):
+                    quality = _score_multi_axis(post[:150])
+                    if quality < 0.70 or _check_ai_cliche(post[:150]):
                         logger.info(f"content_multiplier: Xβ投稿却下 quality={quality:.2f}")
                         continue
                     await conn.execute(
                         """INSERT INTO approval_queue (request_type, request_data, status)
                         VALUES ('x_post', $1, 'pending')""",
                         json.dumps({
-                            "content": post[:140],
+                            "content": post[:150],
                             "platform": "x_syutain",
                             "auto_generated": True,
                             "quality_score": quality,
@@ -304,7 +304,7 @@ JSONリスト形式で出力: [{{"title": "...", "reader": "...", "paid": true/f
                 # Threads投稿を品質チェック後に承認キューに投入
                 for post in threads_posts:
                     quality = _score_multi_axis(post[:500])
-                    if quality < 0.60 or _check_ai_cliche(post[:500]):
+                    if quality < 0.70 or _check_ai_cliche(post[:500]):
                         logger.info(f"content_multiplier: Threads投稿却下 quality={quality:.2f}")
                         continue
                     await conn.execute(

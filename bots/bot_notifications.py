@@ -4,9 +4,24 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("syutain.bot_notifications")
 
+
+async def _ensure_db_pool():
+    """DB poolが初期化されていなければ初期化する"""
+    try:
+        from tools.db_pool import get_pool
+        await get_pool()
+        return True
+    except Exception as e:
+        logger.warning(f"DB pool未準備: {e}")
+        return False
+
+
 async def generate_morning_report(bot) -> str:
     """朝の報告（07:00に呼ばれる）"""
     try:
+        if not await _ensure_db_pool():
+            return "おはようございます。DB接続が準備できていないため、レポートを生成できませんでした。"
+
         from tools.db_pool import get_connection
         async with get_connection() as conn:
             posted = await conn.fetchval(
@@ -39,12 +54,16 @@ async def generate_morning_report(bot) -> str:
             msg += f"\n成果物が{artifacts}件できています。確認しますか？"
         return msg
     except Exception as e:
+        logger.error(f"朝レポート生成エラー: {e}")
         return f"おはようございます。レポート生成でエラーが出ました: {e}"
 
 
 async def generate_night_summary(bot) -> str:
     """夜のサマリー（22:00に呼ばれる）"""
     try:
+        if not await _ensure_db_pool():
+            return "お疲れ様です。DB接続が準備できていないため、サマリーを生成できませんでした。"
+
         from tools.db_pool import get_connection
         async with get_connection() as conn:
             posted = await conn.fetchval(
@@ -71,5 +90,6 @@ async def generate_night_summary(bot) -> str:
         msg += f" / エラー: {errors}件 / コスト: ¥{float(cost):.0f} (ローカル{float(local_pct or 0):.0f}%)。"
         msg += " 明日分の投稿はこれから生成します。お疲れ様でした。"
         return msg
-    except Exception:
+    except Exception as e:
+        logger.error(f"夜サマリー生成エラー: {e}")
         return "今日のサマリー生成に失敗しました。"

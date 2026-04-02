@@ -106,6 +106,30 @@ async def get_alpha_directives(category: str = None, status: str = "pending") ->
         return []
 
 
+async def send_alpha_directive(
+    category: str,
+    title: str,
+    detail: str = "",
+    context: dict = None,
+) -> Optional[int]:
+    """α→β方向のhandoffを挿入（Brain-αからBrain-βへの指示）"""
+    try:
+        async with get_connection() as conn:
+            row_id = await conn.fetchval(
+                """INSERT INTO brain_handoff
+                   (direction, category, source_agent, title, detail, context, status)
+                   VALUES ('alpha_to_beta', $1, 'brain_alpha', $2, $3, $4, 'pending')
+                   RETURNING id""",
+                category, title, detail,
+                json.dumps(context or {}, ensure_ascii=False),
+            )
+            logger.info(f"ハンドオフα→β: brain_alpha → handoff#{row_id} ({title})")
+            return row_id
+    except Exception as e:
+        logger.error(f"ハンドオフα→β失敗: {e}")
+        return None
+
+
 async def acknowledge_directive(handoff_id: int) -> bool:
     """指令をacknowledged状態に更新"""
     try:

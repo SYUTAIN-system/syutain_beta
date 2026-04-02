@@ -23,15 +23,39 @@ EMBEDDING_DIM = 1024
 
 _last_429_at: float = 0.0  # モジュールレベルのレートリミット追跡
 
+# 日次呼び出しカウンタ（レートリミット回避用）
+JINA_EMBEDDING_DAILY_LIMIT = int(os.getenv("JINA_EMBEDDING_DAILY_LIMIT", "500"))
+_embedding_daily_count: int = 0
+_embedding_counter_date: str = ""  # ISO date string for reset check
+
+# 指数バックオフの待機秒数（429時: 5s → 10s → 20s）
+_BACKOFF_WAITS = [5, 10, 20]
+_MAX_RETRIES = len(_BACKOFF_WAITS)
+
 
 async def get_embedding(text: str, _retry: int = 0) -> Optional[list]:
-    """テキストをJina Embeddings APIでベクトル化（429バックオフ付き）"""
+    """テキストをJina Embeddings APIでベクトル化（指数バックオフ付き）"""
     import asyncio, time
+    from datetime import date as _date
+
     if not JINA_API_KEY:
         logger.warning("JINA_API_KEY未設定")
         return None
 
-    global _last_429_at
+    # 日次カウンタリセット
+    global _embedding_daily_count, _embedding_counter_date, _last_429_at
+    today_str = _date.today().isoformat()
+    if today_str != _embedding_counter_date:
+        _embedding_daily_count = 0
+        _embedding_counter_date = today_str
+
+    # 日次上限チェック
+    if _embedding_daily_count >= JINA_EMBEDDING_DAILY_LIMIT:
+        logger.warning(
+            f"Jina Embedding日次上限到達: {_embedding_daily_count}/{JINA_EMBEDDING_DAILY_LIMIT}、スキップ"
+        )
+        return None
+
     # 直近429から60秒以内は即スキップ（連続429防止）
     if _last_429_at and (time.time() - _last_429_at) < 60:
         logger.debug("Jina API rate limit cooldown中、スキップ")
@@ -48,25 +72,32 @@ async def get_embedding(text: str, _retry: int = 0) -> Optional[list]:
                 json={"model": EMBEDDING_MODEL, "input": [text[:8000]]},
             )
             if resp.status_code == 200:
+                _embedding_daily_count += 1
                 # Jina Embeddings v3 コスト追跡（約¥0.01/call推定）
                 try:
                     from tools.budget_guard import get_budget_guard
                     bg = get_budget_guard()
                     await bg.record_spend(
                         amount_jpy=0.01, model="jina-embeddings-v3",
-                        tier="S", goal_id="embedding", is_info_collection=False,
+                        tier="L", goal_id="embedding", is_info_collection=False,
                     )
                 except Exception:
                     pass
                 return resp.json()["data"][0]["embedding"]
             if resp.status_code == 429:
                 _last_429_at = time.time()
-                if _retry < 1:
-                    wait = float(resp.headers.get("retry-after", "5"))
-                    logger.warning(f"Jina 429 rate limit、{wait}秒後にリトライ")
-                    await asyncio.sleep(min(wait, 30))
-                    return await get_embedding(text, _retry=1)
-                logger.warning("Jina 429 リトライ上限到達、スキップ")
+                if _retry < _MAX_RETRIES:
+                    wait = _BACKOFF_WAITS[_retry]
+                    # Retry-Afterヘッダがあればそちらを優先（上限30秒）
+                    retry_after = resp.headers.get("retry-after")
+                    if retry_after:
+                        wait = min(float(retry_after), 30)
+                    logger.warning(
+                        f"Jina 429 rate limit（リトライ {_retry + 1}/{_MAX_RETRIES}）、{wait}秒後にリトライ"
+                    )
+                    await asyncio.sleep(wait)
+                    return await get_embedding(text, _retry=_retry + 1)
+                logger.warning("Jina 429 リトライ上限到達（3回）、スキップ")
                 return None
             logger.error(f"Jina Embeddings API error: {resp.status_code}")
     except Exception as e:
@@ -82,8 +113,8 @@ async def embed_and_store_persona(persona_id: int, text: str):
     try:
         from tools.db_pool import get_connection
         async with get_connection() as conn:
-            # pgvectorのvector型にはリストの文字列表現を渡す
-            embedding_str = str(embedding)
+            # pgvectorのvector型にはカンマ区切り角括弧形式の文字列を渡す
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
             await conn.execute(
                 "UPDATE persona_memory SET embedding = $1::vector WHERE id = $2",
                 embedding_str, persona_id,

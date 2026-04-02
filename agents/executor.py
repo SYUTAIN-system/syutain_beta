@@ -14,16 +14,72 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+import yaml
 from dotenv import load_dotenv
 
 from tools.db_pool import get_connection
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
 from tools.budget_guard import get_budget_guard
+from tools.failure_memory import record_failure, check_similar_failures
+from tools.episodic_memory import get_episodic_memory
+from tools.skill_manager import get_skill_manager
 
 load_dotenv()
 
 logger = logging.getLogger("syutain.executor")
+
+# ツール権限レベルのロード
+_TOOL_PERMISSIONS: dict = {}
+
+
+def _load_tool_permissions() -> dict:
+    """config/tool_permissions.yaml からツール権限マップを読み込む"""
+    global _TOOL_PERMISSIONS
+    if _TOOL_PERMISSIONS:
+        return _TOOL_PERMISSIONS
+    try:
+        permissions_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "config", "tool_permissions.yaml"
+        )
+        with open(permissions_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        perms = data.get("permissions", {})
+        # ツール名 → 権限レベルの逆引きマップを生成
+        tool_map = {}
+        for level in ("read", "write", "dangerous"):
+            for tool_name in perms.get(level, []):
+                tool_map[tool_name] = level
+        _TOOL_PERMISSIONS = tool_map
+        return tool_map
+    except Exception as e:
+        logger.warning(f"ツール権限設定読み込み失敗（デフォルトwrite適用）: {e}")
+        return {}
+
+
+def get_tool_permission_level(task_type: str) -> str:
+    """タスクタイプからツール権限レベルを判定する。
+
+    Returns:
+        "read", "write", or "dangerous"
+    """
+    tool_map = _load_tool_permissions()
+    # task_typeがツール名に直接対応しない場合のマッピング
+    task_to_tool = {
+        "browser_action": "browser_ops",
+        "computer_use": "computer_use_tools",
+        "research": "tavily_client",
+        "analysis": "analytics_tools",
+        "drafting": "content_tools",
+        "content": "content_tools",
+        "coding": "content_tools",
+        "data_extraction": "info_pipeline",
+        "monitoring": "api_quota_monitor",
+        "batch_process": "content_tools",
+        "approval_request": "event_logger",
+    }
+    tool_name = task_to_tool.get(task_type, task_type)
+    return tool_map.get(tool_name, "write")
 
 
 class ExecutionResult:
@@ -91,6 +147,26 @@ class Executor:
         logger.info(f"タスク実行開始: {task_id} ({task_type}) @ {assigned_node}")
         start_time = time.time()
 
+        # ツール権限レベルチェック
+        permission_level = get_tool_permission_level(task_type)
+        logger.info(f"タスク {task_id} 権限レベル: {permission_level}")
+        if permission_level == "dangerous" and not task.get("needs_approval", False):
+            # dangerousツールは承認必須に強制
+            task["needs_approval"] = True
+            logger.warning(f"タスク {task_id}: dangerousツール使用のため承認を強制")
+        # 権限レベルをevent_logに記録
+        try:
+            from tools.event_logger import log_event
+            await log_event(
+                "tool.permission_check", "system",
+                {"task_id": task_id, "task_type": task_type, "permission_level": permission_level},
+                severity="info",
+                task_id=task_id,
+                goal_id=goal_packet.get("goal_id", ""),
+            )
+        except Exception:
+            pass
+
         # タスクステータスを running に更新
         try:
             async with get_connection() as conn:
@@ -100,6 +176,66 @@ class Executor:
                 )
         except Exception as e:
             logger.warning(f"タスクrunningステータス更新失敗 ({task_id}): {e}")
+
+        # 失敗記憶チェック（Harness Engineering: 類似失敗の防止策を注入）
+        prevention_rules = []
+        try:
+            similar_failures = await check_similar_failures(
+                f"{task_type} {description}", threshold=0.75
+            )
+            if similar_failures:
+                prevention_rules = [
+                    f"[{f['failure_type']}] {f['prevention_rule']}"
+                    for f in similar_failures
+                    if f.get("prevention_rule")
+                ]
+                if prevention_rules:
+                    task["_prevention_rules"] = prevention_rules
+                    logger.info(
+                        f"タスク {task_id} に防止策{len(prevention_rules)}件を注入"
+                    )
+        except Exception as e:
+            logger.debug(f"失敗記憶チェック失敗（無視）: {e}")
+
+        # エピソード記憶検索（MemRL: 成功+失敗の教訓をQ値順で注入）
+        retrieved_episodes = []
+        try:
+            em = get_episodic_memory()
+            episodes = await em.retrieve_relevant(
+                f"{task_type} {description}", task_type=task_type, top_k=3
+            )
+            if episodes:
+                episode_lessons = []
+                for ep in episodes:
+                    if ep.get("lessons"):
+                        episode_lessons.append(
+                            f"[{ep['outcome']}|q={ep['q_value']:.2f}] {ep['lessons']}"
+                        )
+                    retrieved_episodes.append(ep)
+                if episode_lessons:
+                    task["_episode_lessons"] = episode_lessons
+                    logger.info(
+                        f"タスク {task_id} にエピソード記憶{len(episode_lessons)}件を注入"
+                    )
+        except Exception as e:
+            logger.debug(f"エピソード記憶検索失敗（無視）: {e}")
+
+        # スキル検索（高Q値エピソードから抽出された再利用パターンを注入）
+        try:
+            sm = get_skill_manager()
+            applicable_skills = await sm.get_applicable_skills(task_type, description)
+            if applicable_skills:
+                skill_rules = [
+                    f"[skill|conf={s['confidence']:.2f}] {s['rule']}"
+                    for s in applicable_skills
+                ]
+                task["_skill_rules"] = skill_rules
+                task["_skill_ids"] = [s["id"] for s in applicable_skills]
+                logger.info(
+                    f"タスク {task_id} にスキル{len(skill_rules)}件を注入"
+                )
+        except Exception as e:
+            logger.debug(f"スキル検索失敗（無視）: {e}")
 
         # 承認チェック（CLAUDE.md ルール11）
         if task.get("needs_approval", False):
@@ -111,45 +247,82 @@ class Executor:
                     output={"message": "承認待ち", "approval_id": approval_result.get("approval_id")},
                 )
 
-        # タスクタイプに応じた実行
-        try:
-            if task_type in ["drafting", "content", "analysis", "coding", "research"]:
-                result = await self._execute_llm_task(task, goal_packet)
-            elif task_type == "browser_action":
-                result = await self._execute_browser_task(task, goal_packet)
-            elif task_type == "computer_use":
-                result = await self._execute_computer_use_task(task, goal_packet)
-            elif task_type == "data_extraction":
-                result = await self._execute_data_extraction(task, goal_packet)
-            elif task_type == "batch_process":
-                result = await self._execute_batch_task(task, goal_packet)
-            elif task_type == "approval_request":
-                result = await self._execute_approval_request(task, goal_packet)
-            else:
-                result = await self._execute_llm_task(task, goal_packet)
+        # ===== browser_action URL事前チェック =====
+        # URLがないbrowser_actionタスクはBRAVOにディスパッチせずローカルLLM代替
+        if task_type == "browser_action":
+            import re as _re
+            _input_data = task.get("input_data", {})
+            if isinstance(_input_data, str):
+                try:
+                    _input_data = json.loads(_input_data)
+                except Exception:
+                    _input_data = {}
+            _url = (_input_data.get("url", "") or _input_data.get("target_url", "")
+                    or ((_re.findall(r'https?://[^\s<>"\']+', description) or [""])[0]))
+            if not _url:
+                logger.warning(f"browser_actionタスク {task_id}: URL未指定のためBRAVOディスパッチをスキップ、ローカルLLM代替")
+                assigned_node = "alpha"
 
-            # 予算記録
+        # ===== リモートノードディスパッチ（CLAUDE.md ルール19: NATSでノード間通信）=====
+        # assigned_nodeがalpha以外の場合、NATSでリモートノードにタスクをディスパッチし、
+        # request-replyで結果を受け取る。失敗時はALPHAローカル実行にフォールバック。
+        this_node = os.getenv("THIS_NODE", "alpha")
+        if assigned_node not in ("alpha", this_node, "", None):
             try:
-                bg = get_budget_guard()
-                await bg.record_spend(
-                    amount_jpy=result.cost_jpy,
-                    model=task.get("model_selection", {}).get("model", "unknown"),
-                    tier=task.get("model_selection", {}).get("tier", "unknown"),
-                    goal_id=goal_packet.get("goal_id", ""),
+                nats_client = await get_nats_client()
+                nats_payload = {
+                    "task_id": task_id,
+                    "type": task_type,
+                    "prompt": description,
+                    "system_prompt": f"タスク実行: {task_type}。ゴール: {goal_packet.get('raw_goal', '')}",
+                    "action": "dispatch",
+                    "goal_id": goal_packet.get("goal_id", ""),
+                }
+                logger.info(f"タスク {task_id} をリモートノード {assigned_node} にNATSディスパッチ")
+                # req.task.* はJetStreamストリーム外のCore NATS subjects
+                # task.assign.* はJetStream TASKSストリーム(task.>)に捕捉されるため
+                # request-replyにはreq.*プレフィックスを使用
+                response = await nats_client.request(
+                    f"req.task.{assigned_node}",
+                    nats_payload,
+                    timeout=180.0,
                 )
+                if response and response.get("status") == "success":
+                    remote_output = response.get("output", {})
+                    result = ExecutionResult(
+                        task_id=task_id,
+                        status="success",
+                        output=remote_output if isinstance(remote_output, dict) else {"text": str(remote_output)},
+                        artifacts=response.get("artifacts", []),
+                        cost_jpy=response.get("cost_jpy", 0.0),
+                        task_type=task_type,
+                    )
+                    logger.info(f"リモートノード {assigned_node} からの応答: success")
+                elif response and response.get("status") == "error":
+                    raise RuntimeError(f"リモートノード {assigned_node} エラー: {response.get('error', 'unknown')}")
+                else:
+                    raise RuntimeError(f"リモートノード {assigned_node} から無効な応答: {response}")
             except Exception as e:
-                logger.warning(f"予算記録失敗: {e}")
+                logger.warning(
+                    f"リモートディスパッチ失敗 ({assigned_node}): {e}。ALPHAローカル実行にフォールバック"
+                )
+                # フォールバック: ALPHAローカルで実行（CLAUDE.md ルール17）
+                result = await self._execute_task_locally(task, task_type, goal_packet)
+        else:
+            # ALPHAローカル実行
+            result = await self._execute_task_locally(task, task_type, goal_packet)
 
-        except Exception as e:
-            error_class = self._classify_error(e)
-            logger.error(f"タスク実行失敗 ({task_id}): [{error_class}] {e}")
-            result = ExecutionResult(
-                task_id=task_id,
-                status="failure",
-                error_class=error_class,
-                error_message=str(e),
-                task_type=task_type,
+        # 共通後処理: 予算記録
+        try:
+            bg = get_budget_guard()
+            await bg.record_spend(
+                amount_jpy=result.cost_jpy,
+                model=task.get("model_selection", {}).get("model", "unknown"),
+                tier=task.get("model_selection", {}).get("tier", "unknown"),
+                goal_id=goal_packet.get("goal_id", ""),
             )
+        except Exception as e:
+            logger.warning(f"予算記録失敗: {e}")
 
         # task_typeを結果に常に設定（学習ループのmodel_quality_log用）
         result.task_type = task_type
@@ -176,6 +349,34 @@ class Executor:
 
         logger.info(f"タスク実行完了: {task_id} ({result.status}, {elapsed:.1f}秒, ¥{result.cost_jpy:.0f})")
 
+        # event_logにタスク完了の構造化サマリーを記録
+        try:
+            from tools.event_logger import log_event
+            output_text = ""
+            if result.output and isinstance(result.output, dict):
+                output_text = result.output.get("text", "") or result.output.get("message", "") or result.output.get("summary", "")
+            elif result.error_message:
+                output_text = result.error_message
+            await log_event(
+                "task.completed", "task",
+                {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "assigned_node": assigned_node,
+                    "model_used": model_sel.get("model", "unknown") if model_sel else "unknown",
+                    "duration_sec": round(elapsed, 1),
+                    "output_summary": str(output_text)[:200],
+                    "status": result.status,
+                    "cost_jpy": result.cost_jpy,
+                    "error_class": result.error_class,
+                },
+                severity="info" if result.status == "success" else "warning",
+                goal_id=goal_packet.get("goal_id", ""),
+                task_id=task_id,
+            )
+        except Exception:
+            pass
+
         # Discord通知（成功/失敗）
         try:
             if result.status == "success":
@@ -189,12 +390,107 @@ class Executor:
             pass
 
         # 中間成果物をDBに保存（CLAUDE.md ルール18: 途中停止しても資産化）
-        await self._save_result(task_id, result, goal_packet.get("goal_id", ""))
+        goal_id = goal_packet.get("goal_id", "")
+        await self._save_result(task_id, result, goal_id)
+
+        # エピソード記憶に記録（MemRL: 成功も失敗も学習資産化）
+        try:
+            em = get_episodic_memory()
+            outcome_map = {"success": "success", "failure": "failure", "partial": "partial"}
+            ep_outcome = outcome_map.get(result.status, "partial")
+            # lessonsを簡潔に生成
+            ep_lessons = None
+            if result.status == "failure" and result.error_message:
+                ep_lessons = f"失敗: {result.error_message[:200]}"
+            elif result.status == "success" and result.output:
+                summary = result.output.get("summary", "") or result.output.get("text", "")
+                if summary:
+                    ep_lessons = f"成功: {str(summary)[:200]}"
+            ep_quality = float(result.quality_score) if result.quality_score else 0.5
+            ep_desc = (description or task_type)[:500]
+            episode_id = await em.record_episode(
+                task_type=task_type,
+                description=ep_desc,
+                outcome=ep_outcome,
+                context={
+                    "task_id": task_id,
+                    "goal_id": goal_id,
+                    "assigned_node": assigned_node,
+                    "model": (task.get("model_selection") or {}).get("model"),
+                    "cost_jpy": result.cost_jpy,
+                },
+                quality_score=ep_quality,
+                lessons=ep_lessons,
+            )
+            # Q値フィードバック: 検索で注入されたエピソードが役立ったか判定
+            if retrieved_episodes and result.status == "success":
+                for ep in retrieved_episodes:
+                    await em.update_q_value(ep["id"], was_helpful=True)
+            elif retrieved_episodes and result.status == "failure":
+                for ep in retrieved_episodes:
+                    await em.update_q_value(ep["id"], was_helpful=False)
+        except Exception as e:
+            logger.warning(f"エピソード記憶記録失敗: {e}")
+
+        # progress_logにステップ記録を追記（Harness Engineering）
+        step_number = goal_packet.get("total_steps", 0)
+        await self._append_progress_log(goal_id, task_id, result, step_number=step_number)
 
         # NATSでステータス通知
         await self._notify_completion(task_id, result)
 
         return result
+
+    async def _execute_task_locally(self, task: dict, task_type: str, goal_packet: dict) -> ExecutionResult:
+        """タスクをALPHAローカルで実行する（タスクタイプに応じたディスパッチ）"""
+        task_id = task.get("task_id", "unknown")
+        assigned_node = task.get("assigned_node", "alpha")
+        description = task.get("description", "")
+
+        try:
+            if task_type in ["drafting", "content", "analysis", "coding", "research"]:
+                result = await self._execute_llm_task(task, goal_packet)
+            elif task_type == "browser_action":
+                result = await self._execute_browser_task(task, goal_packet)
+            elif task_type == "computer_use":
+                result = await self._execute_computer_use_task(task, goal_packet)
+            elif task_type == "data_extraction":
+                result = await self._execute_data_extraction(task, goal_packet)
+            elif task_type == "batch_process":
+                result = await self._execute_batch_task(task, goal_packet)
+            elif task_type == "approval_request":
+                result = await self._execute_approval_request(task, goal_packet)
+            else:
+                result = await self._execute_llm_task(task, goal_packet)
+            return result
+        except Exception as e:
+            error_class = self._classify_error(e)
+            logger.error(f"タスク実行失敗 ({task_id}): [{error_class}] {e}")
+            result = ExecutionResult(
+                task_id=task_id,
+                status="failure",
+                error_class=error_class,
+                error_message=str(e),
+                task_type=task_type,
+            )
+            # 失敗記憶に記録（Harness Engineering）
+            try:
+                await record_failure(
+                    failure_type="task_error",
+                    error_message=str(e),
+                    context={
+                        "task_id": task_id,
+                        "goal_id": goal_packet.get("goal_id"),
+                        "assigned_node": assigned_node,
+                        "error_class": error_class,
+                        "model": task.get("model_selection", {}).get("model"),
+                        "description": description[:300],
+                    },
+                    task_type=task_type,
+                )
+            except Exception as fm_err:
+                logger.debug(f"失敗記憶記録失敗（無視）: {fm_err}")
+            return result
 
     async def _execute_llm_task(self, task: dict, goal_packet: dict) -> ExecutionResult:
         """LLMタスクの実行"""
@@ -207,6 +503,7 @@ class Executor:
             task_type=task_type,
             quality="medium",
             budget_sensitive=True,
+            local_available=True,
         )
 
         # 予算事前チェック
@@ -259,6 +556,7 @@ class Executor:
             )
 
         except Exception as e:
+            logger.error(f"LLMタスク実行失敗 ({task.get('task_id', '?')}): [{type(e).__name__}] {e}")
             raise
 
     async def _execute_browser_task(self, task: dict, goal_packet: dict = None) -> ExecutionResult:
@@ -486,6 +784,43 @@ class Executor:
                 )
         except Exception as e:
             logger.debug(f"トレース記録失敗（無視）: {e}")
+
+    async def _append_progress_log(self, goal_id: str, task_id: str, result: ExecutionResult,
+                                   step_number: int = 0):
+        """goal_packetsのprogress_logにステップ記録を追記（Harness Engineering）"""
+        try:
+            now = datetime.now()
+            # output_summaryを簡潔に生成
+            output_summary = ""
+            if result.output and isinstance(result.output, dict):
+                text = result.output.get("text", "") or result.output.get("message", "")
+                output_summary = text[:150] if text else ""
+            elif result.error_message:
+                output_summary = result.error_message[:150]
+
+            progress_entry = {
+                "step": step_number,
+                "timestamp": now.isoformat(),
+                "action": result.task_type,
+                "status": result.status,
+                "output_summary": output_summary,
+                "node": os.getenv("THIS_NODE", "alpha"),
+                "task_id": task_id,
+                "cost_jpy": result.cost_jpy,
+            }
+
+            async with get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE goal_packets
+                    SET progress_log = COALESCE(progress_log, '[]'::jsonb) || $1::jsonb
+                    WHERE goal_id = $2
+                    """,
+                    json.dumps([progress_entry], ensure_ascii=False, default=str),
+                    goal_id,
+                )
+        except Exception as e:
+            logger.debug(f"progress_log追記失敗（無視）: {e}")
 
     async def _save_result(self, task_id: str, result: ExecutionResult, goal_id: str):
         """実行結果をPostgreSQLに保存（CLAUDE.md ルール18）"""

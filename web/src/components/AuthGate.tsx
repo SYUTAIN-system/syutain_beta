@@ -14,6 +14,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       setAuthed(true);
     }
     setChecking(false);
+
+    // JWT期限切れ時のリアルタイム検出
+    const handler = () => setAuthed(false);
+    window.addEventListener("syutain:auth_expired", handler);
+    return () => window.removeEventListener("syutain:auth_expired", handler);
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {

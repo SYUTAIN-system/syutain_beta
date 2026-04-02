@@ -19,7 +19,6 @@ from typing import Optional
 from tools.db_pool import get_connection
 import httpx
 from dotenv import load_dotenv
-from tools.db_pool import get_connection
 
 from tools.llm_router import choose_best_model_v6, call_llm
 from tools.nats_client import get_nats_client
@@ -123,7 +122,44 @@ class ApprovalManager:
         - Tier 1: キューに入れてDiscord通知、人間の承認待ち
         - Tier 2: 自動承認してDiscord通知
         - Tier 3: 自動承認（通知なし）
+
+        HarnessLinterが前段で実行され、BLOCK違反があれば即時拒否。
         """
+        # === HarnessLinter: 機械的制約チェック（承認Tier判定の前に実行） ===
+        try:
+            from tools.harness_linter import get_harness_linter
+            linter = get_harness_linter()
+            content = request_data.get("content", "")
+            if not content:
+                content = json.dumps(request_data, ensure_ascii=False)
+            lint_ctx = {
+                "check_persona": request_type in SNS_AUTO_APPROVE_TYPES,
+                "estimated_cost_jpy": request_data.get("estimated_cost_jpy"),
+                "platform": request_data.get("platform"),
+            }
+            lint_result = await linter.lint_action(request_type, content, lint_ctx)
+            if not lint_result.passed:
+                logger.warning(
+                    f"HarnessLinter BLOCK — 承認拒否: type={request_type}, "
+                    f"violations={lint_result.violations}"
+                )
+                await self._notify_discord(
+                    f"🛑 **HarnessLinter BLOCK**: {request_type}\n"
+                    f"違反: {lint_result.violations[0]['detail'][:200] if lint_result.violations else 'N/A'}\n"
+                    f"承認キューに入れずに即時拒否しました。",
+                    tier=1,
+                )
+                return {
+                    "status": "blocked",
+                    "tier": 0,
+                    "request_type": request_type,
+                    "reason": "harness_linter_block",
+                    "violations": lint_result.violations,
+                    "warnings": lint_result.warnings,
+                }
+        except Exception as e:
+            logger.error(f"HarnessLinterエラー（承認フロー続行）: {e}")
+
         tier = classify_tier(request_type, request_data)
         now = datetime.now(timezone.utc)
 
@@ -318,12 +354,30 @@ class ApprovalManager:
 
         # 却下時: 却下理由を推測して代替案を提案
         if not approved:
+            request_data_parsed = json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"]
             alternative = await self._handle_rejection(
                 request_type,
-                json.loads(row["request_data"]) if isinstance(row["request_data"], str) else row["request_data"],
+                request_data_parsed,
                 reason,
             )
             result["alternative"] = alternative
+
+            # failure_memoryに却下理由を記録（同じ失敗を繰り返さない）
+            try:
+                from tools.failure_memory import record_failure
+                data_summary = json.dumps(request_data_parsed, ensure_ascii=False, default=str)[:300]
+                await record_failure(
+                    failure_type="approval_rejected",
+                    error_message=reason or "理由なし",
+                    context={
+                        "request_type": request_type,
+                        "request_data_summary": data_summary,
+                        "approval_id": approval_id,
+                    },
+                    task_type=request_type,
+                )
+            except Exception as e:
+                logger.debug(f"却下理由のfailure_memory記録失敗（無視）: {e}")
 
         # event_log記録
         try:

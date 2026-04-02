@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { FileStack, ShieldAlert, CheckCircle2, XCircle, Filter } from "lucide-react";
 import ProposalCard from "@/components/ProposalCard";
+import ApprovalItem from "@/components/ApprovalItem";
 import { apiFetch } from "@/lib/api";
 
 interface TaskApproval {
@@ -44,6 +45,7 @@ export default function ProposalsPage() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [taskApprovals, setTaskApprovals] = useState<TaskApproval[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
 
   const fetchTaskApprovals = useCallback(async () => {
@@ -75,8 +77,8 @@ export default function ProposalsPage() {
         // サーバーから最新状態を再取得
         setTimeout(() => fetchTaskApprovals(), 500);
       }
-    } catch (e) {
-      console.error("承認エラー:", e);
+    } catch {
+      setError("承認処理に失敗しました");
     }
   };
 
@@ -97,8 +99,8 @@ export default function ProposalsPage() {
         );
         setTimeout(() => fetchTaskApprovals(), 500);
       }
-    } catch (e) {
-      console.error("却下エラー:", e);
+    } catch {
+      setError("却下処理に失敗しました");
     }
   };
 
@@ -147,20 +149,24 @@ export default function ProposalsPage() {
 
   const handleApprove = async (id: string) => {
     try {
-      await apiFetch(`/api/proposals/${id}/approve`, { method: "POST" });
+      const res = await apiFetch(`/api/proposals/${id}/approve`, { method: "POST" });
+      if (res.ok) {
+        setProposals((prev) => prev.map((p) => (p.id === id ? { ...p, status: "approved" } : p)));
+      }
     } catch {
-      // fallback: update locally
+      setError("承認処理に失敗しました");
     }
-    setProposals((prev) => prev.map((p) => (p.id === id ? { ...p, status: "approved" } : p)));
   };
 
   const handleReject = async (id: string) => {
     try {
-      await apiFetch(`/api/proposals/${id}/reject`, { method: "POST" });
+      const res = await apiFetch(`/api/proposals/${id}/reject`, { method: "POST" });
+      if (res.ok) {
+        setProposals((prev) => prev.map((p) => (p.id === id ? { ...p, status: "rejected" } : p)));
+      }
     } catch {
-      // fallback: update locally
+      setError("却下処理に失敗しました");
     }
-    setProposals((prev) => prev.map((p) => (p.id === id ? { ...p, status: "rejected" } : p)));
   };
 
   if (loading) {
@@ -206,6 +212,15 @@ export default function ProposalsPage() {
 
   return (
     <div className="space-y-4">
+      {/* Error Banner */}
+      {error && (
+        <div className="flex items-center justify-between rounded-lg bg-[var(--accent-red)]/10 border border-[var(--accent-red)]/30 px-4 py-3">
+          <span className="text-sm text-[var(--accent-red)]">{error}</span>
+          <button onClick={() => setError(null)} className="min-h-[44px] min-w-[44px] flex items-center justify-center text-[var(--accent-red)]" aria-label="エラーを閉じる">
+            <span className="text-lg">&times;</span>
+          </button>
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <FileStack className="h-6 w-6 text-[var(--accent-purple)]" />
         <h1 className="text-2xl font-bold">提案一覧</h1>
@@ -218,7 +233,7 @@ export default function ProposalsPage() {
 
       {/* 承認キュー */}
       <div className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <h2 className="flex items-center gap-2 text-lg font-semibold">
             <ShieldAlert className="h-5 w-5 text-[var(--accent-amber)]" />
             承認キュー
@@ -228,16 +243,16 @@ export default function ProposalsPage() {
               </span>
             )}
           </h2>
-          <div className="flex items-center gap-1">
-            <Filter className="h-4 w-4 text-[var(--text-secondary)]" />
+          <div className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
+            <Filter className="h-4 w-4 text-[var(--text-secondary)] flex-shrink-0" />
             {filterTabs.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setApprovalFilter(tab.key)}
-                className={`rounded-lg px-2.5 py-1 text-xs transition-colors ${
+                className={`rounded-lg px-3 py-2 text-xs whitespace-nowrap transition-colors min-h-[36px] ${
                   approvalFilter === tab.key
                     ? "bg-[var(--accent-purple)]/20 text-[var(--accent-purple)]"
-                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-primary)]"
                 }`}
               >
                 {tab.label}
@@ -251,49 +266,26 @@ export default function ProposalsPage() {
             {approvalFilter === "pending" ? "承認待ちはありません" : "該当する承認リクエストはありません"}
           </p>
         ) : (
-          taskApprovals.map((a) => (
-            <div key={a.approval_id} className="rounded-lg border border-[var(--border-color)]/30 bg-[var(--bg-card)] p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-medium text-[var(--accent-purple)]">{typeLabel(a.request_type)}</span>
-                    {statusBadge(a.status)}
-                  </div>
-                  <p className="font-medium whitespace-pre-wrap break-words">{a.description || a.content || "承認リクエスト"}</p>
-                  {a.content && a.content !== a.description && (
-                    <p className="mt-1 text-sm text-[var(--text-secondary)] whitespace-pre-wrap break-words line-clamp-3">
-                      {a.content}
-                    </p>
-                  )}
-                  <div className="mt-1 flex items-center gap-3 text-xs text-[var(--text-secondary)]">
-                    {a.task_id && <span>タスク: {a.task_id}</span>}
-                    {a.goal_id && <span>ゴール: {a.goal_id}</span>}
-                    {a.assigned_node && <span>ノード: {a.assigned_node}</span>}
-                    {a.requested_at && <span>{new Date(a.requested_at).toLocaleString("ja-JP")}</span>}
-                  </div>
-                  {a.response && a.status !== "pending" && (
-                    <p className="mt-1 text-xs text-[var(--text-secondary)]">応答: {a.response}</p>
-                  )}
-                </div>
-                {a.status === "pending" && (
-                  <div className="flex flex-shrink-0 gap-2">
-                    <button
-                      onClick={() => handleTaskApprove(a.approval_id)}
-                      className="flex items-center gap-1 rounded-lg bg-[var(--accent-green)]/20 px-3 py-1.5 text-sm text-[var(--accent-green)] hover:bg-[var(--accent-green)]/30"
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" /> 承認
-                    </button>
-                    <button
-                      onClick={() => handleTaskReject(a.approval_id)}
-                      className="flex items-center gap-1 rounded-lg bg-[var(--accent-red)]/20 px-3 py-1.5 text-sm text-[var(--accent-red)] hover:bg-[var(--accent-red)]/30"
-                    >
-                      <XCircle className="h-3.5 w-3.5" /> 却下
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))
+          taskApprovals.map((a) => {
+            const cleanText = (text: string) =>
+              text.replace(/```[\s\S]*?```/g, "").replace(/[{}"\\[\]]/g, "").replace(/\n{3,}/g, "\n\n").trim();
+            const displayContent = a.description || a.content || "承認リクエスト";
+            const summary = cleanText(displayContent).slice(0, 200);
+            const hasMore = cleanText(displayContent).length > 200;
+            return (
+            <ApprovalItem
+              key={a.approval_id}
+              approval={a}
+              summary={summary}
+              fullText={cleanText(displayContent)}
+              hasMore={hasMore}
+              typeLabel={typeLabel(a.request_type)}
+              statusBadge={statusBadge(a.status)}
+              onApprove={handleTaskApprove}
+              onReject={handleTaskReject}
+            />
+            );
+          })
         )}
       </div>
 

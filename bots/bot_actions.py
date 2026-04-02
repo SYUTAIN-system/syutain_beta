@@ -1043,3 +1043,57 @@ async def set_reminder(args: str = "") -> str:
         return f"リマインダー設定完了 (#{rid}): {remind_at.strftime('%m/%d %H:%M')} — {message}"
     except Exception as e:
         return f"リマインダー設定失敗: {e}"
+
+
+# === Brain-α(Claude Code)関連アクション ===
+
+@_register("escalate_alpha")
+async def escalate_to_alpha(instruction: str = "") -> dict:
+    """Brain-βからBrain-α(Claude Code)に指示を送信（三重経路）"""
+    if not instruction:
+        return {"error": "指示内容が必要です"}
+    try:
+        from bots.bot_escalation import send_instruction_to_brain_alpha
+        await send_instruction_to_brain_alpha(
+            instruction,
+            context={"source": "discord_action", "triggered_by": "daichi"},
+            priority="high",
+        )
+        return {"status": "sent", "instruction": instruction[:200], "routes": "DB+Webhook+Discord"}
+    except Exception as e:
+        return {"error": f"Brain-α送信失敗: {e}"}
+
+
+@_register("alpha_queue_status")
+async def get_alpha_queue_status() -> dict:
+    """Brain-α指示キューの状態を取得"""
+    try:
+        async with get_connection() as conn:
+            pending = await conn.fetch(
+                """SELECT id, category, description, priority, source_agent, created_at
+                   FROM claude_code_queue WHERE status='pending'
+                   ORDER BY created_at DESC LIMIT 5"""
+            )
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM claude_code_queue WHERE status='pending'"
+            ) or 0
+            completed_24h = await conn.fetchval(
+                "SELECT COUNT(*) FROM claude_code_queue WHERE status='completed' AND created_at > NOW() - INTERVAL '24 hours'"
+            ) or 0
+        items = []
+        for p in pending:
+            items.append({
+                "id": p["id"],
+                "category": p["category"],
+                "desc": (p["description"] or "")[:80],
+                "priority": p["priority"],
+                "from": p["source_agent"],
+                "at": _to_jst(p["created_at"]),
+            })
+        return {
+            "pending": total,
+            "completed_24h": completed_24h,
+            "items": items,
+        }
+    except Exception as e:
+        return {"error": f"キュー取得失敗: {e}"}

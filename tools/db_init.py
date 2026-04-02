@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS goal_packets (
     progress REAL DEFAULT 0.0,
     total_steps INTEGER DEFAULT 0,
     total_cost_jpy REAL DEFAULT 0.0,
+    progress_log JSONB DEFAULT '[]',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ
 );
@@ -87,11 +88,17 @@ CREATE TABLE IF NOT EXISTS revenue_linkage (
     id SERIAL PRIMARY KEY,
     source_content_id TEXT,
     product_id TEXT,
+    product_title TEXT,
     membership_offer_id TEXT,
     btob_offer_id TEXT,
     conversion_stage TEXT,
     revenue_jpy INTEGER DEFAULT 0,
+    fee_jpy INTEGER DEFAULT 0,
+    net_revenue_jpy INTEGER DEFAULT 0,
     platform TEXT,
+    platform_order_id TEXT,
+    buyer_info TEXT,
+    notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -161,6 +168,8 @@ CREATE TABLE IF NOT EXISTS intel_items (
     importance_score REAL DEFAULT 0.0,
     category TEXT,
     processed BOOLEAN DEFAULT FALSE,
+    review_flag TEXT DEFAULT 'pending_review',
+    metadata JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -187,6 +196,41 @@ CREATE TABLE IF NOT EXISTS approval_queue (
     requested_at TIMESTAMPTZ DEFAULT NOW(),
     responded_at TIMESTAMPTZ,
     response TEXT
+);
+
+-- 商品パッケージ（note/Booth/Stripe）
+CREATE TABLE IF NOT EXISTS product_packages (
+    id SERIAL PRIMARY KEY,
+    platform TEXT NOT NULL DEFAULT 'note',
+    source_review_id INTEGER,
+    title TEXT NOT NULL,
+    body_preview TEXT,
+    body_full TEXT,
+    price_jpy INTEGER DEFAULT 0,
+    tags JSONB DEFAULT '[]',
+    category TEXT,
+    status TEXT DEFAULT 'ready',
+    approved_at TIMESTAMPTZ,
+    published_at TIMESTAMPTZ,
+    publish_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- note記事品質レビュー
+CREATE TABLE IF NOT EXISTS note_quality_reviews (
+    id SERIAL PRIMARY KEY,
+    filepath TEXT,
+    article_title TEXT,
+    article_length INTEGER,
+    stage1_result JSONB,
+    stage1_score REAL,
+    stage1_fatal BOOLEAN DEFAULT FALSE,
+    stage2_model TEXT,
+    stage2_result JSONB,
+    stage2_verdict TEXT,
+    stage2_pricing INTEGER,
+    final_status TEXT,
+    checked_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ブラウザ操作ログ（V25新規）
@@ -299,6 +343,232 @@ CREATE INDEX IF NOT EXISTS idx_llm_cost_log_recorded_at ON llm_cost_log(recorded
 CREATE INDEX IF NOT EXISTS idx_llm_cost_log_goal_id ON llm_cost_log(goal_id);
 CREATE INDEX IF NOT EXISTS idx_auto_fix_log_created_at ON auto_fix_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_handoff_status ON brain_handoff(status);
+
+-- ===== Brain-α テーブル群（V27追加） =====
+
+-- persona_memory（Brain-α長期記憶）
+CREATE TABLE IF NOT EXISTS persona_memory (
+    id SERIAL PRIMARY KEY,
+    category TEXT NOT NULL,
+    context TEXT,
+    content TEXT NOT NULL,
+    reasoning TEXT,
+    emotion TEXT,
+    source TEXT,
+    session_id TEXT,
+    priority_tier INTEGER DEFAULT 3,
+    embedding vector(1024),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_persona_memory_category ON persona_memory(category);
+
+-- brain_alpha_session
+CREATE TABLE IF NOT EXISTS brain_alpha_session (
+    session_id TEXT PRIMARY KEY,
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    summary TEXT,
+    key_decisions JSONB,
+    unresolved_issues JSONB,
+    next_session_context JSONB,
+    daichi_interactions INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- daichi_dialogue_log
+CREATE TABLE IF NOT EXISTS daichi_dialogue_log (
+    id SERIAL PRIMARY KEY,
+    session_id TEXT,
+    user_message TEXT,
+    alpha_response TEXT,
+    philosophy_extracted JSONB,
+    importance REAL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- agent_reasoning_trace
+CREATE TABLE IF NOT EXISTS agent_reasoning_trace (
+    id SERIAL PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    action TEXT,
+    reasoning TEXT,
+    confidence REAL,
+    context JSONB,
+    task_id TEXT,
+    goal_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_reasoning_trace_agent ON agent_reasoning_trace(agent_name);
+
+-- brain_alpha_reasoning
+CREATE TABLE IF NOT EXISTS brain_alpha_reasoning (
+    id SERIAL PRIMARY KEY,
+    category TEXT,
+    action TEXT,
+    reasoning TEXT,
+    decision TEXT,
+    confidence REAL,
+    evidence JSONB,
+    report_data JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- brain_cross_evaluation
+CREATE TABLE IF NOT EXISTS brain_cross_evaluation (
+    id SERIAL PRIMARY KEY,
+    evaluator TEXT,
+    target_agent TEXT,
+    evaluation_type TEXT,
+    score REAL,
+    feedback TEXT,
+    recommendations JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- posting_queue（SNS投稿キュー）
+CREATE TABLE IF NOT EXISTS posting_queue (
+    id SERIAL PRIMARY KEY,
+    platform TEXT NOT NULL,
+    account TEXT,
+    content TEXT NOT NULL,
+    scheduled_at TIMESTAMPTZ,
+    status TEXT DEFAULT 'pending',
+    quality_score REAL,
+    theme_category TEXT,
+    post_url TEXT,
+    affiliate_url TEXT,
+    error_message TEXT,
+    posted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_posting_queue_status ON posting_queue(status);
+CREATE INDEX IF NOT EXISTS idx_posting_queue_scheduled ON posting_queue(scheduled_at);
+
+-- claude_code_queue（Brain-αへの指示キュー）
+CREATE TABLE IF NOT EXISTS claude_code_queue (
+    id SERIAL PRIMARY KEY,
+    category TEXT,
+    description TEXT,
+    priority TEXT DEFAULT 'normal',
+    source_agent TEXT,
+    context TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- discord_chat_history
+CREATE TABLE IF NOT EXISTS discord_chat_history (
+    id SERIAL PRIMARY KEY,
+    channel_id TEXT,
+    user_id TEXT,
+    user_name TEXT,
+    message TEXT,
+    response TEXT,
+    model_used TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- posting_queue_engagement
+CREATE TABLE IF NOT EXISTS posting_queue_engagement (
+    id SERIAL PRIMARY KEY,
+    posting_queue_id INTEGER,
+    likes INTEGER DEFAULT 0,
+    reposts INTEGER DEFAULT 0,
+    replies INTEGER DEFAULT 0,
+    impressions INTEGER DEFAULT 0,
+    checked_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- コマース取引ログ（日次サマリー・executive_briefing用）
+CREATE TABLE IF NOT EXISTS commerce_transactions (
+    id SERIAL PRIMARY KEY,
+    platform TEXT,
+    product_id TEXT,
+    amount_jpy INTEGER DEFAULT 0,
+    revenue_jpy INTEGER DEFAULT 0,
+    currency TEXT DEFAULT 'JPY',
+    status TEXT DEFAULT 'completed',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_commerce_transactions_created_at ON commerce_transactions(created_at);
+
+-- セマンティックキャッシュ（LLM応答キャッシュ、API呼び出し30-50%削減）
+CREATE TABLE IF NOT EXISTS semantic_cache (
+    id SERIAL PRIMARY KEY,
+    prompt_hash TEXT NOT NULL UNIQUE,
+    prompt_text TEXT,
+    system_prompt_hash TEXT DEFAULT '',
+    model TEXT,
+    response_text TEXT NOT NULL,
+    embedding vector(1024),
+    hit_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_hash ON semantic_cache(prompt_hash);
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_expires ON semantic_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_sys_hash ON semantic_cache(system_prompt_hash);
+
+-- 失敗記憶（Harness Engineering: 同じ失敗を二度と繰り返さない）
+CREATE TABLE IF NOT EXISTS failure_memory (
+    id SERIAL PRIMARY KEY,
+    failure_type TEXT NOT NULL,
+    task_type TEXT,
+    error_message TEXT NOT NULL,
+    root_cause TEXT,
+    prevention_rule TEXT,
+    context JSONB,
+    occurrence_count INTEGER DEFAULT 1,
+    first_seen TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    resolved BOOLEAN DEFAULT FALSE,
+    embedding vector(1024)
+);
+CREATE INDEX IF NOT EXISTS idx_failure_memory_type ON failure_memory(failure_type);
+CREATE INDEX IF NOT EXISTS idx_failure_memory_resolved ON failure_memory(resolved);
+CREATE INDEX IF NOT EXISTS idx_failure_memory_last_seen ON failure_memory(last_seen);
+
+-- A2A APIクレジット（x402 payment foundation）
+CREATE TABLE IF NOT EXISTS api_credits (
+    api_key TEXT PRIMARY KEY,
+    credits_remaining REAL DEFAULT 0,
+    total_spent REAL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_used TIMESTAMPTZ
+);
+
+-- エピソード記憶（MemRL: 成功+失敗をQ値ベースで学習）
+CREATE TABLE IF NOT EXISTS episodic_memory (
+    id SERIAL PRIMARY KEY,
+    task_type TEXT,
+    description TEXT,
+    outcome TEXT CHECK (outcome IN ('success', 'failure', 'partial')),
+    lessons TEXT,
+    context JSONB,
+    quality_score REAL,
+    q_value REAL DEFAULT 0.5,
+    retrieval_count INTEGER DEFAULT 0,
+    embedding vector(1024),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_episodic_memory_task_type ON episodic_memory(task_type);
+CREATE INDEX IF NOT EXISTS idx_episodic_memory_outcome ON episodic_memory(outcome);
+CREATE INDEX IF NOT EXISTS idx_episodic_memory_q_value ON episodic_memory(q_value DESC);
+
+-- スキル（エピソード記憶から抽出された再利用可能パターン）
+CREATE TABLE IF NOT EXISTS skills (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    source_episode_ids JSONB DEFAULT '[]',
+    task_types JSONB DEFAULT '[]',
+    success_count INTEGER DEFAULT 0,
+    total_usage INTEGER DEFAULT 0,
+    confidence REAL DEFAULT 0.5,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_skills_task_types ON skills USING GIN (task_types);
+CREATE INDEX IF NOT EXISTS idx_skills_confidence ON skills(confidence DESC);
 """
 
 # ===== SQLite DDL（ノードローカル）=====
@@ -375,6 +645,50 @@ async def init_postgresql() -> bool:
         conn = await asyncpg.connect(database_url)
         try:
             await conn.execute(POSTGRESQL_DDL)
+            # マイグレーション: 既存テーブルに不足カラムを追加
+            migrations = [
+                "ALTER TABLE intel_items ADD COLUMN IF NOT EXISTS review_flag TEXT DEFAULT 'pending_review'",
+                "ALTER TABLE intel_items ADD COLUMN IF NOT EXISTS metadata JSONB",
+                "ALTER TABLE goal_packets ADD COLUMN IF NOT EXISTS progress_log JSONB DEFAULT '[]'",
+                # product_packages: note自動公開用カラム追加
+                "ALTER TABLE product_packages ADD COLUMN IF NOT EXISTS publish_url TEXT",
+                "ALTER TABLE product_packages ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
+                # posting_queue: アフィリエイトURL追跡用
+                "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS affiliate_url TEXT",
+                # persona_memory: Claude Constitution優先度階層（1=absolute〜5=optional）
+                "ALTER TABLE persona_memory ADD COLUMN IF NOT EXISTS priority_tier INTEGER DEFAULT 3",
+                # semantic_cache: 旧スキーマからのマイグレーション（ベクトル検索対応）
+                "ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS embedding vector(1024)",
+                "ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS system_prompt_hash TEXT DEFAULT ''",
+                "ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS prompt_text TEXT",
+                "ALTER TABLE semantic_cache ADD COLUMN IF NOT EXISTS response_text TEXT",
+                # 旧カラム名 response → response_text へのデータ移行
+                "UPDATE semantic_cache SET response_text = response WHERE response_text IS NULL AND response IS NOT NULL",
+            ]
+            for sql in migrations:
+                try:
+                    await conn.execute(sql)
+                except Exception:
+                    pass  # カラムが既に存在する場合は無視
+
+            # persona_memory: カテゴリ別 priority_tier を設定
+            tier_mapping = {
+                "taboo": 1,        # absolute — 絶対に違反しない
+                "correction": 2,   # high — ユーザーの修正指示
+                "philosophy": 2,   # high — 核心的価値観
+                "identity": 2,     # high — アイデンティティ
+                "judgment": 3,     # medium — 判断基準
+                "emotion": 4,      # low — 感情記録
+                "preference": 4,   # low — 嗜好
+            }
+            for cat, tier in tier_mapping.items():
+                try:
+                    await conn.execute(
+                        "UPDATE persona_memory SET priority_tier = $1 WHERE category = $2 AND priority_tier != $1",
+                        tier, cat,
+                    )
+                except Exception:
+                    pass
             logger.info("PostgreSQLテーブルを初期化しました")
         finally:
             await conn.close()

@@ -204,7 +204,7 @@ class ProposalEngine:
         except Exception:
             pass
 
-        # persona_memoryからDAICHIの判断傾向を取得（接続#17修正）
+        # persona_memoryからDAICHIの判断傾向+tabooを取得（接続#17修正+V27 taboo参照）
         persona_context = ""
         try:
             if self.pg_pool:
@@ -218,6 +218,16 @@ class ProposalEngine:
                         persona_context = "\n## DAICHIの判断傾向（過去の承認/却下パターン）\n"
                         for r in persona_rows:
                             persona_context += f"- {r['content'][:120]}\n"
+                    # CLAUDE.md ルール26: tabooカテゴリは絶対に違反しない
+                    taboo_rows = await conn.fetch(
+                        """SELECT content FROM persona_memory
+                        WHERE category = 'taboo'
+                        ORDER BY created_at DESC LIMIT 15"""
+                    )
+                    if taboo_rows:
+                        persona_context += "\n## 絶対禁止事項（taboo — これに違反する提案は生成禁止）\n"
+                        for r in taboo_rows:
+                            persona_context += f"- {r['content'][:100]}\n"
         except Exception:
             pass
 
@@ -322,6 +332,7 @@ class ProposalEngine:
         proposal = {
             "proposal_id": proposal_id,
             "title": proposal_data.get("title", "無題の提案"),
+            "first_action": proposal_data.get("first_action", ""),
             "objective": objective,
             "target_icp": target_icp,
             "primary_channel": primary_channel,

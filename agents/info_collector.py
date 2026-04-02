@@ -241,7 +241,26 @@ class InfoCollector:
                         logger.error(f"NATS配信失敗: {e}")
 
     async def _notify_new_intel(self, item: dict) -> None:
-        """新着情報をNATSで通知"""
+        """新着情報をDB永続化+NATSで通知"""
+        # DB永続化（intel_itemsテーブルに保存）
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO intel_items
+                       (source, title, url, summary, importance_score, review_flag)
+                       VALUES ($1, $2, $3, $4, $5, 'pending_review')
+                       ON CONFLICT DO NOTHING""",
+                    item.get("source", "unknown"),
+                    item.get("title", "")[:500],
+                    item.get("url", ""),
+                    item.get("summary", "")[:1000],
+                    item.get("importance_score", 0.5),
+                )
+        except Exception as e:
+            logger.error(f"intel_items DB保存失敗: {e}")
+
+        # NATS通知
         if not self._nats_client:
             return
         try:

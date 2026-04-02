@@ -39,21 +39,41 @@ async def build_persona_context(intent_type: str) -> dict:
     async with get_connection() as conn:
         context = {"intent": intent_type}
 
+        # 優先度階層ラベル（LLMに伝達）
+        _TIER_LABELS = {
+            1: "ABSOLUTE",   # 絶対遵守（taboo等）
+            2: "HIGH",       # 高優先（philosophy, identity, correction）
+            3: "MEDIUM",     # 中優先（judgment）
+            4: "LOW",        # 低優先（emotion, preference）— トレードオフ可
+            5: "OPTIONAL",   # 参考情報
+        }
+
         try:
             if intent_type == "casual":
                 rows = await conn.fetch(
-                    """SELECT content, category FROM persona_memory
-                       ORDER BY created_at DESC LIMIT 5"""
+                    """SELECT content, category, COALESCE(priority_tier, 3) as priority_tier
+                       FROM persona_memory
+                       ORDER BY COALESCE(priority_tier, 3) ASC, created_at DESC LIMIT 5"""
                 )
-                context["persona"] = [{"content": r["content"], "category": r["category"]} for r in rows]
+                context["persona"] = [
+                    {"content": r["content"], "category": r["category"],
+                     "priority": _TIER_LABELS.get(r["priority_tier"], "MEDIUM")}
+                    for r in rows
+                ]
                 context["identity"] = "島原大知のAI事業パートナー SYUTAIN"
 
             elif intent_type == "standard":
                 rows = await conn.fetch(
-                    """SELECT content, category, reasoning FROM persona_memory
-                       ORDER BY created_at DESC LIMIT 10"""
+                    """SELECT content, category, reasoning, COALESCE(priority_tier, 3) as priority_tier
+                       FROM persona_memory
+                       ORDER BY COALESCE(priority_tier, 3) ASC, created_at DESC LIMIT 10"""
                 )
-                context["persona"] = [{"content": r["content"], "category": r["category"], "reasoning": r["reasoning"]} for r in rows]
+                context["persona"] = [
+                    {"content": r["content"], "category": r["category"],
+                     "reasoning": r["reasoning"],
+                     "priority": _TIER_LABELS.get(r["priority_tier"], "MEDIUM")}
+                    for r in rows
+                ]
 
                 strategy_id_path = PROMPTS_DIR / "strategy_identity.md"
                 if strategy_id_path.exists():
@@ -71,22 +91,23 @@ async def build_persona_context(intent_type: str) -> dict:
                     }
 
             elif intent_type == "strategic":
-                # 人格記憶: 重要カテゴリ優先で上位20件
+                # 人格記憶: priority_tier優先で上位20件（tier 1=absoluteが最優先）
                 rows = await conn.fetch(
-                    """SELECT content, category, reasoning, emotion FROM persona_memory
-                       ORDER BY
-                         CASE category
-                           WHEN 'philosophy' THEN 0
-                           WHEN 'judgment' THEN 1
-                           WHEN 'identity' THEN 2
-                           WHEN 'taboo' THEN 3
-                           WHEN 'emotion' THEN 4
-                           ELSE 5
-                         END,
-                         created_at DESC
+                    """SELECT content, category, reasoning, emotion,
+                              COALESCE(priority_tier, 3) as priority_tier
+                       FROM persona_memory
+                       ORDER BY COALESCE(priority_tier, 3) ASC, created_at DESC
                        LIMIT 20"""
                 )
-                context["persona"] = [dict(r) for r in rows]
+                context["persona"] = [
+                    {**dict(r), "priority": _TIER_LABELS.get(r["priority_tier"], "MEDIUM")}
+                    for r in rows
+                ]
+                # LLMへの指示: 優先度階層の意味
+                context["priority_guide"] = (
+                    "ABSOLUTE=絶対遵守(違反不可), HIGH=高優先(核心的価値観), "
+                    "MEDIUM=中優先(判断基準), LOW=低優先(トレードオフ可)"
+                )
 
                 # 全strategy
                 context["strategies"] = {}

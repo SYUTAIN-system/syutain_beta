@@ -21,7 +21,7 @@ logger = logging.getLogger("syutain.llm_router")
 
 # ===== 予算統合（設計書 第8章 / CLAUDE.md ルール16）=====
 from tools.budget_guard import get_budget_guard
-from tools.discord_notify import notify_discord
+from tools.discord_notify import notify_discord, notify_error
 
 # モデル別コスト概算（1Kトークンあたり、円）
 # コストレート: model_registry.py の $/1M を ¥/1K に変換 (×150/1000)
@@ -241,6 +241,32 @@ def choose_best_model_v6(
     needs_tool_search: bool = False,
     intelligence_required: int = 0,
 ) -> dict:
+    result = _choose_best_model_v6_impl(
+        task_type=task_type, quality=quality, budget_sensitive=budget_sensitive,
+        needs_japanese=needs_japanese, final_publish=final_publish,
+        local_available=local_available, context_length_needed=context_length_needed,
+        is_agentic=is_agentic, needs_multimodal=needs_multimodal,
+        needs_computer_use=needs_computer_use, needs_tool_search=needs_tool_search,
+        intelligence_required=intelligence_required,
+    )
+    result["task_type"] = task_type  # セマンティックキャッシュ用
+    return result
+
+
+def _choose_best_model_v6_impl(
+    task_type: str,
+    quality: str = "medium",
+    budget_sensitive: bool = True,
+    needs_japanese: bool = False,
+    final_publish: bool = False,
+    local_available: bool = True,
+    context_length_needed: int = 4000,
+    is_agentic: bool = False,
+    needs_multimodal: bool = False,
+    needs_computer_use: bool = False,
+    needs_tool_search: bool = False,
+    intelligence_required: int = 0,
+) -> dict:
     """
     V25 モデル選択ロジック — 品質実データに基づく最適選定
 
@@ -380,8 +406,8 @@ def choose_best_model_v6(
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
         if avoid_list and model in avoid_list:
             logger.warning(f"モデル {model} はavoid_modelsリストに該当 (task_type={task_type})、フォールバック")
-            return {"model": "claude-haiku-4-5", "tier": "A", "provider": "anthropic",
-                    "note": f"avoid_modelsフォールバック({task_type})"}
+            return {"model": "gemini-2.5-flash", "tier": "A", "provider": "google",
+                    "via": "direct", "note": f"avoid_modelsフォールバック({task_type})"}
         return {"provider": "local", "model": model, "tier": "L", "node": node,
                 "note": f"未分類→ローカル({node})"}
 
@@ -400,7 +426,42 @@ async def call_llm(
     """
     統合LLM呼び出し — プロバイダに応じて適切なAPIを呼ぶ
     model_selectionはchoose_best_model_v6()の戻り値
+
+    セマンティックキャッシュ: task_typeがキャッシュ対象の場合、
+    類似プロンプト(cosine>0.92)のキャッシュがあればLLM呼び出しをスキップ。
     """
+    if model_selection is None:
+        model_selection = choose_best_model_v6(task_type="drafting")
+
+    # ===== セマンティックキャッシュ =====
+    task_type = kwargs.pop("task_type", "") or (model_selection.get("task_type") if model_selection else "")
+    use_cache = kwargs.pop("use_cache", True)  # 明示的にFalseでキャッシュ無効化可能
+    if use_cache and task_type:
+        try:
+            from tools.semantic_cache import is_cacheable, get_semantic_cache
+            if is_cacheable(task_type):
+                cache = get_semantic_cache()
+                return await cache.get_or_call(
+                    prompt, system_prompt, model_selection,
+                    _call_llm_internal, goal_id=goal_id,
+                    task_type=task_type, **kwargs,
+                )
+        except Exception as e:
+            logger.warning(f"セマンティックキャッシュ初期化失敗（直接呼び出し）: {e}")
+
+    return await _call_llm_internal(
+        prompt, system_prompt, model_selection, goal_id=goal_id, **kwargs,
+    )
+
+
+async def _call_llm_internal(
+    prompt: str,
+    system_prompt: str = "",
+    model_selection: Optional[dict] = None,
+    goal_id: str = "",
+    **kwargs,
+) -> dict:
+    """実際のLLM呼び出し処理（セマンティックキャッシュから呼ばれる内部関数）"""
     if model_selection is None:
         model_selection = choose_best_model_v6(task_type="drafting")
 
@@ -421,8 +482,10 @@ async def call_llm(
             if not budget_check["allowed"]:
                 # 予算90%到達 → ローカルLLMフォールバック
                 logger.warning(f"予算超過によりローカルLLMへフォールバック: {budget_check['reason']}")
-                asyncio.create_task(notify_discord(
-                    "\u26a0\ufe0f 日次API予算90%到達。ローカルLLMのみで運転継続します"
+                asyncio.create_task(notify_error(
+                    "budget_90pct_fallback",
+                    "日次API予算90%到達。ローカルLLMのみで運転継続します",
+                    severity="error",
                 ))
                 provider = "local"
                 node = _pick_local_node()
@@ -436,6 +499,7 @@ async def call_llm(
     start_time = time.time()
 
     try:
+        max_tokens = kwargs.get("max_tokens", 4096)
         if provider == "local":
             use_think = model_selection.get("think", False) if model_selection else False
             result = await _call_local_llm(
@@ -447,13 +511,13 @@ async def call_llm(
         elif provider == "openai" and via == "direct":
             result = await _call_openai(prompt, system_prompt, model)
         elif provider == "anthropic":
-            result = await _call_anthropic(prompt, system_prompt, model)
+            result = await _call_anthropic(prompt, system_prompt, model, max_tokens=max_tokens)
         elif provider == "deepseek":
             result = await _call_deepseek(prompt, system_prompt, model)
         elif provider == "google":
             result = await _call_google(prompt, system_prompt, model)
         elif via == "openrouter":
-            result = await _call_openrouter(prompt, system_prompt, model)
+            result = await _call_openrouter(prompt, system_prompt, model, max_tokens=max_tokens)
         else:
             result = await _call_openrouter(prompt, system_prompt, model)
 
@@ -531,10 +595,12 @@ async def call_llm(
                 log_usage("llm_call", model, result.get("prompt_tokens", 0),
                           result.get("completion_tokens", 0), True)
 
-                # 警告レベルに応じてDiscord通知
-                if spend_result.get("alert_level") == "warn":
-                    asyncio.create_task(notify_discord(
-                        f"\u26a0\ufe0f API予算80%警告: {spend_result.get('message', '')}"
+                # 警告レベルに応じてDiscord通知（dedupはnotify_error内で処理）
+                if spend_result.get("alert_level") == "stop":
+                    asyncio.create_task(notify_error(
+                        "budget_90pct_stop",
+                        f"API予算90%超過: {spend_result.get('message', '')}",
+                        severity="critical",
                     ))
             except Exception as e:
                 log_usage("budget_record", model, 0, 0, False, str(e))
@@ -686,14 +752,14 @@ async def _call_openai(prompt: str, system_prompt: str, model: str) -> dict:
     }
 
 
-async def _call_anthropic(prompt: str, system_prompt: str, model: str) -> dict:
+async def _call_anthropic(prompt: str, system_prompt: str, model: str, max_tokens: int = 4096) -> dict:
     """Anthropic API直接呼び出し"""
     import anthropic
 
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     resp = await client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=max_tokens,
         system=system_prompt or "You are a helpful assistant.",
         messages=[{"role": "user", "content": prompt}],
     )
@@ -747,7 +813,7 @@ async def _call_google(prompt: str, system_prompt: str, model: str) -> dict:
     }
 
 
-async def _call_openrouter(prompt: str, system_prompt: str, model: str) -> dict:
+async def _call_openrouter(prompt: str, system_prompt: str, model: str, max_tokens: int = 4096) -> dict:
     """OpenRouter API経由呼び出し（100+モデル統合アクセス）"""
     import openai
 
@@ -760,7 +826,7 @@ async def _call_openrouter(prompt: str, system_prompt: str, model: str) -> dict:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    resp = await client.chat.completions.create(model=model, messages=messages)
+    resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
     return {
         "text": resp.choices[0].message.content or "",
         "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,

@@ -51,13 +51,14 @@ export async function apiFetch(
 
   const res = await fetch(input, { ...init, headers });
 
-  // 401の場合、トークンをクリア
+  // 401の場合、トークンをクリアしてAuthGateに通知
   if (res.status === 401 && token) {
     _token = null;
     _tokenExpiry = 0;
     if (typeof window !== "undefined") {
       localStorage.removeItem("syutain_token");
       localStorage.removeItem("syutain_token_expiry");
+      window.dispatchEvent(new CustomEvent("syutain:auth_expired"));
     }
   }
 

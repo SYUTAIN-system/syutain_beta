@@ -1,7 +1,8 @@
 """SYUTAINβ Discord Bot — 自然言語対話（改善版）"""
 import os, sys, asyncio, logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import time as dtime
+from datetime import time as dtime, timezone, timedelta
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -11,12 +12,25 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [BOT] %(name)s %(levelname)s: %(message)s")
+# ログ設定（RotatingFileHandler: 10MB x 5世代）
+_bot_log_dir = os.getenv("LOG_DIR", str(Path(__file__).resolve().parent.parent / "logs"))
+os.makedirs(_bot_log_dir, exist_ok=True)
+_bot_log_fmt = logging.Formatter("%(asctime)s [BOT] %(name)s %(levelname)s: %(message)s")
+_bot_stream = logging.StreamHandler()
+_bot_stream.setFormatter(_bot_log_fmt)
+_bot_file = RotatingFileHandler(
+    f"{_bot_log_dir}/discord_bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_bot_file.setFormatter(_bot_log_fmt)
+logging.basicConfig(level=logging.INFO, handlers=[_bot_stream, _bot_file])
 logger = logging.getLogger("syutain.discord_bot")
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 GENERAL_CH = int(os.getenv("DISCORD_GENERAL_CHANNEL_ID", "0"))
 BRAIN_ALPHA_DISCORD_ID = os.getenv("BRAIN_ALPHA_DISCORD_ID", "1477009083100958853")
+
+# JST timezone for scheduled reports
+JST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -34,6 +48,7 @@ async def on_ready():
     try:
         from tools.db_pool import init_pool
         await init_pool(min_size=1, max_size=5)
+        logger.info("DB pool初期化完了 (on_ready)")
     except Exception as e:
         logger.error(f"DB pool初期化失敗: {e}")
     if not morning_report.is_running():
@@ -42,6 +57,8 @@ async def on_ready():
         night_summary.start()
     if not session_cleanup.is_running():
         session_cleanup.start()
+    if not system_watchdog.is_running():
+        system_watchdog.start()
 
 @bot.event
 async def on_message(message):
@@ -53,8 +70,14 @@ async def on_message(message):
     if f"<@{BRAIN_ALPHA_DISCORD_ID}>" in message.content:
         return
 
-    # Brain-αのメッセージにも反応しない（ループ防止）
+    # Brain-αのメッセージを検知 → エスカレーション追跡を更新
     if str(message.author.id) == BRAIN_ALPHA_DISCORD_ID:
+        try:
+            from bots.bot_escalation import on_brain_alpha_response, on_brain_alpha_task_complete
+            await on_brain_alpha_response(message)
+            await on_brain_alpha_task_complete(message)
+        except Exception as e:
+            logger.debug(f"Brain-α応答処理スキップ: {e}")
         return
 
     # Brain-αへのリプライの場合、Brain-βは無反応（Brain-αとの会話に割り込まない）
@@ -241,36 +264,99 @@ async def reject_cmd(ctx, approval_id: int):
     await reject_item(approval_id)
     await ctx.reply(f"却下しました。(ID: {approval_id})")
 
-# Scheduled reports
-@tasks.loop(time=[dtime(hour=7, minute=0)])
+# Scheduled reports (JST timezone-aware)
+@tasks.loop(time=[dtime(hour=7, minute=0, tzinfo=JST)])
 async def morning_report():
+    """朝の報告（JST 07:00）"""
     ch = bot.get_channel(GENERAL_CH)
-    if ch:
+    if not ch:
+        logger.warning("morning_report: チャンネル取得失敗")
+        return
+    try:
         from bots.bot_notifications import generate_morning_report
         msg = await generate_morning_report(bot)
         await ch.send(msg)
+        logger.info("morning_report送信完了")
+        # alertチャンネルにもWebhook送信
+        try:
+            from tools.discord_notify import notify_discord
+            await notify_discord(f"📋 朝レポート\n{msg}", username="Brain-β Report")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"morning_report送信エラー: {e}")
 
-@tasks.loop(time=[dtime(hour=22, minute=0)])
+@tasks.loop(time=[dtime(hour=22, minute=0, tzinfo=JST)])
 async def night_summary():
+    """夜のサマリー（JST 22:00）"""
     ch = bot.get_channel(GENERAL_CH)
-    if ch:
+    if not ch:
+        logger.warning("night_summary: チャンネル取得失敗")
+        return
+    try:
         from bots.bot_notifications import generate_night_summary
         msg = await generate_night_summary(bot)
         await ch.send(msg)
+        logger.info("night_summary送信完了")
+        # alertチャンネルにもWebhook送信
+        try:
+            from tools.discord_notify import notify_discord
+            await notify_discord(f"📋 夜サマリー\n{msg}", username="Brain-β Report")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"night_summary送信エラー: {e}")
 
 @tasks.loop(minutes=5)
 async def session_cleanup():
     """期限切れセッションのクリーンアップ + プロアクティブ報告チェック"""
-    from bots.bot_context import session_manager
-    session_manager.cleanup_expired()
+    try:
+        from bots.bot_context import session_manager
+        session_manager.cleanup_expired()
+    except Exception as e:
+        logger.error(f"セッションクリーンアップ失敗: {e}")
 
     # プロアクティブ報告チェック
     ch = bot.get_channel(GENERAL_CH)
     if ch:
-        from bots.bot_proactive import check_proactive_triggers
-        report = await check_proactive_triggers(ch)
-        if report:
-            await ch.send(report)
+        try:
+            from bots.bot_proactive import check_proactive_triggers
+            report = await check_proactive_triggers(ch)
+            if report:
+                await ch.send(report)
+        except Exception as e:
+            logger.error(f"プロアクティブチェック失敗: {e}")
+
+@tasks.loop(minutes=2)
+async def system_watchdog():
+    """2分ごとにシステム異常を監視して即時報告"""
+    ch = bot.get_channel(GENERAL_CH)
+    if not ch:
+        return
+    try:
+        from bots.bot_proactive import check_emergency_alerts
+        alerts = await check_emergency_alerts()
+        if alerts:
+            await ch.send(alerts)
+    except Exception as e:
+        logger.error(f"Watchdog error: {e}")
+
+# before_loopでbotのready待ち
+@morning_report.before_loop
+async def before_morning_report():
+    await bot.wait_until_ready()
+
+@night_summary.before_loop
+async def before_night_summary():
+    await bot.wait_until_ready()
+
+@session_cleanup.before_loop
+async def before_session_cleanup():
+    await bot.wait_until_ready()
+
+@system_watchdog.before_loop
+async def before_system_watchdog():
+    await bot.wait_until_ready()
 
 if __name__ == "__main__":
     if not TOKEN:

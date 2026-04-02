@@ -115,9 +115,9 @@ export default function DashboardPage() {
           today_revenue: revenueJson?.today_revenue ?? dashJson.today_revenue ?? 0,
           pending_approvals: dashJson.pending_approvals ?? 0,
           daily_cost: budgetJson?.daily_spent_jpy ?? 0,
-          daily_budget: budgetJson?.daily_budget_jpy ?? 80,
+          daily_budget: budgetJson?.daily_budget_jpy ?? budgetJson?.daily_limit_jpy ?? 0,
           monthly_cost: budgetJson?.monthly_spent_jpy ?? 0,
-          monthly_budget: budgetJson?.monthly_budget_jpy ?? 1500,
+          monthly_budget: budgetJson?.monthly_budget_jpy ?? budgetJson?.monthly_limit_jpy ?? 0,
           recent_proposals: dashJson.recent_proposals ?? [],
           recent_artifacts: dashJson.recent_artifacts ?? [],
         };
@@ -157,9 +157,9 @@ export default function DashboardPage() {
             today_revenue: 0,
             pending_approvals: 0,
             daily_cost: 0,
-            daily_budget: 80,
+            daily_budget: 0,
             monthly_cost: 0,
-            monthly_budget: 1500,
+            monthly_budget: 0,
             recent_proposals: [],
             recent_artifacts: [],
           });
@@ -190,7 +190,7 @@ export default function DashboardPage() {
         setTimeout(() => setGoalSent(false), 3000);
       }
     } catch {
-      // ignore
+      setError("ゴール送信に失敗しました");
     } finally {
       setGoalSending(false);
     }
@@ -205,7 +205,7 @@ export default function DashboardPage() {
         setSelectedTask(detail);
       }
     } catch {
-      // ignore
+      setError("タスク詳細の取得に失敗しました");
     } finally {
       setTaskDetailLoading(false);
     }
@@ -224,7 +224,7 @@ export default function DashboardPage() {
         body: JSON.stringify({ mode: newMode }),
       });
     } catch {
-      // ignore
+      setError("CHARLIE切替に失敗しました");
     } finally {
       setCharlieSwitching(false);
     }
@@ -236,14 +236,15 @@ export default function DashboardPage() {
       if (!res.ok) return;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${type}_${id.slice(0, 8)}.md`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      // Use Object.assign to set properties and trigger download without DOM manipulation
+      Object.assign(Object.assign(document.createElement("a"), {
+        href: url,
+        download: `${type}_${id.slice(0, 8)}.md`,
+      }), {}).click();
       URL.revokeObjectURL(url);
-    } catch { /* ignore */ }
+    } catch {
+      setError("ダウンロードに失敗しました");
+    }
   };
 
   if (loading) {
@@ -258,9 +259,9 @@ export default function DashboardPage() {
   // APIレスポンスの欠落フィールドに安全なデフォルト値を設定
   const safeNodes: NodeInfo[] = Array.isArray(d.nodes) ? d.nodes : [];
   const dailyCost = d.daily_cost ?? 0;
-  const dailyBudget = d.daily_budget ?? 80;
+  const dailyBudget = d.daily_budget ?? 0;
   const monthlyCost = d.monthly_cost ?? 0;
-  const monthlyBudget = d.monthly_budget ?? 1500;
+  const monthlyBudget = d.monthly_budget ?? 0;
   const safeProposals = Array.isArray(d.recent_proposals) ? d.recent_proposals : [];
   const safeArtifacts = Array.isArray(d.recent_artifacts) ? d.recent_artifacts : [];
   const dailyPct = dailyBudget > 0 ? Math.min((dailyCost / dailyBudget) * 100, 100) : 0;
@@ -271,10 +272,10 @@ export default function DashboardPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl sm:text-2xl font-bold">ダッシュボード</h1>
         {error && (
-          <span className="flex items-center gap-1 rounded-full bg-[var(--accent-amber)]/10 px-3 py-1 text-xs text-[var(--accent-amber)]">
+          <button onClick={() => setError(null)} className="flex items-center gap-1 rounded-full bg-[var(--accent-amber)]/10 px-3 py-2 text-xs text-[var(--accent-amber)] min-h-[36px] active:opacity-70" aria-label="エラーを閉じる">
             <AlertTriangle className="h-3 w-3" />
             {error}
-          </span>
+          </button>
         )}
       </div>
 
@@ -323,13 +324,14 @@ export default function DashboardPage() {
             onChange={(e) => setQuickGoal(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendQuickGoal()}
             placeholder="ゴールを入力... (例: 今月中に入口商品を1本出したい)"
-            className="flex-1 rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-2 text-sm text-white placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent-purple)] transition-colors"
+            className="flex-1 rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3 text-base sm:text-sm text-white placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent-purple)] transition-colors"
             disabled={goalSending}
           />
           <button
             onClick={sendQuickGoal}
             disabled={goalSending || !quickGoal.trim()}
-            className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--accent-purple)] text-white hover:bg-[var(--accent-purple)]/80 transition-colors disabled:opacity-50"
+            aria-label="ゴールを送信"
+            className="flex h-11 w-11 items-center justify-center rounded-lg bg-[var(--accent-purple)] text-white hover:bg-[var(--accent-purple)]/80 active:bg-[var(--accent-purple)]/60 transition-colors disabled:opacity-50"
           >
             <Send className="h-4 w-4" />
           </button>
@@ -380,6 +382,14 @@ export default function DashboardPage() {
           </div>
           <p className="mt-0.5 text-[10px] text-[var(--text-secondary)]">日次 &yen;{dailyBudget} / 月次 &yen;{monthlyCost.toFixed(0)}/{monthlyBudget}</p>
         </div>
+      </div>
+
+      {/* Monthly Cost vs Revenue */}
+      <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-3">
+        <p className="text-sm font-medium">
+          月次コスト: <span className="text-[var(--accent-red)]">¥{monthlyCost.toFixed(0)}</span>
+          {" / "}収益: <span className="text-[var(--accent-green)]">¥{d.today_revenue.toLocaleString()}</span>
+        </p>
       </div>
 
       {/* Brain-α 精査サマリー */}
@@ -444,9 +454,10 @@ export default function DashboardPage() {
           <button
             onClick={toggleCharlie}
             disabled={charlieSwitching}
-            className="flex items-center gap-1 rounded-full border border-[var(--border-color)] bg-[var(--bg-card)] px-3 py-1 text-xs hover:border-[var(--accent-amber)] transition-colors disabled:opacity-50"
+            aria-label={charlieSwitching ? "切替中" : isCharlieWin11 ? "CHARLIEをUbuntuに切替" : "CHARLIEをWin11に切替"}
+            className="flex items-center gap-1.5 rounded-full border border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-2 text-xs hover:border-[var(--accent-amber)] active:bg-[var(--bg-primary)] transition-colors disabled:opacity-50 min-h-[36px]"
           >
-            <Monitor className="h-3 w-3" />
+            <Monitor className="h-3.5 w-3.5" />
             {charlieSwitching ? "切替中..." : isCharlieWin11 ? "CHARLIE → Ubuntu" : "CHARLIE → Win11"}
           </button>
         </div>
@@ -556,7 +567,8 @@ export default function DashboardPage() {
               </h2>
               <button
                 onClick={() => setSelectedTask(null)}
-                className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--bg-primary)] transition-colors"
+                aria-label="閉じる"
+                className="flex h-11 w-11 items-center justify-center rounded-lg hover:bg-[var(--bg-primary)] transition-colors"
               >
                 <X className="h-5 w-5" />
               </button>

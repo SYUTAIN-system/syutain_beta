@@ -122,9 +122,19 @@ async def two_stage_refine(
         "model": refined.get("model_used", "unknown"),
     })
 
+    # API精錬後の品質を再評価
+    refined_text = refined.get("text", best_draft["text"])
+    refined_score = best_score
+    try:
+        refined_score = await _quality_check(refined_text)
+        stages.append({"stage": 4, "action": "re_evaluate", "score": refined_score})
+        logger.info(f"2段階精錬: 再評価スコア {best_score:.2f} → {refined_score:.2f}")
+    except Exception as e:
+        logger.warning(f"2段階精錬: 再評価失敗（元スコア維持）: {e}")
+
     return {
-        "text": refined.get("text", best_draft["text"]),
-        "quality_score": best_score,
+        "text": refined_text,
+        "quality_score": max(best_score, refined_score),
         "refined": True,
         "model_used": refined.get("model_used", "unknown"),
         "cost_jpy": refined.get("cost_jpy", 0.0),

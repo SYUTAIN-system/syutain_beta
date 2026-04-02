@@ -110,6 +110,11 @@ class TaskGraph:
         if task_id in self.nodes:
             self.nodes[task_id].status = "failed"
 
+    def mark_pending(self, task_id: str):
+        """RETRY_MODIFIED時にタスクをpendingに戻す"""
+        if task_id in self.nodes:
+            self.nodes[task_id].status = "pending"
+
     def all_completed(self) -> bool:
         return all(t.status == "completed" for t in self.nodes.values())
 
@@ -125,8 +130,105 @@ class TaskGraph:
 class Planner:
     """Task Graph Planner — ゴールをタスクDAGに分解"""
 
+    # 高リスクキーワード: これらを含むゴールは実行前にDiscordで人間レビューを要求
+    HIGH_RISK_KEYWORDS = ["削除", "公開", "投稿", "取引", "決済", "支払", "購入", "送信"]
+
     def __init__(self):
         pass
+
+    async def _needs_plan_review(self, goal_text: str, tasks: list) -> bool:
+        """Check if plan needs human review before execution.
+
+        高リスクキーワードがゴールテキストに含まれる場合、
+        実行前にDiscord経由で人間レビューを要求する。
+        """
+        return any(kw in goal_text for kw in self.HIGH_RISK_KEYWORDS)
+
+    async def _request_plan_review(self, goal_id: str, goal_text: str, task_graph: TaskGraph) -> bool:
+        """プランレビューをapproval_queueに投入し、承認を待つ。
+
+        Returns:
+            True=承認済み or レビュー不要, False=拒否 or タイムアウト
+        """
+        # タスクDAGのサマリーを生成
+        task_summaries = []
+        for tid, tnode in task_graph.nodes.items():
+            task_summaries.append(
+                f"[{tnode.task_type}] {tnode.description[:80]} → {tnode.assigned_node}"
+            )
+        dag_summary = "\n".join(task_summaries)
+
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO approval_queue (request_type, request_data, status)
+                    VALUES ($1, $2, 'pending')
+                    RETURNING id
+                    """,
+                    "plan_review",
+                    json.dumps({
+                        "goal_id": goal_id,
+                        "goal_text": goal_text[:500],
+                        "task_count": len(task_graph.nodes),
+                        "dag_summary": dag_summary[:2000],
+                        "total_estimated_cost_jpy": sum(
+                            t.estimated_cost_jpy for t in task_graph.nodes.values()
+                        ),
+                    }, ensure_ascii=False, default=str),
+                )
+                approval_id = row["id"] if row else None
+
+            # Discord通知
+            try:
+                from tools.discord_notify import notify_discord
+                matched_keywords = [kw for kw in self.HIGH_RISK_KEYWORDS if kw in goal_text]
+                await notify_discord(
+                    f"⚠️ **プランレビュー要求** (approval #{approval_id})\n"
+                    f"ゴール: {goal_text[:200]}\n"
+                    f"検出キーワード: {', '.join(matched_keywords)}\n"
+                    f"タスク数: {len(task_graph.nodes)}\n"
+                    f"```\n{dag_summary[:1000]}\n```\n"
+                    f"承認/却下してください。"
+                )
+            except Exception as e:
+                logger.warning(f"プランレビューDiscord通知失敗: {e}")
+
+            logger.info(
+                f"プランレビュー要求: goal_id={goal_id}, approval_id={approval_id}, "
+                f"タスク{len(task_graph.nodes)}件"
+            )
+
+            # 承認待ち（Tier 1: 人間承認）— 最大30分ポーリング
+            if approval_id:
+                for _ in range(60):  # 30秒 x 60 = 30分
+                    await asyncio.sleep(30)
+                    try:
+                        async with get_connection() as conn:
+                            status_row = await conn.fetchrow(
+                                "SELECT status FROM approval_queue WHERE id = $1",
+                                approval_id,
+                            )
+                        if status_row:
+                            status = status_row["status"]
+                            if status == "approved":
+                                logger.info(f"プランレビュー承認: approval_id={approval_id}")
+                                return True
+                            elif status in ("rejected", "denied"):
+                                logger.info(f"プランレビュー却下: approval_id={approval_id}")
+                                return False
+                    except Exception:
+                        pass
+
+                # タイムアウト: 安全側に倒して拒否
+                logger.warning(f"プランレビュータイムアウト: approval_id={approval_id}")
+                return False
+
+            return True  # approval_id取得失敗時はフォールスルー
+
+        except Exception as e:
+            logger.error(f"プランレビュー要求失敗: {e}")
+            return True  # レビュー機構自体の失敗でブロックしない
 
     async def plan(self, goal_packet: dict, perception: dict) -> TaskGraph:
         """
@@ -149,9 +251,17 @@ class Planner:
         )
 
         capability = perception.get("capability_snapshot", {})
+        if not isinstance(capability, dict):
+            capability = {}
         budget = perception.get("budget", {})
+        if not isinstance(budget, dict):
+            budget = {}
         persona_context = perception.get("persona_context", {})
+        if not isinstance(persona_context, dict):
+            persona_context = {}
         intel_context = perception.get("intel_context", {})
+        if not isinstance(intel_context, dict):
+            intel_context = {}
 
         plan_prompt = self._build_plan_prompt(goal_packet, capability, budget, persona_context, intel_context)
 
@@ -181,6 +291,25 @@ class Planner:
         await self._save_tasks(task_graph)
 
         logger.info(f"タスク計画完了: {len(task_graph.nodes)}タスク生成")
+
+        # 高リスクゴールのプランレビュー（実行前に人間承認を要求）
+        raw_goal = goal_packet.get("raw_goal", "")
+        if task_graph.nodes and await self._needs_plan_review(raw_goal, list(task_graph.nodes.values())):
+            logger.info(f"高リスクゴール検出 — プランレビュー要求: {goal_id}")
+            approved = await self._request_plan_review(goal_id, raw_goal, task_graph)
+            if not approved:
+                logger.warning(f"プランレビュー却下またはタイムアウト — 空グラフを返却: {goal_id}")
+                try:
+                    from tools.event_logger import log_event
+                    await log_event(
+                        "plan.review_rejected", "goal",
+                        {"goal_id": goal_id, "goal_text": raw_goal[:200],
+                         "task_count": len(task_graph.nodes)},
+                        severity="warning", goal_id=goal_id,
+                    )
+                except Exception:
+                    pass
+                return TaskGraph(goal_id)  # 空グラフ = 実行しない
 
         # 判断根拠トレース
         try:
@@ -283,7 +412,16 @@ class Planner:
             json_match = re.search(r"\{[\s\S]*\}", plan_text)
             if json_match:
                 parsed = json.loads(json_match.group())
-                tasks_data = parsed.get("tasks", [])
+                if isinstance(parsed, dict):
+                    tasks_data = parsed.get("tasks", [])
+                    # tasks が list でなければフォールバック
+                    if not isinstance(tasks_data, list):
+                        tasks_data = []
+                elif isinstance(parsed, list):
+                    # トップレベルがリストの場合、各要素がタスクdictと仮定
+                    tasks_data = [t for t in parsed if isinstance(t, dict)]
+                # 各要素がdictであることを保証
+                tasks_data = [td for td in tasks_data if isinstance(td, dict)]
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"タスク計画JSONパース失敗: {e}")
 
@@ -311,8 +449,14 @@ class Planner:
             assigned = td.get("assigned_node", "auto")
             if assigned not in valid_nodes:
                 assigned = "auto"
-            if assigned == "auto":
-                assigned = self._assign_node(td.get("task_type", ""), capability)
+            # 特定タスクタイプはノード固定（LLMの割当を上書き）
+            task_type_raw = td.get("task_type", "")
+            if task_type_raw in ("browser_action", "computer_use"):
+                assigned = "bravo"  # ブラウザ操作はBRAVO固定
+            elif task_type_raw == "approval_request":
+                assigned = "alpha"  # 承認はALPHA固定（ApprovalManager稼働ノード）
+            elif assigned == "auto":
+                assigned = self._assign_node(task_type_raw, capability)
 
             # モデル選択（CLAUDE.md ルール5: choose_best_model_v6使用）
             task_type = td.get("task_type", "drafting")
@@ -354,32 +498,60 @@ class Planner:
         return graph
 
     def _assign_node(self, task_type: str, capability: dict) -> str:
-        """タスクタイプとCapability Auditに基づいてノードを割り当て"""
-        nodes = capability.get("nodes", {})
+        """タスクタイプとCapability Auditに基づいてノードを割り当て
 
-        # ブラウザ操作 → BRAVO
+        設計書ルール21: 4台のPCをPhase 1から全て稼働させる。
+        Capability Auditが不完全（nodes.status != healthy）でも、
+        設計書のノード役割に基づいてタスクを分散する。
+        リモートノードが応答しない場合はExecutorがフォールバックする。
+        """
+        nodes = {}
+        if isinstance(capability, dict):
+            nodes = capability.get("nodes", {})
+            if not isinstance(nodes, dict):
+                nodes = {}
+
+        def _is_available(node_name: str) -> bool:
+            """ノードが利用可能かどうか。healthyまたはCapability未取得でも設計上の役割に基づき許可"""
+            node_info = nodes.get(node_name, {})
+            if not isinstance(node_info, dict):
+                return True  # 情報なし→設計上のデフォルトルーティングに従う
+            status = node_info.get("status", "unknown")
+            # 明示的に unreachable/down の場合のみ拒否
+            return status not in ("down",)
+
+        # ブラウザ操作 → BRAVO（固定、フォールバックなし）
         if task_type in ["browser_action", "computer_use"]:
-            if nodes.get("bravo", {}).get("status") == "healthy":
-                return "bravo"
+            return "bravo"
+
+        # 承認リクエスト → ALPHA（固定、ApprovalManagerがALPHAで稼働）
+        if task_type in ["approval_request", "approval", "scheduling", "strategy", "proposal"]:
+            return "alpha"
 
         # 推論・コンテンツ生成 → CHARLIE（主力推論）優先、BRAVOにフォールバック
-        if task_type in ["drafting", "content", "analysis", "coding"]:
-            if nodes.get("charlie", {}).get("status") == "healthy":
+        if task_type in ["drafting", "content", "analysis", "coding", "research"]:
+            if _is_available("charlie"):
                 return "charlie"
-            if nodes.get("bravo", {}).get("status") == "healthy":
+            if _is_available("bravo"):
                 return "bravo"
 
         # 監視・情報収集 → DELTA
-        if task_type in ["monitoring", "data_extraction"]:
-            if nodes.get("delta", {}).get("status") == "healthy":
+        if task_type in ["monitoring", "data_extraction", "info_collection",
+                         "tagging", "classification", "health_check"]:
+            if _is_available("delta"):
                 return "delta"
 
         # バッチ処理 → CHARLIE
         if task_type == "batch_process":
-            if nodes.get("charlie", {}).get("status") == "healthy":
+            if _is_available("charlie"):
                 return "charlie"
 
-        # デフォルト: ALPHA（司令塔）
+        # 翻訳 → CHARLIE
+        if task_type == "translation":
+            if _is_available("charlie"):
+                return "charlie"
+
+        # デフォルト: ALPHA（司令塔 — scheduling/strategy/proposal/approval）
         return "alpha"
 
     async def _save_tasks(self, graph: TaskGraph):

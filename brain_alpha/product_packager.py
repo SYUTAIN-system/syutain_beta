@@ -39,6 +39,19 @@ CATEGORY_KEYWORDS = {
 FREE_PREVIEW_LENGTH = 500  # 無料公開部分の文字数
 
 
+def _auto_price_by_word_count(word_count: int) -> int | None:
+    """文字数に基づく自動価格設定（LLM推奨がない場合のデフォルト）
+    6000字未満はパッケージ対象外（Noneを返す）"""
+    if word_count >= 12000:
+        return 1980  # premium
+    elif word_count >= 8000:
+        return 980  # standard
+    elif word_count >= 6000:
+        return 480  # entry level
+    else:
+        return None  # パッケージ対象外
+
+
 def _extract_tags(text: str) -> list[str]:
     """テキストからキーワードマッチでタグ抽出"""
     tags = []
@@ -141,16 +154,25 @@ async def package_publish_ready_articles() -> dict:
 
                     title = review["article_title"] or filepath.split("/")[-1].replace(".md", "")
 
-                    # 価格設定（stage2_pricingを使用、なければ¥500）
+                    # 価格設定（stage2_pricing → 文字数ベース自動価格 の順でフォールバック）
                     pricing = review["stage2_pricing"]
-                    price = 500
+                    price = None
                     if pricing:
-                        if isinstance(pricing, (int, float)):
+                        if isinstance(pricing, (int, float)) and int(pricing) > 0:
                             price = int(pricing)
                         elif isinstance(pricing, str):
                             price_match = re.search(r"(\d+)", pricing)
-                            if price_match:
+                            if price_match and int(price_match.group(1)) > 0:
                                 price = int(price_match.group(1))
+                    if price is None:
+                        # LLM推奨がない場合、文字数ベースの自動価格を適用
+                        price = _auto_price_by_word_count(len(body))
+
+                    if price is None:
+                        # 6000字未満の記事はパッケージ対象外
+                        logger.warning(f"記事が短すぎてパッケージ対象外: {title} ({len(body)}字、最低6000字必要)")
+                        results["skipped"] += 1
+                        continue
 
                     # タグ・カテゴリ抽出（LLM不使用）
                     tags = _extract_tags(title + " " + body[:2000])
@@ -171,10 +193,61 @@ async def package_publish_ready_articles() -> dict:
                         price, json.dumps(tags, ensure_ascii=False), category,
                     )
 
-                    # Discord通知
-                    await notify_discord(
-                        f"📦 記事『{title}』公開準備完了。推奨¥{price}。`!承認 pkg-{pkg_id}`で承認"
-                    )
+                    # 品質スコアに基づく自動承認判定
+                    # s1 >= 0.65 → 自動承認（Tier 2: 自動+通知）
+                    # s1 < 0.65 → 人間承認（Tier 1）
+                    auto_approve = False
+                    try:
+                        from tools.db_pool import get_connection as _gc
+                        async with _gc() as _conn:
+                            s1 = await _conn.fetchval(
+                                "SELECT stage1_score FROM note_quality_reviews WHERE id = $1",
+                                review_id
+                            )
+                            if s1 and float(s1) >= 0.65:
+                                auto_approve = True
+                    except Exception:
+                        pass
+
+                    if auto_approve:
+                        # 自動承認: 直接approvedに + Discord通知
+                        try:
+                            await conn.execute(
+                                "UPDATE product_packages SET status = 'approved', approved_at = NOW() WHERE id = $1",
+                                pkg_id
+                            )
+                            await notify_discord(
+                                f"✅ 記事自動承認・自動公開予定\n"
+                                f"タイトル: 『{title}』\n"
+                                f"価格: ¥{price}\n"
+                                f"品質スコア: {float(s1):.2f} (閾値0.65)\n"
+                                f"30分以内にnote.comへ自動公開されます。"
+                            )
+                            logger.info(f"記事自動承認: {title} (s1={float(s1):.2f})")
+                        except Exception as auto_err:
+                            logger.error(f"自動承認処理失敗: {auto_err}")
+                    else:
+                        # 人間承認: ApprovalManager経由 (Rule 11)
+                        try:
+                            from agents.approval_manager import ApprovalManager
+                            approval_mgr = ApprovalManager()
+                            await approval_mgr.request_approval(
+                                request_type="product_publish",
+                                request_data={
+                                    "package_id": pkg_id,
+                                    "title": title,
+                                    "price_jpy": price,
+                                    "platform": "note",
+                                    "tags": tags,
+                                    "category": category,
+                                },
+                                requested_by="product_packager",
+                            )
+                        except Exception as approval_err:
+                            logger.warning(f"承認リクエスト送信失敗（Discord通知で代替）: {approval_err}")
+                            await notify_discord(
+                                f"📦 記事『{title}』公開準備完了。推奨¥{price}。`!承認 pkg-{pkg_id}`で承認"
+                            )
 
                     results["packaged"] += 1
                     logger.info(f"パッケージ完了: {title} (¥{price}, tags={tags})")

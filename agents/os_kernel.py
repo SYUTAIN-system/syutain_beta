@@ -331,6 +331,25 @@ class OSKernel:
         fallback_count = len(goal_packet.fallback_goals)
         current_plan_index = 0  # 0=主プラン, 1+=フォールバック
 
+        # progress_log確認: クラッシュ後の再開時に完了済みステップを把握（Harness Engineering）
+        completed_task_ids = set()
+        try:
+            resume_info = await self._load_progress_log(goal_packet.goal_id)
+            if resume_info:
+                completed_task_ids = {
+                    entry["task_id"] for entry in resume_info
+                    if entry.get("status") == "success" and entry.get("task_id")
+                }
+                last_step = max((entry.get("step", 0) for entry in resume_info), default=0)
+                if completed_task_ids:
+                    goal_packet.total_steps = last_step
+                    logger.info(
+                        f"progress_logから再開情報ロード: {len(completed_task_ids)}タスク完了済み, "
+                        f"最終ステップ={last_step}"
+                    )
+        except Exception as e:
+            logger.warning(f"progress_logロード失敗（新規実行として続行）: {e}")
+
         while True:
             # ① 認識（Perceive）
             logger.info(f"--- ① 認識（Perceive）: {goal_packet.goal_id} ---")
@@ -368,6 +387,13 @@ class OSKernel:
                         break
 
                 for task_node in ready_tasks:
+                    # progress_logで完了済みタスクをスキップ（クラッシュ後再開時）
+                    if task_node.task_id in completed_task_ids:
+                        logger.info(f"スキップ（progress_log完了済み）: {task_node.task_id}")
+                        task_graph.mark_completed(task_node.task_id)
+                        completed_count += 1
+                        continue
+
                     task_dict = task_node.to_dict()
 
                     # 突然変異注入（設計書第24章 — try-exceptで完全隔離）
@@ -388,6 +414,15 @@ class OSKernel:
                     except Exception:
                         pass  # 変異エンジンのバグで処理を止めない
 
+                    # Sprint Contract生成（Generator+Evaluator分離: 実行前に検証基準を合意）
+                    sprint_contract = None
+                    try:
+                        sprint_contract = await self._verifier.create_sprint_contract(
+                            task_dict, gp_dict,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Sprint Contract生成失敗（検証は従来方式で続行）: {e}")
+
                     # ③ 行動（Act）
                     logger.info(f"--- ③ 行動（Act）: {task_node.task_id} ---")
                     # イベント記録: task.dispatched（意思決定トレース付き）
@@ -399,6 +434,7 @@ class OSKernel:
                             "description": task_node.description[:100],
                             "reason": f"assigned_to_{task_node.assigned_node}",
                             "goal_step": goal_packet.total_steps + 1,
+                            "has_sprint_contract": sprint_contract is not None,
                         },
                         goal_id=goal_packet.goal_id, task_id=task_node.task_id,
                     ))
@@ -418,11 +454,12 @@ class OSKernel:
                     goal_packet.total_steps += 1
                     goal_packet.total_cost_jpy += result_dict.get("cost_jpy", 0)
 
-                    # ④ 検証（Verify）
+                    # ④ 検証（Verify）— Sprint Contract付きで独立検証
                     logger.info(f"--- ④ 検証（Verify）: {task_node.task_id} ---")
                     try:
                         verification = await self._verifier.verify(
                             result_dict, gp_dict, completed_count, total_count,
+                            sprint_contract=sprint_contract,
                         )
                         verify_dict = verification.to_dict()
                     except Exception as e:
@@ -633,7 +670,16 @@ class OSKernel:
 
                     elif decision == DECISION_RETRY_MODIFIED:
                         logger.info(f"修正再試行: {stop_decision.reason}")
-                        # 次のready_tasksで自然に再実行される
+                        # 失敗タスクをpendingに戻して再試行可能にする
+                        task_graph.mark_pending(task_node.task_id)
+                        try:
+                            async with get_connection() as conn:
+                                await conn.execute(
+                                    "UPDATE tasks SET status='pending', updated_at=NOW() WHERE id=$1",
+                                    task_node.task_id,
+                                )
+                        except Exception:
+                            pass
 
                     # DECISION_CONTINUE: そのまま続行
 
@@ -658,6 +704,22 @@ class OSKernel:
         await self._update_goal_status(goal_packet)
         await self._save_session_on_goal_end(goal_packet, all_results, "incomplete")
         return self._build_final_result(goal_packet, all_results, "incomplete")
+
+    async def _load_progress_log(self, goal_id: str) -> list:
+        """goal_packetsからprogress_logを読み込む（クラッシュ後再開判定用）"""
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchval(
+                    "SELECT progress_log FROM goal_packets WHERE goal_id = $1",
+                    goal_id,
+                )
+                if row:
+                    if isinstance(row, str):
+                        return json.loads(row)
+                    return row  # asyncpgはJSONBをdictに自動変換
+        except Exception as e:
+            logger.warning(f"progress_logロード失敗: {e}")
+        return []
 
     async def _record_trace(self, action="", reasoning="", confidence=None, context=None, task_id=None, goal_id=None):
         """判断根拠をagent_reasoning_traceに記録（失敗してもメイン処理を止めない）"""

@@ -343,21 +343,23 @@ export default function ProposalCard({ proposal, onApprove, onReject }: Props) {
 
           {/* Actions */}
           {isPending && (onApprove || onReject) && (
-            <div className="flex gap-2 border-t border-[var(--border-color)] px-4 py-3">
+            <div className="flex gap-3 border-t border-[var(--border-color)] px-4 py-3">
               {onApprove && (
                 <button
                   onClick={() => onApprove(proposal.id)}
-                  className="flex items-center gap-1 rounded-md bg-[var(--accent-green)]/20 px-4 py-1.5 text-sm text-[var(--accent-green)] hover:bg-[var(--accent-green)]/30 transition-colors"
+                  aria-label="提案を承認"
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--accent-green)]/20 min-h-[48px] px-4 text-base sm:text-sm font-semibold text-[var(--accent-green)] hover:bg-[var(--accent-green)]/30 active:bg-[var(--accent-green)]/40 transition-colors"
                 >
-                  <CheckCircle className="h-3.5 w-3.5" /> 承認
+                  <CheckCircle className="h-5 w-5 sm:h-4 sm:w-4" /> 承認
                 </button>
               )}
               {onReject && (
                 <button
                   onClick={() => onReject(proposal.id)}
-                  className="flex items-center gap-1 rounded-md bg-[var(--accent-red)]/20 px-4 py-1.5 text-sm text-[var(--accent-red)] hover:bg-[var(--accent-red)]/30 transition-colors"
+                  aria-label="提案を却下"
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--accent-red)]/20 min-h-[48px] px-4 text-base sm:text-sm font-semibold text-[var(--accent-red)] hover:bg-[var(--accent-red)]/30 active:bg-[var(--accent-red)]/40 transition-colors"
                 >
-                  <XCircle className="h-3.5 w-3.5" /> 却下
+                  <XCircle className="h-5 w-5 sm:h-4 sm:w-4" /> 却下
                 </button>
               )}
             </div>

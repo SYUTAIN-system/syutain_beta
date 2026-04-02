@@ -107,14 +107,15 @@ class CapabilityAudit:
         }
 
         # 各ノードの監査を並列実行
-        node_tasks = [self._audit_node(name) for name in NODE_DEFINITIONS]
+        node_tasks = [asyncio.create_task(self._audit_node(name)) for name in NODE_DEFINITIONS]
         try:
             node_results = await asyncio.gather(*node_tasks, return_exceptions=True)
         except Exception as e:
-            # gather前の例外で未awaitコルーチンが残らないようclose
             for t in node_tasks:
-                if hasattr(t, 'close'):
-                    t.close()
+                if not t.done():
+                    t.cancel()
+            # キャンセル完了を待つ
+            await asyncio.gather(*node_tasks, return_exceptions=True)
             raise
 
         for name, result in zip(NODE_DEFINITIONS, node_results):
@@ -152,21 +153,21 @@ class CapabilityAudit:
         if diff:
             try:
                 from tools.event_logger import log_event
-                import asyncio
-                asyncio.create_task(log_event(
+                _loop = asyncio.get_running_loop()
+                _loop.create_task(log_event(
                     "system.capability_diff", "system",
                     {"diff_count": len(diff), "changes": {k: str(v)[:100] for k, v in list(diff.items())[:5]}},
                 ))
                 # 新規ツール・モデル検出時は通知
                 new_items = [k for k in diff if diff[k].get("from") in (None, "unknown", "offline")]
                 if new_items:
-                    asyncio.create_task(log_event(
+                    _loop.create_task(log_event(
                         "system.new_capability_detected", "system",
                         {"new_capabilities": new_items},
                     ))
                     try:
                         from tools.discord_notify import notify_discord
-                        asyncio.create_task(notify_discord(
+                        _loop.create_task(notify_discord(
                             f"🔍 新規能力検知: {', '.join(new_items[:3])}"
                         ))
                     except Exception:
@@ -231,22 +232,27 @@ class CapabilityAudit:
             logger.warning(f"ノード'{node_name}'のNATSハートビート失敗: {e}")
 
         # ローカルLLM可用性チェック（Ollama API）
-        try:
-            import httpx
-            ollama_url = definition["ollama_url"]
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{ollama_url}/api/tags")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    models = [m.get("name", "") for m in data.get("models", [])]
-                    result["local_model_status"] = "running"
-                    result["available_models"] = models
-                    result["status"] = "healthy"
-                else:
-                    result["local_model_status"] = "unavailable"
-        except Exception as e:
-            logger.warning(f"ノード'{node_name}'のOllama接続失敗: {e}")
-            result["local_model_status"] = "unreachable"
+        # ALPHAはOllamaアンインストール済み — チェックをスキップ
+        if node_name == "alpha":
+            result["local_model_status"] = "uninstalled"
+            logger.debug("ALPHA: Ollamaアンインストール済み — チェックスキップ")
+        else:
+            try:
+                import httpx
+                ollama_url = definition["ollama_url"]
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(f"{ollama_url}/api/tags")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        models = [m.get("name", "") for m in data.get("models", [])]
+                        result["local_model_status"] = "running"
+                        result["available_models"] = models
+                        result["status"] = "healthy"
+                    else:
+                        result["local_model_status"] = "unavailable"
+            except Exception as e:
+                logger.warning(f"ノード'{node_name}'のOllama接続失敗: {e}")
+                result["local_model_status"] = "unreachable"
 
         # ローカルノードのみディスク残量チェック
         if node_name == os.getenv("THIS_NODE", "alpha"):
@@ -301,20 +307,28 @@ class CapabilityAudit:
         return llms
 
     async def _audit_mcp_servers(self) -> dict:
-        """MCPサーバー接続状態チェック（CLAUDE.md ルール20: 動的に確認）"""
+        """MCPサーバー接続状態チェック（CLAUDE.md ルール20: 動的に確認）
+
+        NATS-based MCP ping is disabled — no MCP sidecar processes are running.
+        MCP HTTP health endpoint (/mcp/health) is the canonical check method.
+        """
         mcp_status = {}
-        for server_name in MCP_SERVERS:
-            try:
-                # NATS経由でMCPサーバーにpingを送信
-                nats_client = await get_nats_client()
-                resp = await nats_client.request(
-                    f"mcp.ping.{server_name}",
-                    {"ping": True},
-                    timeout=3.0,
-                )
-                mcp_status[server_name] = "connected" if resp else "disconnected"
-            except Exception:
-                mcp_status[server_name] = "unknown"
+        # HTTP health endpoint でチェック（NATS pingは無効化）
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get("http://localhost:8000/mcp/health")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for server_name in MCP_SERVERS:
+                        mcp_status[server_name] = data.get(server_name, "not_available")
+                else:
+                    for server_name in MCP_SERVERS:
+                        mcp_status[server_name] = "not_available"
+        except Exception as e:
+            logger.debug(f"MCP HTTP health check失敗: {e}")
+            for server_name in MCP_SERVERS:
+                mcp_status[server_name] = "not_available"
         return mcp_status
 
     def _audit_external_apis(self) -> dict:
