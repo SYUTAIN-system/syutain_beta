@@ -837,6 +837,44 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
         except Exception:
             pass
 
+        # 情報収集結果（海外トレンド・英語記事要約・ファクト検証結果）を注入
+        intel_context = ""
+        try:
+            intel_rows = await conn.fetch(
+                """SELECT source, title, summary, metadata FROM intel_items
+                WHERE created_at > NOW() - INTERVAL '3 days'
+                AND source IN ('overseas_trend', 'english_article', 'fact_verification', 'trend_detector')
+                AND (review_flag = 'actionable' OR importance_score >= 0.7)
+                ORDER BY importance_score DESC, created_at DESC LIMIT 8"""
+            )
+            if intel_rows:
+                intel_lines = []
+                for ir in intel_rows:
+                    summary = (ir['summary'] or '')[:150]
+                    meta = {}
+                    try:
+                        meta = json.loads(ir['metadata']) if isinstance(ir['metadata'], str) else (ir['metadata'] or {})
+                    except Exception:
+                        pass
+                    key_points = meta.get('key_points', [])
+                    kp_str = "／".join(key_points[:2]) if key_points else ""
+                    source_label = {
+                        'overseas_trend': '海外トレンド',
+                        'english_article': '英語記事',
+                        'fact_verification': '外部検証',
+                        'trend_detector': 'トレンド検出',
+                    }.get(ir['source'], ir['source'])
+                    intel_lines.append(f"- [{source_label}] {ir['title']}: {summary} {kp_str}")
+                intel_context = (
+                    "\n【情報収集からの最新知見（投稿ネタとして活用可能）】\n"
+                    "以下は直近3日間に収集・検証した情報。投稿のテーマや根拠として使えるものがあれば積極的に活用すること。\n"
+                    + "\n".join(intel_lines)
+                    + "\n"
+                )
+                persona_hint += intel_context
+        except Exception as intel_err:
+            logger.debug(f"SNSバッチ: intel_items取得失敗（続行）: {intel_err}")
+
         # LLMルーター
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
