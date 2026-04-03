@@ -305,6 +305,14 @@ def _choose_best_model_v6_impl(
         return {"provider": "google", "model": "gemini-2.5-pro", "tier": "A", "via": "openrouter",
                 "note": "最終公開品質"}
 
+    # === quality="highest_local" → BRAVO 27Bモデル（高品質ローカル推論） ===
+    # 用途: 品質検証、最終チェック、重要記事の推敲、ファクトチェック
+    # 注意: 5 tok/s（9bの18倍遅い）。短いタスク（<200トークン出力）に限定推奨
+
+    if quality == "highest_local" and local_available:
+        return {"provider": "local", "model": "qwen3.5-27b", "tier": "L+", "node": "bravo",
+                "note": "highest_local→BRAVO 27B（高品質ローカル、低速）"}
+
     # === quality="low" → 強制ローカル ===
 
     if quality == "low" and local_available:
@@ -662,9 +670,13 @@ async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str
     if not node or node == "auto" or node not in url_map:
         node = _pick_local_node()
     base_url = url_map.get(node, url_map["bravo"])
-    # Nemotronモデルの場合はモデル名をそのまま使用
+    # 特殊モデル名の場合はOllamaタグに変換
     if model == NEMOTRON_JP_MODEL:
         ollama_model = NEMOTRON_JP_MODEL
+    elif model == "qwen3.5-27b":
+        ollama_model = "qwen3.5:27b"  # Ollamaタグ形式
+        node = "bravo"  # 27BはBRAVO固定（他ノードには入らない）
+        base_url = url_map.get("bravo", url_map.get("bravo"))
     else:
         ollama_model = os.getenv(f"{node.upper()}_LOCAL_MODEL", model)
     logger.info(f"ローカルLLM呼び出し: node={node}, model={ollama_model}")

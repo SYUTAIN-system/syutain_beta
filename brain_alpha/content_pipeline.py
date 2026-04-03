@@ -1165,12 +1165,21 @@ async def generate_publishable_content(
                         last_stage4_model = s["model"]
                         break
                 is_last_local = any(kw in last_stage4_model.lower() for kw in ["qwen", "ollama", "local", "mlx"])
-                critique_model_sel = choose_best_model_v6(
-                    task_type="quality_verification",
-                    quality="high" if is_last_local else "medium",
-                    budget_sensitive=not is_last_local,  # localだったらAPI優先(budget_sensitive=False)
-                    needs_japanese=True,
-                )
+                # Stage 4がローカル9B以下だった場合、27Bで批評（高品質ローカル）
+                # Stage 4がAPI/27Bだった場合はAPIで批評（モデル交差検証）
+                if is_last_local and "27b" not in last_stage4_model.lower():
+                    critique_model_sel = choose_best_model_v6(
+                        task_type="quality_verification",
+                        quality="highest_local",
+                        needs_japanese=True,
+                    )
+                else:
+                    critique_model_sel = choose_best_model_v6(
+                        task_type="quality_verification",
+                        quality="high" if is_last_local else "medium",
+                        budget_sensitive=not is_last_local,
+                        needs_japanese=True,
+                    )
 
                 critique_result = await call_llm(
                     max_tokens=8192,
