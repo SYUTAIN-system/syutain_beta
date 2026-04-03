@@ -1391,13 +1391,13 @@ class ParallelSessionManager:
 セッション起動コマンド:
 ```bash
 # Claude Code Session（ALPHA/BRAVOの場合）
-ssh shimahara@{node_ip} "cd /tmp/syutain_worktree_{session_id} && \
+ssh $REMOTE_SSH_USER@{node_ip} "cd /tmp/syutain_worktree_{session_id} && \
   claude --print --dangerously-skip-permissions \
   --max-tokens 50000 \
   '{task_prompt}'" > /tmp/session_{session_id}_output.log 2>&1 &
 
 # Codex Session（CHARLIE/DELTAの場合）
-ssh shimahara@{node_ip} "cd /tmp/syutain_worktree_{session_id} && \
+ssh $REMOTE_SSH_USER@{node_ip} "cd /tmp/syutain_worktree_{session_id} && \
   codex --mode full-auto \
   --quiet \
   '{task_prompt}'" > /tmp/session_{session_id}_output.log 2>&1 &
@@ -1671,16 +1671,16 @@ CREATE INDEX idx_ccq_batch ON claude_code_queue(parallel_batch_id);
 
 ### リモートノードでのworktree
 
-リモートノード（BRAVO/CHARLIE/DELTA）にはsyutain_betaリポジトリが /home/shimahara/syutain_beta/ に存在する。リモートworktreeは以下の手順で作成:
+リモートノード（BRAVO/CHARLIE/DELTA）にはsyutain_betaリポジトリが ~/syutain_beta/ に存在する。リモートworktreeは以下の手順で作成:
 
 ```bash
 # リモートノードでworktree作成
-ssh shimahara@{node_ip} "cd /home/shimahara/syutain_beta && \
+ssh $REMOTE_SSH_USER@{node_ip} "cd ~/syutain_beta && \
   git fetch origin main && \
   git worktree add /tmp/syutain_worktree_{session_id} -b parallel/{session_id} origin/main"
 
 # セッション完了後のクリーンアップ
-ssh shimahara@{node_ip} "cd /home/shimahara/syutain_beta && \
+ssh $REMOTE_SSH_USER@{node_ip} "cd ~/syutain_beta && \
   git worktree remove /tmp/syutain_worktree_{session_id} && \
   git branch -D parallel/{session_id}"
 ```

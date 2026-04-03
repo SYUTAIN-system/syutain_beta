@@ -16,7 +16,7 @@ if [ -z "$NODE" ]; then
 fi
 
 # ===== 設定 =====
-SYUTAIN_USER="${SYUTAIN_USER:-shimahara}"
+SYUTAIN_USER="${SYUTAIN_USER:-$(whoami)}"
 SYUTAIN_DIR="${SYUTAIN_DIR:-/home/${SYUTAIN_USER}/syutain_beta}"
 VENV_DIR="${SYUTAIN_DIR}/venv"
 PYTHON="${VENV_DIR}/bin/python"
