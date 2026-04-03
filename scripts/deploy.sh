@@ -25,6 +25,8 @@ agents/
 brain_alpha/
 tools/
 bots/
+scripts/
+pdl/
 worker_main.py
 scheduler.py
 CLAUDE.md
