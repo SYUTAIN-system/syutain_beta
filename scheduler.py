@@ -1930,11 +1930,46 @@ class SyutainScheduler:
                         _bip_violations = []
                         _title_lower = title.lower()
 
-                        # 未リリースモデルの虚偽チェック
-                        _unreleased_models = ["deepseek v4", "deepseek-v4", "gpt-6", "claude 5", "gemini 4"]
-                        for um in _unreleased_models:
-                            if um in _title_lower:
-                                _bip_violations.append(f"未リリースモデル参照: {um}")
+                        # 新モデル名言及チェック: 外部検索で公式リリースを確認
+                        import re as _re
+                        _model_mentions = _re.findall(
+                            r'(?:deepseek[- ]?v\d|gpt[- ]?\d+(?:\.\d+)?|claude[- ]?\d+(?:\.\d+)?|gemini[- ]?\d+(?:\.\d+)?|llama[- ]?\d+)',
+                            _title_lower
+                        )
+                        if _model_mentions:
+                            # 既知のリリース済みモデル（確認不要）
+                            _known_released = {
+                                "gpt-5.4", "gpt-5", "gpt-4", "gpt-4o",
+                                "claude-4", "claude 4", "claude-3", "claude 3",
+                                "gemini-2", "gemini 2", "gemini-3", "gemini 3",
+                                "deepseek-v3", "deepseek v3",
+                                "llama-4", "llama 4", "llama-3", "llama 3",
+                            }
+                            for mm in _model_mentions:
+                                mm_normalized = mm.replace("-", " ").replace("  ", " ").strip()
+                                if mm_normalized not in _known_released:
+                                    # 未確認モデル → 外部検索で公式リリースを確認
+                                    try:
+                                        from tools.tavily_client import search_tavily
+                                        search_results = await search_tavily(
+                                            f"{mm} official release announcement",
+                                            max_results=3, search_depth="basic",
+                                        )
+                                        # 公式リリース記事が見つかるか確認
+                                        _has_official = False
+                                        if search_results:
+                                            for sr in search_results:
+                                                sr_title = (sr.get("title", "") + " " + sr.get("content", "")).lower()
+                                                if any(kw in sr_title for kw in ["release", "launch", "announce", "available", "公開", "リリース"]):
+                                                    _has_official = True
+                                                    break
+                                        if not _has_official:
+                                            _bip_violations.append(
+                                                f"モデル「{mm}」の公式リリースを外部検索で確認できず（推測記事の可能性）"
+                                            )
+                                    except Exception as _search_err:
+                                        logger.warning(f"モデルリリース確認検索失敗（安全側reject）: {_search_err}")
+                                        _bip_violations.append(f"モデル「{mm}」のリリース確認検索失敗（安全側reject）")
 
                         # 外部AIニュース解説記事の検出
                         _external_news_patterns = [
