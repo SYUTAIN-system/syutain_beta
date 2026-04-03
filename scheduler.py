@@ -1311,25 +1311,151 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"PostgreSQLバックアップエラー: {e}")
 
+    # 価格収集対象（GMOコインAPIで取得可能なJPYペア + 主要USD建て通貨）
+    CRYPTO_WATCH_SYMBOLS = [
+        # メジャー
+        "BTC_JPY", "ETH_JPY", "XRP_JPY", "SOL_JPY", "DOGE_JPY",
+        "LTC_JPY", "BCH_JPY", "DOT_JPY", "LINK_JPY", "ATOM_JPY",
+        "ADA_JPY", "SUI_JPY",
+        # GMOコイン固有（JPYペアなし→USD建て相当）
+        "XLM", "XTZ", "ASTR", "DAI", "FCR", "NAC", "WILD",
+    ]
+    # 変動検知閾値（30分間の変動率%）
+    CRYPTO_ALERT_THRESHOLD_PCT = 3.0  # 3%以上で異常変動アラート
+    _prev_prices: dict = {}  # {symbol: last_price}
+
     async def crypto_price_snapshot(self):
-        """30分間隔でBTC/JPY価格を取得しevent_logに記録"""
+        """30分間隔で20通貨の価格を一括取得、event_logに記録、異常変動時はリサーチ実行"""
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get("https://api.coin.z.com/public/v1/ticker?symbol=BTC_JPY")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    ticker = data.get("data", [{}])[0]
-                    price = int(ticker.get("last", 0))
-                    from tools.event_logger import log_event
+            from tools.event_logger import log_event
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                # GMOコインAPI: 全通貨を一括取得（1リクエスト）
+                resp = await client.get("https://api.coin.z.com/public/v1/ticker")
+                if resp.status_code != 200:
+                    logger.warning(f"暗号通貨API応答エラー: {resp.status_code}")
+                    return
+
+                data = resp.json()
+                tickers = {t["symbol"]: t for t in data.get("data", [])}
+
+                alerts = []  # 異常変動リスト
+
+                for symbol in self.CRYPTO_WATCH_SYMBOLS:
+                    ticker = tickers.get(symbol)
+                    if not ticker:
+                        continue
+
+                    price = float(ticker.get("last", 0))
+                    high = float(ticker.get("high", 0))
+                    low = float(ticker.get("low", 0))
+                    volume = ticker.get("volume", "0")
+
+                    if price <= 0:
+                        continue
+
+                    # event_logに記録
                     await log_event("trade.price_snapshot", "system", {
-                        "pair": "BTC_JPY", "price": price,
-                        "high": int(ticker.get("high", 0)),
-                        "low": int(ticker.get("low", 0)),
-                        "volume": ticker.get("volume", "0"),
+                        "pair": symbol,
+                        "price": price,
+                        "high": high,
+                        "low": low,
+                        "volume": volume,
                     })
+
+                    # 変動検知（前回比）
+                    prev = self._prev_prices.get(symbol)
+                    if prev and prev > 0:
+                        change_pct = abs(price - prev) / prev * 100
+                        if change_pct >= self.CRYPTO_ALERT_THRESHOLD_PCT:
+                            direction = "急騰" if price > prev else "急落"
+                            alerts.append({
+                                "symbol": symbol,
+                                "prev": prev,
+                                "current": price,
+                                "change_pct": round(change_pct, 2),
+                                "direction": direction,
+                            })
+
+                    self._prev_prices[symbol] = price
+
+                logger.info(f"暗号通貨価格取得: {len([s for s in self.CRYPTO_WATCH_SYMBOLS if s in tickers])}通貨")
+
+                # 異常変動時: リサーチ実行 + intel_items紐付け + Discord通知
+                if alerts:
+                    await self._research_crypto_movement(alerts)
+
         except Exception as e:
             logger.warning(f"暗号通貨価格取得失敗: {e}")
+
+    async def _research_crypto_movement(self, alerts: list):
+        """暗号通貨の異常変動の原因をリサーチし、intel_itemsと紐付けて記録"""
+        try:
+            from tools.discord_notify import notify_discord
+            from tools.event_logger import log_event
+
+            for alert in alerts[:3]:  # 最大3通貨まで同時リサーチ
+                symbol = alert["symbol"]
+                direction = alert["direction"]
+                change_pct = alert["change_pct"]
+                coin_name = symbol.replace("_JPY", "").replace("_", "")
+
+                # Discord通知
+                await notify_discord(
+                    f"📈 暗号通貨{direction}: **{symbol}** {change_pct}%変動\n"
+                    f"  ¥{alert['prev']:,.0f} → ¥{alert['current']:,.0f}"
+                )
+
+                # Tavily検索で原因をリサーチ
+                search_query = f"{coin_name} price {direction.replace('急騰','surge').replace('急落','crash')} reason today"
+                try:
+                    from tools.tavily_client import search_tavily
+                    results = await search_tavily(search_query, max_results=3, search_depth="basic")
+                    if results:
+                        # intel_itemsに保存（情報収集パイプラインと紐付け）
+                        from tools.db_pool import get_connection
+                        async with get_connection() as conn:
+                            for r in results[:2]:
+                                await conn.execute("""
+                                    INSERT INTO intel_items
+                                    (source, keyword, title, url, summary, importance_score,
+                                     category, metadata, review_flag, processed)
+                                    VALUES ('crypto_research', $1, $2, $3, $4, 0.7,
+                                            'market_movement', $5, 'actionable', true)
+                                    ON CONFLICT DO NOTHING
+                                """,
+                                    coin_name,
+                                    r.get("title", "")[:200],
+                                    r.get("url", ""),
+                                    r.get("content", "")[:300],
+                                    json.dumps({
+                                        "symbol": symbol,
+                                        "direction": direction,
+                                        "change_pct": change_pct,
+                                        "research_query": search_query,
+                                    }, ensure_ascii=False),
+                                )
+
+                        # リサーチ結果をevent_logにも記録
+                        await log_event("trade.movement_research", "system", {
+                            "symbol": symbol,
+                            "direction": direction,
+                            "change_pct": change_pct,
+                            "research_results": len(results),
+                            "top_result": results[0].get("title", "")[:100] if results else "",
+                        })
+
+                        # Discord通知（原因）
+                        top_title = results[0].get("title", "原因不明")[:80] if results else "原因不明"
+                        await notify_discord(
+                            f"🔍 {symbol} {direction}原因リサーチ: {top_title}"
+                        )
+                except Exception as search_err:
+                    logger.warning(f"暗号通貨変動リサーチ失敗 ({symbol}): {search_err}")
+
+        except Exception as e:
+            logger.error(f"暗号通貨変動リサーチ全体失敗: {e}")
 
     async def cost_forecast(self):
         """6時間間隔でAPI月末コスト予測"""
