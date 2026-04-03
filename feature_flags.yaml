@@ -1,6 +1,6 @@
-version: "v28"
+version: "v30"
 
-# Phase 1（初期起動）— V25: 全機能有効
+# Phase 1（初期起動）— V25原典 + V30統合
 web_ui: true
 web_ui_chat: true
 discord_notifications: true
@@ -8,62 +8,90 @@ nats_messaging: true
 postgresql_shared_state: true
 local_llm_charlie: true
 local_llm_delta: true
-local_llm_alpha_mlx: true
-local_llm_alpha_mode: "on_demand"    # on_demand=BRAVO/CHARLIE両方ビジー時のみロード / always=常駐 / off=無効
-local_llm_bravo: true              # V25新規：BRAVOローカルLLM
+local_llm_alpha_mlx: false               # V30: ALPHAからOllama撤去（2026-03-06）
+local_llm_alpha_mode: "off"              # V30: ALPHA LLMなし
+local_llm_bravo: true
+local_llm_bravo_27b: true               # V30新規: qwen3.5:27b（highest_local用、5 tok/s）
 api_llm: true
 openrouter_integration: true
 goal_packet: true
 capability_audit: true
 task_graph: true
 proposal_engine: true
-loop_guard_9layer: true            # V25：9層
+loop_guard_9layer: true
 semantic_loop_detection: true
-cross_goal_interference: true      # V25新規
+cross_goal_interference: true
 emergency_kill: true
 two_stage_refinement: true
 mcp_integration: true
 info_pipeline: true
 tailscale_https: true
-computer_use_playwright: true      # V25：Chromiumフォールバック用
-computer_use_lightpanda: true      # V25新規：AI特化ヘッドレスブラウザ（構造化データ抽出の主力）
-computer_use_stagehand_v3: true    # V25新規：AI駆動ブラウザ自動化フレームワーク（env=LOCAL、自己修復・キャッシュ付き）
-computer_use_gpt54: true           # V25新規
-mutation_engine: true              # V25新規：第24章 突然変異エンジン
+computer_use_playwright: true
+computer_use_lightpanda: true
+computer_use_stagehand_v3: true
+computer_use_gpt54: true
+mutation_engine: true
+
+# V30新規: KV Cache量子化
+kv_cache_q8_all_nodes: true              # OLLAMA_KV_CACHE_TYPE=q8_0（全ノード有効化済み）
+
+# V30新規: Build in Public
+build_in_public: true                    # note記事テーマ = SYUTAINβの実データ・実失敗
+note_free_until: "2026-06-01"            # 6月1日まで全記事無料
+note_quality_6layer: true                # 15項目機械チェック + Stage 1.7外部検索検証
+
+# V30新規: SNS拡散力強化
+sns_bluesky_rich_text: true              # Bluesky Rich Text Facets + OGPリンクカード
+sns_hashtag_auto: true                   # テーマ別ハッシュタグ自動付与
+sns_note_link_injection: true            # 投稿の20%にnote記事リンク
+
+# V30新規: 英語記事取り込み
+english_article_pipeline: true           # overseas_trend_detector + enrich_overseas_trends
 
 # 推論モード設定
-delta_inference_mode: "auto"       # auto=GPU優先でCPUフォールバック / gpu=GPU固定 / cpu=CPU固定
+delta_inference_mode: "auto"
 
 # Phase 2
-bluesky_auto_post: true              # ドラフト生成+承認キュー (8h間隔)
-x_auto_post: true                    # X API Pay-Per-Use ($10投入済み)
-threads_auto_post: true              # Threads Graph API (アクセストークン取得済み)
-note_auto_publish: true              # BRAVOブラウザ経由で自動公開
-booth_auto_publish: false            # 承認キュー経由で手動出品
-crypto_auto_trading: false           # 価格蓄積のみ、取引は未開始
-stripe_integration: false            # 未設定
+bluesky_auto_post: true
+x_auto_post: true
+threads_auto_post: true
+note_auto_publish: true
+booth_auto_publish: false
+crypto_auto_trading: false
+stripe_integration: false
 
 # デジタルツイン基盤
-persona_memory: true                 # 人格・判断パターン蓄積
-digital_twin_questions: true         # 定期問いかけジョブ
-pgvector_embeddings: true            # pgvector 0.8.2 + Jina Embeddings v3 (1024dim)
+persona_memory: true
+digital_twin_questions: true
+pgvector_embeddings: true
 
 # 学習ループ
-model_quality_feedback: true         # モデル品質→選択フィードバック
-learning_loop: true                  # 週次学習レポート
-cost_forecast: true                  # 月末コスト予測
-crypto_price_tracking: true          # BTC/JPY価格蓄積
+model_quality_feedback: true
+learning_loop: true
+cost_forecast: true
+crypto_price_tracking: true
 
 # バックアップ
-postgresql_backup: true              # 毎日03:00
-sqlite_backup_rsync: true            # 毎日03:30 rsync集約
+postgresql_backup: true
+sqlite_backup_rsync: true
+
+# パワーモード（V30: 夜間延長）
+night_mode_start: "23:00"
+night_mode_end: "09:00"                  # V30: 07:00→09:00に延長（10時間稼働）
+night_max_concurrent_tasks: 6
+day_max_concurrent_tasks: 3
+
+# 予算（V30: 引き上げ）
+monthly_api_budget_jpy: 2000             # V30: 1500→2000
 
 # モデル設定
 default_local_model_charlie: "qwen3.5:9b"
 default_local_model_delta: "qwen3.5:4b"
-default_local_model_alpha: "qwen3.5-9b-mlx"
-default_local_model_bravo: "qwen3.5:9b"    # V25新規
+default_local_model_bravo: "qwen3.5:9b"
+default_local_model_bravo_27b: "qwen3.5:27b"   # V30新規: highest_local用
+default_nemotron_bravo: "nemotron-jp"           # V30新規
+default_nemotron_charlie: "nemotron-jp"         # V30新規
 default_api_model: "deepseek-v3.2"
 premium_model: "claude-sonnet-4-6"
 highest_intelligence_model: "gpt-5.4"
-computer_use_model: "gpt-5.4"              # V25新規
+computer_use_model: "gpt-5.4"
