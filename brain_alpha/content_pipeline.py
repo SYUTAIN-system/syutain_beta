@@ -476,6 +476,36 @@ async def _collect_system_data_for_article(conn, theme: str) -> str:
     except Exception as e:
         logger.debug(f"ハートビート取得失敗: {e}")
 
+    # 7. 外部検索エビデンス（fact_verificationで収集した情報）
+    try:
+        evidence_rows = await conn.fetch(
+            """SELECT title, content, metadata
+            FROM intel_items
+            WHERE source = 'fact_verification'
+            AND created_at > NOW() - INTERVAL '24 hours'
+            ORDER BY created_at DESC LIMIT 5"""
+        )
+        if evidence_rows:
+            evidence_lines = []
+            for row in evidence_rows:
+                try:
+                    data = json.loads(row['content']) if isinstance(row['content'], str) else row['content']
+                    jp_count = data.get('jp_results', 0)
+                    total = data.get('total_results', 0)
+                    evidence_lines.append(
+                        f"- {row['title']}: 検索結果{total}件（うち日本語{jp_count}件）"
+                    )
+                except Exception:
+                    evidence_lines.append(f"- {row['title']}")
+            if evidence_lines:
+                sections.append(
+                    f"### 外部検索エビデンス（fact_verification収集）\n"
+                    f"以下の情報は外部検索で検証済み。記事で言及する場合はこの数値を使うこと。\n"
+                    + "\n".join(evidence_lines)
+                )
+    except Exception as e:
+        logger.debug(f"外部検索エビデンス取得失敗: {e}")
+
     if not sections:
         return ""
 
