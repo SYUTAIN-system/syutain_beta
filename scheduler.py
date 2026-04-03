@@ -1355,7 +1355,7 @@ class SyutainScheduler:
                     "SELECT COALESCE(SUM(amount_jpy), 0) FROM llm_cost_log WHERE date_trunc('month', recorded_at) = date_trunc('month', CURRENT_DATE)"
                 )
                 forecast = float(monthly_total or 0) + float(avg_daily or 0) * remaining_days
-                monthly_budget = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "1500")))
+                monthly_budget = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "2000")))
 
                 from tools.event_logger import log_event
                 await log_event("budget.forecast", "system", {
@@ -3719,11 +3719,41 @@ class SyutainScheduler:
         try:
             from tests.test_runner import run_all_tests
             results = await run_all_tests(include_remote=True)
-            logger.info(
-                f"自動テスト完了: passed={results['total_passed']}, "
-                f"failed={results['total_failed']}, "
-                f"elapsed={results['elapsed_sec']}s"
-            )
+            passed = results.get('total_passed', 0)
+            failed = results.get('total_failed', 0)
+            elapsed = results.get('elapsed_sec', 0)
+            logger.info(f"自動テスト完了: passed={passed}, failed={failed}, elapsed={elapsed}s")
+
+            try:
+                from tools.event_logger import log_event
+                await log_event("system.self_test", "system", {
+                    "passed": passed, "failed": failed, "elapsed_sec": elapsed,
+                    "errors": results.get("errors", [])[:5],
+                })
+            except Exception:
+                pass
+
+            if failed > 0:
+                # 失敗時: 具体的なエラー内容をDiscord通知
+                error_details = results.get("errors", [])
+                error_summary = "; ".join(
+                    f"{e.get('module', e.get('file', '?'))}: {e.get('error', '?')[:80]}"
+                    for e in error_details[:5]
+                )
+                try:
+                    from tools.discord_notify import notify_error
+                    await notify_error(
+                        "self_test_failure",
+                        f"自動テスト失敗: {failed}件\n"
+                        f"passed={passed}, failed={failed}\n"
+                        f"{error_summary}",
+                        severity="error",
+                    )
+                except Exception:
+                    pass
+            else:
+                # 全パス時: 成功を記録（通知は不要）
+                logger.info(f"自動テスト全パス: {passed}件 ({elapsed:.1f}s)")
         except Exception as e:
             logger.error(f"自動テストエラー: {e}")
 
@@ -3733,7 +3763,21 @@ class SyutainScheduler:
             from tests.test_runner import run_syntax_only
             results = await run_syntax_only()
             if results["failed"] > 0:
-                logger.warning(f"構文エラー検出: {results['failed']}件")
+                error_details = results.get("errors", [])
+                error_summary = "; ".join(
+                    f"{e.get('file', '?')}:{e.get('line', '?')}"
+                    for e in error_details[:3]
+                )
+                logger.warning(f"構文エラー検出: {results['failed']}件 — {error_summary}")
+                try:
+                    from tools.discord_notify import notify_error
+                    await notify_error(
+                        "syntax_check_failure",
+                        f"構文エラー検出: {results['failed']}件\n{error_summary}",
+                        severity="warning",
+                    )
+                except Exception:
+                    pass
             else:
                 logger.debug(f"構文チェックOK: {results['passed']}ファイル")
         except Exception as e:
