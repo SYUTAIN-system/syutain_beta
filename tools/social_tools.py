@@ -370,18 +370,65 @@ async def execute_approved_bluesky(content: str) -> dict:
             # セッションキャッシュ利用（2時間有効）
             access_jwt, did = await _get_bluesky_session()
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+            # Rich Text Facets: URL自動検出でリンクを有効化
+            import re as _re
+            facets = []
+            for m in _re.finditer(r'https?://[^\s\)）」』】>\]]+', content):
+                url = m.group()
+                # Blueskyはバイト位置でfacetを指定
+                byte_start = len(content[:m.start()].encode('utf-8'))
+                byte_end = len(content[:m.end()].encode('utf-8'))
+                facets.append({
+                    "index": {"byteStart": byte_start, "byteEnd": byte_end},
+                    "features": [{"$type": "app.bsky.richtext.facet#link", "uri": url}],
+                })
+
+            record = {
+                "$type": "app.bsky.feed.post",
+                "text": content,
+                "createdAt": now,
+            }
+            if facets:
+                record["facets"] = facets
+
+                # 最初のURLでリンクカード（embed）を生成
+                first_url = _re.search(r'https?://[^\s\)）」』】>\]]+', content)
+                if first_url:
+                    try:
+                        # OGP情報を取得してリンクカード作成
+                        ogp_resp = await client.get(
+                            first_url.group(),
+                            follow_redirects=True, timeout=10.0,
+                            headers={"User-Agent": "SYUTAINβ/1.0"},
+                        )
+                        ogp_html = ogp_resp.text[:5000]
+                        og_title = _re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', ogp_html)
+                        og_desc = _re.search(r'<meta[^>]+property="og:description"[^>]+content="([^"]*)"', ogp_html)
+                        if og_title:
+                            record["embed"] = {
+                                "$type": "app.bsky.embed.external",
+                                "external": {
+                                    "uri": first_url.group(),
+                                    "title": og_title.group(1)[:100],
+                                    "description": (og_desc.group(1)[:200] if og_desc else ""),
+                                },
+                            }
+                    except Exception as ogp_err:
+                        logger.debug(f"Bluesky OGP取得失敗（リンクカードなし）: {ogp_err}")
+
             post_resp = await client.post(
                 "https://bsky.social/xrpc/com.atproto.repo.createRecord",
                 headers={"Authorization": f"Bearer {access_jwt}"},
                 json={
                     "repo": did,
                     "collection": "app.bsky.feed.post",
-                    "record": {"$type": "app.bsky.feed.post", "text": content, "createdAt": now},
+                    "record": record,
                 },
             )
             post_resp.raise_for_status()
             data = post_resp.json()
-            logger.info(f"Bluesky承認済み投稿成功: {data.get('uri', '')}")
+            logger.info(f"Bluesky承認済み投稿成功: {data.get('uri', '')} (facets={len(facets)})")
             try:
                 from tools.event_logger import log_event
                 _safe_fire(log_event(

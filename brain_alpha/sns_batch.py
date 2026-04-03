@@ -55,6 +55,18 @@ THEME_POOL = [
     "業界批評", "自己内省",
 ]
 
+# テーマ別ハッシュタグ（プラットフォーム別、最大2個）
+THEME_HASHTAGS = {
+    "AI技術": {"x": ["#AI開発", "#個人開発"], "threads": ["#AI", "#テック", "#個人開発"]},
+    "開発進捗": {"x": ["#SYUTAINβ", "#AI開発"], "threads": ["#AI", "#開発記録", "#非エンジニア"]},
+    "VTuber業界": {"x": ["#VTuber"], "threads": ["#VTuber", "#クリエイター"]},
+    "哲学/思考": {"x": [], "threads": ["#思考", "#エッセイ"]},
+    "ビジネス": {"x": ["#AI事業"], "threads": ["#ビジネス", "#AI活用"]},
+    "映画/映像": {"x": ["#映像制作"], "threads": ["#映像", "#クリエイター"]},
+    "業界批評": {"x": ["#AI"], "threads": ["#AI", "#テック"]},
+    "自己内省": {"x": [], "threads": ["#エッセイ"]},
+}
+
 # 時間帯別テーマ重み
 TIME_THEME_WEIGHTS = {
     "morning": {"ビジネス": 3, "AI技術": 2, "開発進捗": 2},
@@ -1280,6 +1292,42 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 label = "\n\n[SYUTAINβ auto-generated]"
                 if len(draft) + len(label) <= 150:
                     draft = draft + label
+
+            # === ハッシュタグ自動付与 ===
+            try:
+                tags = THEME_HASHTAGS.get(theme, {}).get(platform, [])
+                if tags and platform in ("x", "threads"):
+                    # X: 文字数制限内で追加（150字制限）
+                    if platform == "x":
+                        tag_str = " " + " ".join(tags[:2])
+                        if len(draft) + len(tag_str) <= 150:
+                            draft = draft + tag_str
+                    # Threads: 末尾に追加（280字制限に余裕がある）
+                    elif platform == "threads":
+                        tag_str = "\n" + " ".join(tags[:3])
+                        if len(draft) + len(tag_str) <= 500:
+                            draft = draft + tag_str
+            except Exception:
+                pass
+
+            # === note記事リンク自動付与（20%の確率で直近のnote記事URLを付与） ===
+            try:
+                if random.random() < 0.20 and platform in ("x", "bluesky", "threads"):
+                    note_row = await conn.fetchrow(
+                        """SELECT publish_url FROM product_packages
+                        WHERE status = 'published' AND publish_url LIKE 'https://note.com/%'
+                        ORDER BY published_at DESC LIMIT 1"""
+                    )
+                    if note_row and note_row["publish_url"]:
+                        note_url = note_row["publish_url"]
+                        if platform == "x":
+                            link_text = f"\n\n{note_url}"
+                            if len(draft) + len(link_text) <= 150:
+                                draft = draft + link_text
+                        else:
+                            draft = draft + f"\n\n{note_url}"
+            except Exception:
+                pass
 
             # scheduled_atにランダムオフセット
             hour, minute = map(int, time_str.split(":"))

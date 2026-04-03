@@ -447,7 +447,10 @@ def build_title_generation_prompt(theme: str, genre: str) -> tuple[str, dict]:
         all_keywords_sample = ", ".join(random.sample(keywords, min(10, len(keywords))))
 
         prompt = (
-            f"テーマ「{theme}」のnote有料記事タイトルを5つ提案してください。\n\n"
+            f"テーマ「{theme}」のnote記事タイトルを5つ提案してください。\n\n"
+            f"## 最重要: Build in Publicドキュメンタリー方針\n"
+            f"テーマは「SYUTAINβで実際に何が起きたか」に基づくこと。\n"
+            f"外部AIニュース解説（「GPTの使い方」等）は禁止。\n\n"
             f"## 3軸タイトル生成ルール\n"
             f"以下の3つの軸を全て組み合わせたタイトルにすること:\n\n"
             f"### Axis 1: ジャンルキーワード（必ず含める）\n"
@@ -460,8 +463,13 @@ def build_title_generation_prompt(theme: str, genre: str) -> tuple[str, dict]:
             f"  今回の感情: **{emotion}**\n"
             f"  (読者の{emotion}を刺激する表現を入れること)\n\n"
             f"## 参考タイトルパターン\n{title_patterns_text}\n\n"
+            f"## SEO・拡散力最適化\n"
+            f"- 検索されやすい具体的なキーワードを含める（「AI」「自動化」「非エンジニア」「分散システム」「月○円」等）\n"
+            f"- 数字を含める（行数、コスト、日数、エラー回数など実データ）\n"
+            f"- 「○○した話」「○○の記録」「○○で学んだこと」形式は検索+SNS両方に強い\n"
+            f"- 対象読者を絞り込むワードを入れる（「非エンジニア」「一人で」「個人開発」等）\n\n"
             f"## 制約\n"
-            f"- 各タイトルは40文字以内\n"
+            f"- 各タイトルは40-60文字\n"
             f"- 具体的な数字を含める\n"
             f"- 「いかがでしょうか」系の弱い表現は禁止\n"
             f"- 5つのタイトルのみを改行区切りで出力。番号・説明不要。\n"
