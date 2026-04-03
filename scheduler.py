@@ -1794,152 +1794,65 @@ class SyutainScheduler:
             logger.error(f"週次商品化候補生成失敗: {e}")
 
     async def note_draft_generation(self):
-        """23:45 JST: note記事ドラフト自動生成（翌日向け — エンゲージメント分析結果ベース）"""
+        """23:45 JST: note記事ドラフト自動生成（content_pipeline経由、Build in Public準拠）"""
         if _current_power_mode != "night":
             return
-        logger.info("note記事ドラフト生成開始（翌日向け）")
+        logger.info("note記事ドラフト生成開始（content_pipeline経由）")
         try:
-            from tools.llm_router import call_llm, choose_best_model_v6
+            # content_pipeline.generate_publishable_content() を使用
+            # これにより Build in Public 方針、外部検索検証、SEOタイトル生成、
+            # 実データ注入、品質スコアリングが全て自動適用される
+            from brain_alpha.content_pipeline import generate_publishable_content
             import os as _os
 
-            # エンゲージメント分析結果から翌日向けテーマを決定
-            engagement_hint = ""
-            try:
-                from tools.db_pool import get_connection as _gc_eng
-                async with _gc_eng() as _conn_eng:
-                    # 直近のエンゲージメント分析結果（高反応テーマ）を取得
-                    eng_rows = await _conn_eng.fetch(
-                        """SELECT topic, avg_engagement, platform FROM (
-                            SELECT theme_category AS topic,
-                                   AVG(COALESCE(likes, 0) + COALESCE(reposts, 0) + COALESCE(replies, 0)) AS avg_engagement,
-                                   platform
-                            FROM posting_queue
-                            WHERE status = 'posted' AND posted_at > NOW() - INTERVAL '7 days'
-                            AND theme_category IS NOT NULL
-                            GROUP BY theme_category, platform
-                            ORDER BY avg_engagement DESC
-                            LIMIT 5
-                        ) sub"""
-                    )
-                    if eng_rows:
-                        engagement_hint = "\n\n## 直近7日の高エンゲージメントテーマ（翌日向け参考）\n"
-                        for r in eng_rows:
-                            engagement_hint += f"- {r['topic']} ({r['platform']}): 平均エンゲージメント{float(r['avg_engagement']):.1f}\n"
-            except Exception as e:
-                logger.warning(f"note_draft エンゲージメント分析取得失敗: {e}")
-
-            weekday = datetime.now().weekday()  # 0=月曜
-            theme_map = {
-                0: ("翌日向け_収益×AI", "エンゲージメント分析に基づき、読者が最も反応するAI×収益テーマで書く"),
-                1: ("翌日向け_実践Tips", "エンゲージメント分析に基づき、すぐ使えるAI活用の具体的Tipsを書く"),
-                2: ("翌日向け_失敗談", "エンゲージメント分析に基づき、共感を得やすい失敗と学びを書く"),
-                3: ("翌日向け_データ公開", "エンゲージメント分析に基づき、具体的な数字を含む分析記事を書く"),
-                4: ("翌日向け_未来予測", "エンゲージメント分析に基づき、AI・テクノロジーの未来予測を書く"),
-                5: ("翌日向け_週末読み物", "エンゲージメント分析に基づき、じっくり読める深掘り記事を書く"),
-                6: ("翌日向け_新週スタート", "エンゲージメント分析に基づき、月曜に読みたい前向きな記事を書く"),
-            }
-            theme_name, theme_desc = theme_map.get(weekday, ("翌日向け_自由テーマ", "エンゲージメント分析に基づくテーマ"))
-
-            # intel_itemsから直近トレンドを取得してプロンプトに注入（Q7修正）
-            intel_hint = ""
-            try:
-                from tools.db_pool import get_connection
-                async with get_connection() as _conn_nd:
-                    # 海外トレンド先取り（trend_detector検出分を最優先）
-                    trend_rows = await _conn_nd.fetch(
-                        """SELECT title, summary FROM intel_items
-                        WHERE source = 'trend_detector' AND review_flag = 'actionable'
-                        ORDER BY importance_score DESC, created_at DESC LIMIT 3"""
-                    )
-                    if trend_rows:
-                        intel_hint = "\n\n## 海外トレンド先取り（日本語記事が少ない注目トピック）\n"
-                        for r in trend_rows:
-                            intel_hint += f"- {r['title']}: {(r['summary'] or '')[:120]}\n"
-
-                    # 通常のintel_items
-                    intel_rows = await _conn_nd.fetch(
-                        """SELECT title, summary, source FROM intel_items
-                        WHERE importance_score >= 0.4
-                        AND created_at > NOW() - INTERVAL '48 hours'
-                        AND source != 'trend_detector'
-                        ORDER BY importance_score DESC LIMIT 5"""
-                    )
-                    if intel_rows:
-                        intel_hint += "\n\n## 直近の市場動向（記事に活用できる素材）\n"
-                        for r in intel_rows:
-                            intel_hint += f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:80]}\n"
-            except Exception as e:
-                logger.warning(f"note_draft intel取得失敗: {e}")
-
-            model_sel = choose_best_model_v6(
-                task_type="content", quality="medium",
-                budget_sensitive=True, local_available=True, needs_japanese=True,
-            )
-            result = await call_llm(
-                prompt=f"note有料記事（500円）のドラフトを書いてください。\n\n"
-                       f"テーマ: {theme_name}\n"
-                       f"方針: {theme_desc}\n\n"
-                       f"{intel_hint}\n"
-                       f"{engagement_hint}\n"
-                       f"## noteの有料記事フォーマット（厳守）:\n\n"
-                       f"### 【無料パート】冒頭〜「---ここから有料---」まで（1000-1500字）\n"
-                       f"- 衝撃的な冒頭3行（数字・事実で「え？」と立ち止まらせる）\n"
-                       f"- 読者の悩みに具体的に共感（「こんなことありませんか？」3つ列挙）\n"
-                       f"- 島原の資格証明（VTuber業界8年、4台PCでAI事業OS構築等の数字）\n"
-                       f"- 「この記事で得られること」箇条書き3-5個\n"
-                       f"- クリフハンガー（「でも本当に大事なのはこの先にある」的な引き）\n\n"
-                       f"### 本文中に必ず以下のマーカーを入れる:\n"
-                       f"---ここから有料---\n\n"
-                       f"### 【有料パート】マーカー以降（4500-6500字）\n"
-                       f"- 島原大知の実体験を3つ以上（日時・場所・感情を含む）\n"
-                       f"- 具体的な数値・コスト・時間のデータ\n"
-                       f"- 読者が今日から試せる実践ステップ3-5個（コスト・時間付き）\n"
-                       f"- 失敗談と教訓を正直に\n"
-                       f"- 「なぜそうなるのか」の構造分析（表面的解説×）\n"
-                       f"- ## 見出し5-7個、各セクション800-1200字\n"
-                       f"- **太字**で核心の一文\n"
-                       f"- 最後に要点3-5個の箇条書きまとめ\n\n"
-                       f"## 絶対禁止:\n"
-                       f"- 架空のエピソード（「カフェで友人が」等の作り話）\n"
-                       f"- AI定型句（「考えてみました」「いかがでしょうか」「深掘り」）\n"
-                       f"- 島原がやっていないこと（音楽の仕事等）を事実として語ること\n"
-                       f"- 抽象的な一般論だけで具体性がない段落\n",
-                system_prompt=f"SYUTAINβのnote有料記事(500円)ドラフト生成。島原大知のドキュメンタリースタイル。\n"
-                              f"noteでは無料パートの魅力が売上を決める。読者が「この先を読みたい」と思うフック設計が最重要。\n"
-                              f"架空のエピソードは禁止。島原大知の実際の経験（映像制作、VTuber支援、SYUTAINβ開発、挫折と再起）から書く。\n\n{self._load_anti_ai_guide()}",
-                model_selection=model_sel,
+            result = await generate_publishable_content(
+                theme=None,  # content_pipelineが実データからテーマを自動選定
+                content_type="note_article",
+                target_length=10000,
             )
 
-            draft = result.get("text", "").strip()
-            if draft and len(draft) > 100:
+            if result.get("content") and len(result["content"]) > 100:
                 drafts_dir = _os.path.join(_os.path.dirname(__file__), "data", "artifacts", "note_drafts")
                 _os.makedirs(drafts_dir, exist_ok=True)
-                filename = f"note_{datetime.now().strftime('%Y%m%d')}_{theme_name}.md"
+
+                title_short = (result.get("title", "untitled"))[:30].replace("/", "_").replace(" ", "_")
+                filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M')}_{title_short}.md"
                 filepath = _os.path.join(drafts_dir, filename)
                 with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(draft)
-                logger.info(f"note記事ドラフト保存: {filepath} ({len(draft)}文字)")
+                    f.write(result["content"])
+
+                quality = result.get("quality_score", 0)
+                logger.info(
+                    f"note記事ドラフト保存: {filepath} "
+                    f"({len(result['content'])}文字, 品質={quality:.3f})"
+                )
 
                 from tools.event_logger import log_event
                 await log_event("content.note_draft", "task", {
-                    "theme": theme_name, "length": len(draft),
-                    "filepath": filepath, "model": result.get("model_used"),
+                    "theme": result.get("title", ""),
+                    "length": len(result["content"]),
+                    "quality_score": quality,
+                    "filepath": filepath,
+                    "stages": len(result.get("stages", [])),
                 })
 
-                # 品質が高ければDiscord通知
-                if len(draft) > 500:
+                if len(result["content"]) > 500:
                     try:
                         from tools.discord_notify import notify_discord
                         await notify_discord(
-                            f"📝 note記事ドラフト完成: {theme_name}\n"
-                            f"文字数: {len(draft)}文字\n"
+                            f"📝 note記事ドラフト完成（content_pipeline）\n"
+                            f"タイトル: {result.get('title', 'N/A')}\n"
+                            f"文字数: {len(result['content'])}文字 / 品質: {quality:.3f}\n"
                             f"保存先: {filepath}\n"
-                            f"プレビュー: {draft[:100]}..."
+                            f"プレビュー: {result['content'][:100]}..."
                         )
                     except Exception:
                         pass
             else:
-                logger.warning(f"note記事ドラフト生成: テキストが短すぎ ({len(draft) if draft else 0}文字)")
+                logger.warning(
+                    f"note記事ドラフト生成: content_pipelineの出力が不足 "
+                    f"(status={result.get('status')}, stages={result.get('stages', [])})"
+                )
         except Exception as e:
             logger.error(f"note記事ドラフト生成失敗: {e}")
 
