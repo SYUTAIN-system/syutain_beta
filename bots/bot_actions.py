@@ -761,7 +761,12 @@ async def run_scheduler_job(job_name: str = "") -> str:
             from agents.proposal_engine import ProposalEngine
             pe = ProposalEngine()
             await pe.initialize()
-            result = await pe.generate_proposal("revenue", "日次提案", "note")
+            result = await pe.generate_proposal(
+                context="Discord経由の日次提案リクエスト",
+                objective="revenue",
+                target_icp="hot_icp",
+                primary_channel="note",
+            )
             return f"提案生成完了: {result.get('title', '無題')} (スコア: {result.get('total_score', 0)})"
 
         elif matched == "keyword":

@@ -1929,12 +1929,25 @@ class SyutainScheduler:
                         # note記事系の提案が外部AIニュース解説になっていないか検証
                         _bip_violations = []
                         _title_lower = title.lower()
+                        # 提案本文も検査対象に含める
+                        _pdata = p.get("proposal_data") or {}
+                        if isinstance(_pdata, str):
+                            try:
+                                _pdata = json.loads(_pdata)
+                            except Exception:
+                                _pdata = {}
+                        _proposal_text = (
+                            title + " " +
+                            " ".join(_pdata.get("why_now", [])) + " " +
+                            _pdata.get("first_action", "") + " " +
+                            str(_pdata.get("expected_outcome", ""))
+                        ).lower()
 
                         # 新モデル名言及チェック: 外部検索で公式リリースを確認
                         import re as _re
                         _model_mentions = _re.findall(
                             r'(?:deepseek[- ]?v\d|gpt[- ]?\d+(?:\.\d+)?|claude[- ]?\d+(?:\.\d+)?|gemini[- ]?\d+(?:\.\d+)?|llama[- ]?\d+)',
-                            _title_lower
+                            _proposal_text
                         )
                         if _model_mentions:
                             # 既知のリリース済みモデル（確認不要）
@@ -1976,8 +1989,8 @@ class SyutainScheduler:
                             "完全ガイド", "活用法", "使い方", "導入ガイド", "選定基準",
                             "最新動向", "速報", "まとめ", "徹底比較", "入門",
                         ]
-                        _has_external_pattern = any(ep in title for ep in _external_news_patterns)
-                        _has_syutain_ref = "SYUTAINβ" in title or "syutain" in _title_lower
+                        _has_external_pattern = any(ep in title or ep in _proposal_text for ep in _external_news_patterns)
+                        _has_syutain_ref = "SYUTAINβ" in title or "syutain" in _proposal_text
                         if _has_external_pattern and not _has_syutain_ref:
                             _bip_violations.append(f"外部AIニュース解説記事の疑い: {title[:50]}")
 
