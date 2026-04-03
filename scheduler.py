@@ -53,14 +53,14 @@ REMOTE_NODES = {
 _current_power_mode = "day"  # "day" or "night"
 
 POWER_MODES = {
-    "night": {  # 23:00-07:00 JST
+    "night": {  # 23:00-09:00 JST
         "batch_content_generation": True,
         "parallel_inference": True,
         "local_llm_priority": 100,
         "max_concurrent_tasks": 6,
         "gpu_temp_limit": 85,
     },
-    "day": {  # 07:00-23:00 JST
+    "day": {  # 09:00-23:00 JST
         "batch_content_generation": False,
         "parallel_inference": False,
         "local_llm_priority": 80,
@@ -359,12 +359,12 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # 日中モード切替（07:00 JST）
+            # 日中モード切替（09:00 JST）
             self._scheduler.add_job(
                 self.switch_to_day_mode,
-                CronTrigger(hour=7, minute=0),
+                CronTrigger(hour=9, minute=0),
                 id="day_mode",
-                name="日中モード切替（07:00）",
+                name="日中モード切替（09:00）",
                 replace_existing=True,
             )
 
@@ -830,7 +830,7 @@ class SyutainScheduler:
             from zoneinfo import ZoneInfo
             jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
             current_hour = jst_now.hour
-            if current_hour >= 23 or current_hour < 7:
+            if current_hour >= 23 or current_hour < 9:
                 _current_power_mode = "night"
                 logger.info(f"起動時刻 {jst_now.strftime('%H:%M')} JST → 夜間モードで開始")
             else:
@@ -1639,7 +1639,7 @@ class SyutainScheduler:
             pass
 
     async def switch_to_day_mode(self):
-        """07:00 JST: 日中モードに切替"""
+        """09:00 JST: 日中モードに切替"""
         global _current_power_mode
         _current_power_mode = "day"
         logger.info("=== 日中モード（Day Mode）に切替 === 省エネ運転開始")
