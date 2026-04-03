@@ -135,6 +135,12 @@ async def generate_executive_briefing() -> dict:
 
     prompt = f"""以下のデータから島原大知への経営日報を作成してください。
 
+## 最重要方針: Build in Public（2026年4月2日決定）
+- 方針: 「SYUTAINβで実際に何が起きたか」のドキュメンタリー
+- 外部AIニュース解説やツール紹介の提案は禁止
+- 6月1日まで全記事無料（リーチ拡大フェーズ）
+- 収益化の前にリーチとBuild in Publicコンテンツの蓄積が優先
+
 ## 昨日のシステムデータ
 {json.dumps(data, ensure_ascii=False, indent=2)}
 
@@ -142,23 +148,27 @@ async def generate_executive_briefing() -> dict:
 📋 **SYUTAINβ 経営日報 {date.today().strftime('%Y-%m-%d')}**
 
 **昨日の成果:**
-- （タスク完了数、SNS投稿数、特筆事項）
+- （タスク完了数、SNS投稿数、特筆事項を実データから記載。LLMで補完しない）
 
 **コスト:** ¥X（LLM Y回）
 
 **注意事項:**
-- （エラー、承認待ち、問題点）
+- （エラー、承認待ち、問題点を実データから記載）
 
 **💡 今日やるべき1つのこと:**
-（最も収益インパクトの高い具体的なアクション1つ）
+（Build in Public方針に沿った具体的なアクション1つ。外部AIツール販売の提案は禁止。SYUTAINβの運用改善・記録公開・リーチ拡大に関するアクションを提案すること）
 
 ---
-300文字以内で簡潔に。"""
+300文字以内で簡潔に。データにない事実は捏造しない。"""
 
     try:
         result = await call_llm(
             prompt=prompt,
-            system_prompt="SYUTAINβの経営日報生成。島原大知に対して、対等なパートナーとして簡潔に報告する。",
+            system_prompt=(
+                "SYUTAINβの経営日報生成。島原大知に対して、対等なパートナーとして簡潔に報告する。\n"
+                "最重要: Build in Public方針。外部AIニュース解説やツール販売の提案は禁止。\n"
+                "データにない事実は書かない。タスクの内容は実データのゴール名をそのまま使う。"
+            ),
             model_selection=model_sel,
             goal_id="executive_briefing",
             max_tokens=800,
