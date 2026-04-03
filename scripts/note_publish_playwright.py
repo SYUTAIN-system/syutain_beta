@@ -317,13 +317,16 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
 
                 # 再試行: 画面上の全ボタンから公開系を探す
                 retry_selectors = [
-                    'button:has-text("公開")',
-                    'button:has-text("投稿する")',
                     'button:has-text("公開する")',
+                    'button:has-text("投稿する")',
                     '[role="dialog"] button:has-text("公開")',
+                    'button:has-text("公開")',
                     'button[type="submit"]',
                 ]
+                retry_clicked = False
                 for sel in retry_selectors:
+                    if retry_clicked:
+                        break
                     try:
                         btns = page.locator(sel)
                         count = await btns.count()
@@ -334,6 +337,7 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
                                 print(f"  → 再試行クリック: '{text}' ({sel})")
                                 await btn.click()
                                 await asyncio.sleep(4)
+                                retry_clicked = True
                                 break
                     except Exception:
                         continue

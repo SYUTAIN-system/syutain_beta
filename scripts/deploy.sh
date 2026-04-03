@@ -71,15 +71,16 @@ deploy_node() {
         return 1
     fi
 
-    # ファイル同期
+    # ファイル同期（__pycache__を除外するためrsyncを優先使用）
     local sync_ok=true
     for item in $SYNC_FILES; do
         local src="${PROJECT_DIR}/${item}"
         local dst="${SSH_USER}@${ip}:${REMOTE_DIR}/${item}"
 
         if [ -d "$src" ]; then
-            # ディレクトリ
-            scp -r -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+            # ディレクトリ — rsyncで__pycache__を除外
+            rsync -az --exclude '__pycache__' --exclude '*.pyc' \
+                -e "ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no" \
                 "$src" "${SSH_USER}@${ip}:${REMOTE_DIR}/" 2>/dev/null || sync_ok=false
         elif [ -f "$src" ]; then
             # ファイル
