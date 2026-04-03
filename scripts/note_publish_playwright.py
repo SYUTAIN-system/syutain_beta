@@ -299,15 +299,70 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
             except Exception:
                 pass
 
-            # 公開成功の判定（URLにedit/publishが含まれない = 記事ページに遷移済み）
-            if "/edit/" in final_url or "/publish/" in final_url:
-                print(f"  ⚠ まだ編集/公開設定画面にいる可能性: {final_url}")
-                result["success"] = False
-                result["error"] = f"公開完了を確認できませんでした: {final_url}"
-            else:
+            # 公開成功の判定
+            # 正式な公開URLは note.com/{user}/n/{note_id} の形式
+            # エディタURLは editor.note.com/notes/{note_id}/... の形式
+            import re as _re
+            is_published_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', final_url))
+            is_editor_url = "editor.note.com" in final_url or "/edit/" in final_url or "/publish/" in final_url
+
+            if is_published_url:
                 result["success"] = True
-            result["url"] = final_url
-            print(f"\n完了: {final_url}")
+                result["url"] = final_url
+                print(f"\n公開成功: {final_url}")
+            elif is_editor_url:
+                # エディタURLのままの場合、公開ボタンを再試行
+                print(f"  ⚠ まだエディタ画面: {final_url}")
+                print("  → 公開ボタン再試行...")
+
+                # 再試行: 画面上の全ボタンから公開系を探す
+                retry_selectors = [
+                    'button:has-text("公開")',
+                    'button:has-text("投稿する")',
+                    'button:has-text("公開する")',
+                    '[role="dialog"] button:has-text("公開")',
+                    'button[type="submit"]',
+                ]
+                for sel in retry_selectors:
+                    try:
+                        btns = page.locator(sel)
+                        count = await btns.count()
+                        for i in range(count):
+                            btn = btns.nth(i)
+                            if await btn.is_visible(timeout=1000):
+                                text = await btn.text_content()
+                                print(f"  → 再試行クリック: '{text}' ({sel})")
+                                await btn.click()
+                                await asyncio.sleep(4)
+                                break
+                    except Exception:
+                        continue
+
+                # 再試行後のURL確認
+                await asyncio.sleep(3)
+                retry_url = page.url
+                is_published_after_retry = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', retry_url))
+
+                try:
+                    await page.screenshot(path="/tmp/note_retry_result.png")
+                except Exception:
+                    pass
+
+                if is_published_after_retry:
+                    result["success"] = True
+                    result["url"] = retry_url
+                    print(f"\n再試行後に公開成功: {retry_url}")
+                else:
+                    result["success"] = False
+                    result["url"] = retry_url
+                    result["error"] = f"公開完了を確認できませんでした（再試行後もエディタ: {retry_url}）"
+                    print(f"\n公開失敗: {retry_url}")
+            else:
+                # 不明なURL — 成功とは判定しない
+                result["success"] = False
+                result["url"] = final_url
+                result["error"] = f"公開後のURL形式が不明: {final_url}"
+                print(f"\n不明な状態: {final_url}")
 
         except Exception as e:
             result["error"] = str(e)

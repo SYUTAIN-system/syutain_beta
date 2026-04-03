@@ -86,6 +86,19 @@ class NotePublisher:
 
             publish_url = create_result.get("url", "")
 
+            # 4.5. URL検証 — エディタURLのままならSNS告知しない
+            import re as _re
+            is_valid_publish_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', publish_url))
+            if not is_valid_publish_url:
+                logger.error(
+                    f"note公開URL不正: エディタURLのまま: {publish_url} — "
+                    f"SNS告知を中止し、手動確認が必要"
+                )
+                await self._update_status(package_id, "publish_url_invalid", error=f"URL不正: {publish_url}")
+                result["error"] = f"公開URLがエディタURLのまま: {publish_url}"
+                result["publish_url"] = publish_url
+                return result
+
             # 5. DB更新 — status='published'
             await self._update_status(
                 package_id, "published",
