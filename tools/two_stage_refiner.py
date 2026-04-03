@@ -143,7 +143,7 @@ async def two_stage_refine(
 
 
 async def _parallel_draft(prompt: str, system_prompt: str) -> list:
-    """BRAVO/CHARLIE並列で荒原稿生成（V25: 最大3台）"""
+    """BRAVO/CHARLIE並列で荒原稿生成（V30: 最大2台、ALPHAにLLMなし）"""
     from tools.node_manager import get_node_manager
 
     # ルータに任せてノード+モデルの整合性を保つ（2並列で別ノードが選ばれることを期待）

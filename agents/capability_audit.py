@@ -30,17 +30,19 @@ logger = logging.getLogger("syutain.capability_audit")
 # ノード定義（設計書 第2章準拠）
 NODE_DEFINITIONS = {
     "alpha": {
-        "role": "司令塔/WebUI/DB/NATS_Server",
+        "role": "司令塔/WebUI/DB/NATS_Server（V30: LLMなし）",
         "os": "macOS",
-        "local_model": "qwen3.5-9b-mlx",
+        "local_model": None,  # V30: Ollama撤去済み（2026-03-06）
         "gpu": None,
-        "ollama_url": "http://localhost:11434",
+        "ollama_url": None,   # V30: Ollamaなし
         "services": ["postgresql", "nats_server", "web_ui", "fastapi"],
     },
     "bravo": {
-        "role": "Browser/ComputerUse/推論ワーカー",
+        "role": "Browser/ComputerUse/推論ワーカー/高品質レビュー",
         "os": "Ubuntu 24.04",
         "local_model": "qwen3.5-9b",
+        "local_model_27b": "qwen3.5-27b",   # V30: highest_local
+        "local_model_nemotron": "nemotron-jp",
         "gpu": "RTX_5070_12GB",
         "ollama_url": os.getenv("BRAVO_OLLAMA_URL", "http://127.0.0.1:11434"),
         "services": ["nats_server", "lightpanda", "stagehand_v3", "playwright", "computer_use"],
@@ -49,6 +51,7 @@ NODE_DEFINITIONS = {
         "role": "ローカルLLM推論/バッチ処理",
         "os": "Ubuntu 24.04 (Win11 dual-boot)",
         "local_model": "qwen3.5-9b",
+        "local_model_nemotron": "nemotron-jp",
         "gpu": "RTX_3080_10GB",
         "ollama_url": os.getenv("CHARLIE_OLLAMA_URL", "http://127.0.0.1:11434"),
         "services": ["nats_server"],

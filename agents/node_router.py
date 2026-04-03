@@ -24,14 +24,16 @@ NODE_CAPABILITIES = {
     "alpha": {
         "roles": ["orchestrator", "webui", "database"],
         "task_types": ["strategy", "proposal", "approval", "scheduling"],
-        "llm_model": "qwen3.5-9b-mlx",
-        "llm_mode": "on_demand",  # BRAVO/CHARLIEが両方ビジー時のみ
-        "priority": 3,  # 低い = 推論には使いたくない
+        "llm_model": None,         # V30: ALPHAにLLMなし（2026-03-06撤去）
+        "llm_mode": "off",         # V30: オーケストレーター専任
+        "priority": 99,            # 推論タスクのルーティング対象外
     },
     "bravo": {
-        "roles": ["executor", "browser", "computer_use", "inference"],
-        "task_types": ["browser_action", "computer_use", "content", "inference", "coding"],
+        "roles": ["executor", "browser", "computer_use", "inference", "high_quality_review"],
+        "task_types": ["browser_action", "computer_use", "content", "inference", "coding", "quality_review"],
         "llm_model": "qwen3.5-9b",
+        "llm_model_27b": "qwen3.5-27b",  # V30: highest_local用
+        "llm_model_nemotron": "nemotron-jp",
         "llm_mode": "always",
         "priority": 1,
     },
@@ -145,10 +147,7 @@ class NodeRouter:
                 if not load.get("busy", True):
                     return node
 
-        # 両方ビジー → ALPHA（MLXオンデマンド）
-        if self._is_node_available("alpha"):
-            logger.info("BRAVO/CHARLIE両方ビジー → ALPHAオンデマンド推論")
-            return "alpha"
+        # V30: ALPHAにLLMなし — スキップ
 
         # DELTA（軽量タスクのみ）
         if self._is_node_available("delta"):

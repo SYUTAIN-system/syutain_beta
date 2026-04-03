@@ -53,10 +53,10 @@ async def _get_system_status() -> str:
         # 動作モード判定
         from datetime import datetime
         now_hour = datetime.now().hour
-        mode = "夜間モード" if (now_hour >= 23 or now_hour < 7) else "日中モード"
+        mode = "夜間モード" if (now_hour >= 23 or now_hour < 9) else "日中モード"
 
         lines = []
-        lines.append(f"動作モード: {mode}（夜間=23:00-07:00/日中=07:00-23:00）")
+        lines.append(f"動作モード: {mode}（夜間=23:00-09:00/日中=09:00-23:00）")
         lines.append(f"SNS: {posted}件投稿済 / {pending}件待ち")
         lines.append(f"エラー(24h): {errors}件")
         lines.append(f"コスト: ¥{float(cost):.0f}")

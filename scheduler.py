@@ -825,7 +825,7 @@ class SyutainScheduler:
             self._scheduler.start()
             logger.info("スケジューラー起動完了")
 
-            # 起動時の時刻に応じてパワーモードを自動判定（23:00-07:00 JST = night）
+            # 起動時の時刻に応じてパワーモードを自動判定（23:00-09:00 JST = night）
             global _current_power_mode
             from zoneinfo import ZoneInfo
             jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))

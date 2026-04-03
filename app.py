@@ -1872,7 +1872,7 @@ async def get_budget_status_api(user: dict = Depends(get_current_user)):
         status["daily_used_jpy"] = status.get("daily_spent_jpy", 0)
         status["daily_limit_jpy"] = status.get("daily_budget_jpy", 80)
         status["monthly_used_jpy"] = status.get("monthly_spent_jpy", 0)
-        status["monthly_limit_jpy"] = status.get("monthly_budget_jpy", 1500)
+        status["monthly_limit_jpy"] = status.get("monthly_budget_jpy", 2000)
         status["daily_percent"] = status.get("daily_usage_pct", 0)
         status["monthly_percent"] = status.get("monthly_usage_pct", 0)
         # チャット予算
@@ -1884,7 +1884,7 @@ async def get_budget_status_api(user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"予算状態取得エラー: {e}")
         daily = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "80")))
-        monthly = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "1500")))
+        monthly = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "2000")))
         return {
             "daily_budget_jpy": daily,
             "daily_spent_jpy": 0,
