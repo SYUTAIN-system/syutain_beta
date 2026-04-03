@@ -3377,9 +3377,9 @@ class SyutainScheduler:
             logger.error(f"エンゲージメント分析失敗: {e}")
 
     async def overseas_trend_detection(self):
-        """海外トレンド先取り検出"""
+        """海外トレンド先取り検出 + 英語記事の取得・要約"""
         try:
-            from tools.overseas_trend_detector import detect_overseas_trends
+            from tools.overseas_trend_detector import detect_overseas_trends, enrich_overseas_trends
             findings = await detect_overseas_trends()
             if findings:
                 from tools.discord_notify import notify_discord
@@ -3387,7 +3387,10 @@ class SyutainScheduler:
                 if high:
                     await notify_discord(f"🌍 海外トレンド検出: {len(high)}件の先行者チャンス\n" +
                         "\n".join(f"  - {f['keyword']}: {f['title'][:60]}" for f in high[:3]))
-            logger.info(f"海外トレンド: {len(findings)}件検出")
+
+            # 検出済みの英語記事を取得・要約してDB保存
+            enriched = await enrich_overseas_trends()
+            logger.info(f"海外トレンド: {len(findings)}件検出, {enriched}件の英語記事を要約済み")
         except Exception as e:
             logger.error(f"海外トレンド検出失敗: {e}")
 

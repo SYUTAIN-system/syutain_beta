@@ -476,7 +476,41 @@ async def _collect_system_data_for_article(conn, theme: str) -> str:
     except Exception as e:
         logger.debug(f"ハートビート取得失敗: {e}")
 
-    # 7. 外部検索エビデンス（fact_verificationで収集した情報）
+    # 7. 英語記事の日本語要約（海外ソース）
+    try:
+        en_articles = await conn.fetch(
+            """SELECT title, summary, url, metadata FROM intel_items
+            WHERE source = 'english_article'
+            AND created_at > NOW() - INTERVAL '7 days'
+            ORDER BY importance_score DESC, created_at DESC LIMIT 5"""
+        )
+        if en_articles:
+            en_lines = []
+            for row in en_articles:
+                meta = {}
+                try:
+                    meta = json.loads(row['metadata']) if isinstance(row['metadata'], str) else (row['metadata'] or {})
+                except Exception:
+                    pass
+                key_points = meta.get('key_points', [])
+                kp_text = "\n  - ".join(key_points) if key_points else ""
+                insights = meta.get('system_insights', '')
+                en_lines.append(
+                    f"- **{row['title']}**\n"
+                    f"  URL: {row['url']}\n"
+                    f"  要約: {(row['summary'] or '')[:200]}\n"
+                    + (f"  キーポイント:\n  - {kp_text}\n" if kp_text else "")
+                    + (f"  システム改善示唆: {insights}\n" if insights else "")
+                )
+            sections.append(
+                f"### 海外記事の日本語要約（英語ソースからの知見）\n"
+                f"以下は英語記事を要約したもの。記事で「海外では〜」と言及する際のエビデンスとして使用可能。\n"
+                + "\n".join(en_lines)
+            )
+    except Exception as e:
+        logger.debug(f"英語記事要約取得失敗: {e}")
+
+    # 8. 外部検索エビデンス（fact_verificationで収集した情報）
     try:
         evidence_rows = await conn.fetch(
             """SELECT title, content, metadata
@@ -543,7 +577,7 @@ async def _load_posted_article_examples(conn) -> list[str]:
 
 
 async def _load_intel_themes(conn) -> list[str]:
-    """intel_items から最近のテーマ候補を取得（海外トレンド先取り優先+actionable+summary詳細化）"""
+    """intel_items から最近のテーマ候補を取得（海外トレンド先取り優先+英語記事要約+actionable+summary詳細化）"""
     try:
         results = []
 
@@ -558,10 +592,30 @@ async def _load_intel_themes(conn) -> list[str]:
                 summary = (r['summary'] or '')[:200]
                 results.append(f"[海外トレンド先取り] {r['title']}: {summary}")
 
+        # 英語記事の日本語要約（enriched済みの海外ソース）
+        en_items = await conn.fetch(
+            """SELECT title, summary, metadata FROM intel_items
+            WHERE source = 'english_article'
+            AND review_flag = 'actionable'
+            ORDER BY importance_score DESC, created_at DESC LIMIT 3"""
+        )
+        for r in en_items:
+            if r["title"]:
+                summary = (r['summary'] or '')[:200]
+                meta = {}
+                try:
+                    meta = json.loads(r['metadata']) if isinstance(r['metadata'], str) else (r['metadata'] or {})
+                except Exception:
+                    pass
+                key_points = meta.get('key_points', [])
+                kp_text = "。".join(key_points[:2]) if key_points else ""
+                results.append(f"[英語記事要約] {r['title']}: {summary} {kp_text}")
+
         # actionableを優先取得（note記事の素材に最適）
         actionable = await conn.fetch(
             """SELECT title, summary, source FROM intel_items
-            WHERE review_flag = 'actionable' AND source != 'trend_detector'
+            WHERE review_flag = 'actionable'
+            AND source NOT IN ('trend_detector', 'english_article')
             ORDER BY importance_score DESC, created_at DESC LIMIT 5"""
         )
         # 補完: 直近3日のreviewedも
