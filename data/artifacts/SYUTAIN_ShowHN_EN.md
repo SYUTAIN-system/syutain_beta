@@ -8,22 +8,31 @@ This is not a success story. This is a documentary of building something too amb
 
 ---
 
-## The raw numbers (production DB, April 2026)
+## The raw numbers (production DB, April 3 2026)
 
 ```
-Python:              51,672 lines across 132 files
+Python:              51,689 lines across 132 files
 TypeScript:          ~2,200 lines (Next.js Web UI)
-PostgreSQL:          45 tables, 30,174 event log entries
+PostgreSQL:          45 tables, 31,384 event log entries
+Goals processed:     97 (52 completed, 35 cancelled, 8 escalated)
+Tasks executed:      1,066
+Approvals:           364 (188 auto-approved, 169 manual, 7 rejected)
 Agents:              20 core + 15 brain modules + 11 bot modules
 Tools:               67 modules
-Scheduler jobs:      91 automated tasks
+Scheduler jobs:      77 automated tasks
 API endpoints:       65 REST routes
-SNS posts:           423 in last 30 days (49/day across 4 platforms)
-LLM calls:           9,700/month (85.2% local via Ollama, 14.8% API)
-Monthly cost:        ¥854 (~$5.70 USD)
+SNS posts:           572 total (Bluesky 298, Threads 160, X 112)
+Intel collected:     1,358 items from 6 sources
+LLM calls:           10,170 total (74.0% local via Ollama)
+Total LLM cost:      ¥936.80 (~$6.25 USD)
+LoopGuard triggers:  54 (27 same-failure, 22 emergency kill)
+Episodic memory:     137 episodes, 20 auto-extracted skills
+Persona memory:      541 entries
 Total bugs fixed:    140+ in 16 days
 Revenue:             ¥0
 ```
+
+GitHub: https://github.com/SYUTAIN-system/syutain_beta (full source, all 51K lines)
 
 That last line is important. This system does not make money yet. It might never. I'm sharing it anyway because the process matters more than the outcome.
 
@@ -152,15 +161,15 @@ Autonomous agents will destroy themselves if you let them. They'll retry the sam
 │   9   │ Cross-Goal Interference │ Resource conflict │ STOP        │
 └──────────────────────────────────────────────────────────────────┘
 
-Production trigger counts (March 19 – April 2, 2026):
-  Layer 2 (Same-Failure Cluster):    triggered 23 times
-  Layer 6 (Cost & Time Guard):       triggered 11 times
-  Layer 7 (Emergency Kill - budget): triggered 8 times
-  Layer 8 (Semantic Loop):           triggered 15 times*
-  Layer 1 (Retry Budget):            triggered 6 times
-  Layer 9 (Cross-Goal):              triggered 2 times
+Production trigger counts (March 19 – April 3, 2026, from PostgreSQL):
+  Layer 2 (Same-Failure Cluster):    triggered 27 times  ← most frequent
+  Layer 7 (Emergency Kill - budget): triggered 22 times
+  Layer 6 (Cost & Time Guard):       triggered 3 times
+  Layer 8 (Semantic Loop):           triggered 1 time
+  Layer 3 (Planner Reset Limit):     triggered 1 time
+  Total:                             54 triggers
 
-  * 15 triggers on a SINGLE DAY (March 25). See "The Worst Day" below.
+  March 25 was the worst day: 4,491 events logged. See "The Worst Day" below.
 ```
 
 When the LoopGuard itself crashes, it fails safe: `ESCALATE`, not `CONTINUE`. The system never assumes safety.
@@ -184,17 +193,22 @@ except Exception as e:
 Every LLM call in the entire system goes through `choose_best_model_v6()`. This is CLAUDE.md Rule 5 — there are no exceptions.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Tier │ Models                  │ Cost    │ Usage   │
-├──────┼─────────────────────────┼─────────┼─────────┤
-│  S   │ GPT-5.4, Claude Opus 4.6│ High    │  2.1%   │
-│  A   │ DeepSeek V3.2, Gemini   │ Medium  │ 12.7%   │
-│  B   │ GPT-5-Nano, Gemini Flash│ Low     │  0.0%   │
-│  L   │ qwen3.5:9b/4b (Ollama)  │ ¥0      │ 85.2%   │
-└─────────────────────────────────────────────────────────┘
+Model breakdown (from PostgreSQL, 10,170 total calls):
+  qwen3.5-9b (BRAVO/CHARLIE):  3,873 calls  ¥0      38.1%
+  nemotron-jp (Japanese):       2,489 calls  ¥0      24.5%
+  qwen3.5-4b (DELTA):          1,157 calls  ¥0      11.4%
+  jina-embeddings-v3:           1,136 calls  ¥11     11.2%
+  gemini-2.5-flash:               546 calls  ¥127     5.4%
+  deepseek-v3.2:                  304 calls  ¥24      3.0%
+  claude-haiku-4-5:               224 calls  ¥226     2.2%
+  tavily-search:                  140 calls  ¥280     1.4%
+  gpt-5.4:                         20 calls  ¥73      0.2%
+  ─────────────────────────────────────────────────────
+  Total local (¥0):             7,523 calls           74.0%
+  Total cost:                   ¥936.80 (~$6.25 USD)
 ```
 
-The routing logic: DELTA (4b, lightweight classification) → BRAVO/CHARLIE (9b, round-robin) → API (only when local quality insufficient). The daily budget is ¥120 ($0.80). On April 1st, we hit 97.5% of monthly budget (¥78 of ¥80 for the day). The budget guard killed everything. SNS posts completely stopped because the quality gate required API calls that the budget wouldn't allow.
+The routing logic: DELTA (4b, lightweight classification) → BRAVO/CHARLIE (9b, round-robin) → API (only when local quality insufficient). The daily budget is ¥120 ($0.80). On April 1st, we hit 97.5% of the daily budget. The budget guard killed everything. SNS posts completely stopped because the quality gate required API calls that the budget wouldn't allow.
 
 The lesson: models are interchangeable. The architecture must not depend on any specific model. When DeepSeek went down, we switched to qwen3.5 locally within hours. When API budget runs out, local models take over. The system degrades gracefully, never stops entirely.
 
@@ -372,9 +386,9 @@ File protection: FORBIDDEN (`os_kernel.py`, `emergency_kill.py`, `.env`), REVIEW
 
 ## Honest current state (April 3, 2026)
 
-**Working:** 49 SNS posts/day stable for 14 days. 6-source intel pipeline (1,266 items). 5-stage autonomous loop. 9-layer LoopGuard. 547-entry persona memory. PDL with 1 autonomous PR merged. note.com auto-publishing.
+**Working:** 572 SNS posts across 3 platforms (Bluesky 298, Threads 160, X 112). 6-source intel pipeline (1,358 items). 97 goals processed (52 completed). 1,066 tasks executed. 364 approvals (188 auto-approved). 10,170 LLM calls at ¥936.80 total. 541-entry persona memory. 137 episodic memories with 20 auto-extracted skills. 54 LoopGuard triggers (system self-correcting). PDL with 1 autonomous PR merged. note.com auto-publishing. All 4 nodes healthy and connected.
 
-**Not working:** Revenue ¥0. Article quality inconsistent. 15 archived drafts. Nearly zero unit tests. 207 dead functions. 3 circular dependencies (lazy-import workaround).
+**Not working:** Revenue ¥0. Article quality inconsistent. 15 archived drafts. Nearly zero unit tests. 207 dead functions. 3 circular dependencies (lazy-import workaround). Semantic cache broken (null constraint bug).
 
 ---
 
