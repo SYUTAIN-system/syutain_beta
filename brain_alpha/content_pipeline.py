@@ -704,29 +704,48 @@ async def generate_publishable_content(
                     task_type="analysis", quality="medium",
                     budget_sensitive=True, needs_japanese=True,
                 )
+                # システム実データをテーマ選定に注入
+                system_data_for_theme = ""
+                try:
+                    system_data_for_theme = await _collect_system_data_for_article(conn, "テーマ選定用")
+                except Exception:
+                    pass
+
                 result = await call_llm(
                     prompt=(
-                        "以下のインテル情報・エージェント情報・島原大知のペルソナを踏まえ、"
-                        "note有料記事（500円）として最も読者に刺さるテーマを1つだけ提案してください。\n"
-                        "「非エンジニアのクリエイターが500円払ってでも読みたい」テーマにすること。\n"
-                        "テーマ名のみを1行で出力。説明不要。\n\n"
-                        f"## 最近のインテル情報\n{intel_context}\n\n"
+                        "以下のSYUTAINβ実運用データとインテル情報に基づいて、"
+                        "note記事（現在は無料公開中）のテーマを1つだけ提案してください。\n\n"
+                        "## 最重要方針: Build in Publicドキュメンタリー\n"
+                        "テーマは「SYUTAINβで実際に何が起きたか」が最優先。\n"
+                        "外部AIニュースの解説記事（「GPTの使い方」「Claudeの活用法」等）は禁止。\n"
+                        "SYUTAINβの実データ・実失敗・実メトリクスに基づく記事のみ。\n\n"
+                        "## テーマの良い例:\n"
+                        "- 「LoopGuardが54回発動した — 安全装置が最大の危険になった日」\n"
+                        "- 「月936円で10,170回のLLM呼び出しを回す — モデルルーティングの設計」\n"
+                        "- 「3日間、リモートワーカーが止まっていたのに誰も気づかなかった」\n"
+                        "- 「非エンジニアがClaude Codeで51K行書かせた — 壊れ方の記録」\n"
+                        "- 「SNS自動投稿572件のファクトチェックで見えた、AIが嘘をつくパターン」\n\n"
+                        "## テーマの悪い例（禁止）:\n"
+                        "- 「GPT-5.4の最新動向まとめ」「Claude活用完全ガイド」「AI副業で稼ぐ方法」\n\n"
+                        f"## SYUTAINβ実運用データ（テーマの素材として使うこと）\n{system_data_for_theme}\n\n"
+                        f"## インテル情報（補足素材。メインテーマにはしない）\n{intel_context}\n\n"
                         f"{buzz_context}"
-                        f"## エージェント統合情報\n{agent_ctx}\n\n" if agent_ctx else ""
-                        f"## ペルソナ\n{persona_text}\n"
+                        + (f"## エージェント統合情報\n{agent_ctx}\n\n" if agent_ctx else "")
+                        + f"## ペルソナ\n{persona_text}\n\n"
+                        "テーマ名のみを1行で出力。説明不要。\n"
                     ),
                     system_prompt=(
-                        "島原大知のコンテンツテーマ選定アシスタント。\n"
-                        "テーマ軸: AI×クリエイター / 設計思想×実体験 / VTuber業界×未来予測 / "
-                        "人間の価値×AI時代 / SYUTAINβ構築記録 / 不可能性の哲学\n"
-                        "バズ分析の情報がある場合、競合のコンテンツギャップを優先的に考慮すること。\n"
+                        "島原大知のBuild in Publicドキュメンタリー記事テーマ選定アシスタント。\n"
+                        "最優先テーマ軸: SYUTAINβの実運用記録（壊れた話・直した話・数字が語る話）\n"
+                        "補助テーマ軸: 設計思想×実体験 / 非エンジニア×AI開発 / ハーネスエンジニアリング\n"
+                        "禁止テーマ: 外部AIツール紹介・AIニュース解説・副業ノウハウ\n"
                         "テーマ名のみを1行で出力。"
                     ),
                     model_selection=model_sel,
                 )
                 selected_theme = result.get("text", "").strip()
                 if not selected_theme:
-                    selected_theme = "AI時代における人間の価値"
+                    selected_theme = "SYUTAINβ運用記録 — 今週システムで起きたこと"
                 stages.append({
                     "stage": 1,
                     "name": "ネタ選定",
