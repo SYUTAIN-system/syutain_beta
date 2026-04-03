@@ -1,0 +1,72 @@
+# SYUTAINβ V25 MCP設定 (Step 15)
+# 設計書 第5章 5.2準拠
+
+mcp_servers:
+  # ファーストパーティ（自作）
+  - name: syutain-tools
+    description: "SYUTAINβ固有ツール（DB操作、収益記録、提案生成等）"
+    transport: stdio
+    command: "python"
+    args: ["-m", "mcp_servers.syutain_tools.server"]
+    enabled: true
+
+  # サードパーティ
+  - name: github-mcp
+    description: "GitHub操作（リポジトリ管理、Issue、PR）"
+    transport: http
+    url: "https://api.github.com/mcp"
+    fallback: "github_direct_api"
+    enabled: true
+
+  - name: gmail-mcp
+    description: "Gmail API（メール検索、読み取り、ラベル管理）"
+    transport: stdio
+    command: "npx"
+    args: ["-y", "@anthropic/gmail-mcp"]
+    env:
+      GMAIL_CREDENTIALS_PATH: "${HOME}/.config/syutain/gmail_credentials.json"
+    fallback: "gmail_direct_api"
+    enabled: true
+
+  - name: bluesky-mcp
+    description: "Bluesky AT Protocol（投稿、フィード管理）"
+    transport: stdio
+    command: "npx"
+    args: ["-y", "bluesky-mcp-server"]
+    env:
+      BLUESKY_HANDLE: "${BLUESKY_HANDLE}"
+      BLUESKY_APP_PASSWORD: "${BLUESKY_APP_PASSWORD}"
+    fallback: "bluesky_direct_api"
+    enabled: true
+
+  - name: tavily-mcp
+    description: "Tavily Search API（AI特化検索）"
+    transport: stdio
+    command: "npx"
+    args: ["-y", "tavily-mcp-server"]
+    env:
+      TAVILY_API_KEY: "${TAVILY_API_KEY}"
+    fallback: "tavily_direct_api"
+    enabled: true
+
+  - name: jina-mcp
+    description: "Jina Reader API（Webページ→Markdown変換）"
+    transport: stdio
+    command: "npx"
+    args: ["-y", "jina-reader-mcp"]
+    env:
+      JINA_API_KEY: "${JINA_API_KEY}"
+    fallback: "jina_direct_api"
+    enabled: true
+
+  - name: stagehand-mcp-local
+    description: "Stagehand v3 ローカルMCPサーバー（AI駆動ブラウザ自動操作）"
+    transport: stdio
+    command: "npx"
+    args: ["-y", "@stagehand/mcp-server"]
+    env:
+      STAGEHAND_ENV: "LOCAL"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    enabled: true
+    # BRAVOノード専用
+    node: bravo

@@ -1,0 +1,45 @@
+name: Codex Auto-Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  codex-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax Check
+        run: |
+          find . -name "*.py" -not -path "*/venv/*" -not -path "*/__pycache__/*" -not -path "*/.next/*" -not -path "*/node_modules/*" | while read f; do
+            python3 -c "import ast; ast.parse(open('$f').read())" 2>/dev/null || echo "SYNTAX ERROR: $f"
+          done
+
+      - name: Check Forbidden Files
+        run: |
+          FORBIDDEN="agents/os_kernel.py tools/emergency_kill.py agents/approval_manager.py tools/loop_guard.py .env credentials.json token.json CLAUDE.md"
+          CHANGED=$(git diff --name-only origin/main...HEAD 2>/dev/null || echo "")
+          for f in $FORBIDDEN; do
+            if echo "$CHANGED" | grep -q "$f"; then
+              echo "::error::FORBIDDEN FILE MODIFIED: $f"
+              exit 1
+            fi
+          done
+          echo "No forbidden files modified"
+
+      - name: Diff Size Check
+        run: |
+          LINES=$(git diff --stat origin/main...HEAD 2>/dev/null | tail -1 | grep -oP '\d+ insertion' | grep -oP '\d+' || echo "0")
+          echo "Lines changed: $LINES"
+          if [ "$LINES" -gt 500 ]; then
+            echo "::warning::Large diff: $LINES lines changed. Manual review recommended."
+          fi

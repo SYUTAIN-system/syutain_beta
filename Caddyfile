@@ -1,0 +1,43 @@
+{
+	auto_https disable_redirects
+	https_port 8443
+}
+
+:8443 {
+	# TLS certificates — update paths to match your environment
+	# tls /path/to/cert.pem /path/to/key.pem
+
+	handle /api/chat/ws {
+		reverse_proxy localhost:8000
+	}
+
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}
+
+:80 {
+	handle /api/chat/ws {
+		reverse_proxy localhost:8000
+	}
+
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

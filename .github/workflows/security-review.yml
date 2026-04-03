@@ -1,0 +1,44 @@
+name: Security Review
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code Security Review
+        uses: anthropics/claude-code-action@main
+        with:
+          model: claude-sonnet-4-6
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            Review this code for security issues. Focus on:
+            1. Secrets/API key exposure (.env values, hardcoded tokens)
+            2. Command injection (subprocess, os.system)
+            3. SQL injection (raw string formatting in queries)
+            4. XSS in web responses
+            5. Unsafe deserialization
+            6. Path traversal in file operations
+            7. SSRF in URL handling
+            8. Insecure dependencies
+
+            For each issue found, report:
+            - File and line number
+            - Severity (Critical/High/Medium/Low)
+            - Description
+            - Suggested fix
+
+            If no issues found, confirm the code is clean.

@@ -1,0 +1,69 @@
+version: "v28"
+
+# Phase 1（初期起動）— V25: 全機能有効
+web_ui: true
+web_ui_chat: true
+discord_notifications: true
+nats_messaging: true
+postgresql_shared_state: true
+local_llm_charlie: true
+local_llm_delta: true
+local_llm_alpha_mlx: true
+local_llm_alpha_mode: "on_demand"    # on_demand=BRAVO/CHARLIE両方ビジー時のみロード / always=常駐 / off=無効
+local_llm_bravo: true              # V25新規：BRAVOローカルLLM
+api_llm: true
+openrouter_integration: true
+goal_packet: true
+capability_audit: true
+task_graph: true
+proposal_engine: true
+loop_guard_9layer: true            # V25：9層
+semantic_loop_detection: true
+cross_goal_interference: true      # V25新規
+emergency_kill: true
+two_stage_refinement: true
+mcp_integration: true
+info_pipeline: true
+tailscale_https: true
+computer_use_playwright: true      # V25：Chromiumフォールバック用
+computer_use_lightpanda: true      # V25新規：AI特化ヘッドレスブラウザ（構造化データ抽出の主力）
+computer_use_stagehand_v3: true    # V25新規：AI駆動ブラウザ自動化フレームワーク（env=LOCAL、自己修復・キャッシュ付き）
+computer_use_gpt54: true           # V25新規
+mutation_engine: true              # V25新規：第24章 突然変異エンジン
+
+# 推論モード設定
+delta_inference_mode: "auto"       # auto=GPU優先でCPUフォールバック / gpu=GPU固定 / cpu=CPU固定
+
+# Phase 2
+bluesky_auto_post: true              # ドラフト生成+承認キュー (8h間隔)
+x_auto_post: true                    # X API Pay-Per-Use ($10投入済み)
+threads_auto_post: true              # Threads Graph API (アクセストークン取得済み)
+note_auto_publish: true              # BRAVOブラウザ経由で自動公開
+booth_auto_publish: false            # 承認キュー経由で手動出品
+crypto_auto_trading: false           # 価格蓄積のみ、取引は未開始
+stripe_integration: false            # 未設定
+
+# デジタルツイン基盤
+persona_memory: true                 # 人格・判断パターン蓄積
+digital_twin_questions: true         # 定期問いかけジョブ
+pgvector_embeddings: true            # pgvector 0.8.2 + Jina Embeddings v3 (1024dim)
+
+# 学習ループ
+model_quality_feedback: true         # モデル品質→選択フィードバック
+learning_loop: true                  # 週次学習レポート
+cost_forecast: true                  # 月末コスト予測
+crypto_price_tracking: true          # BTC/JPY価格蓄積
+
+# バックアップ
+postgresql_backup: true              # 毎日03:00
+sqlite_backup_rsync: true            # 毎日03:30 rsync集約
+
+# モデル設定
+default_local_model_charlie: "qwen3.5:9b"
+default_local_model_delta: "qwen3.5:4b"
+default_local_model_alpha: "qwen3.5-9b-mlx"
+default_local_model_bravo: "qwen3.5:9b"    # V25新規
+default_api_model: "deepseek-v3.2"
+premium_model: "claude-sonnet-4-6"
+highest_intelligence_model: "gpt-5.4"
+computer_use_model: "gpt-5.4"              # V25新規

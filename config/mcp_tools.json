@@ -1,0 +1,106 @@
+{
+  "server": {
+    "name": "syutain-beta-mcp",
+    "version": "1.0.0",
+    "description": "SYUTAINβ MCP Server — Bot capabilities as callable tools"
+  },
+  "tools": [
+    {
+      "name": "research_topic",
+      "description": "Research a topic using web search (Tavily). Returns summarized findings with sources.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query (supports Japanese and English)"
+          },
+          "depth": {
+            "type": "string",
+            "enum": ["basic", "deep"],
+            "default": "basic",
+            "description": "Search depth: 'basic' for quick results, 'deep' for thorough research"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "analyze_trend",
+      "description": "Analyze whether a topic is trending. Detects untapped trends (popular in English but not yet in Japanese).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Topic to analyze for trend status"
+          },
+          "language": {
+            "type": "string",
+            "enum": ["ja", "en"],
+            "default": "ja",
+            "description": "Language context for trend analysis"
+          }
+        },
+        "required": ["topic"]
+      }
+    },
+    {
+      "name": "generate_content",
+      "description": "Generate content using two-stage refinement (local LLM draft → API polish). Supports articles, descriptions, and more.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Topic or subject for content generation"
+          },
+          "format": {
+            "type": "string",
+            "enum": ["article", "note", "booth", "social"],
+            "default": "article",
+            "description": "Output format type"
+          },
+          "length": {
+            "type": "integer",
+            "default": 3000,
+            "minimum": 500,
+            "maximum": 10000,
+            "description": "Target character count"
+          }
+        },
+        "required": ["topic"]
+      }
+    },
+    {
+      "name": "check_facts",
+      "description": "Fact-check claims in text using web search verification. Returns verification results with sources.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text containing claims to verify"
+          }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "monitor_system",
+      "description": "Get system health status for SYUTAINβ nodes (CPU, memory, disk, uptime).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": ["all", "alpha", "bravo", "charlie", "delta"],
+            "default": "all",
+            "description": "Which node(s) to monitor"
+          }
+        },
+        "required": []
+      }
+    }
+  ]
+}

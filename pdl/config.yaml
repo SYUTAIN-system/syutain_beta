@@ -1,0 +1,37 @@
+# Parallel Development Layer Configuration
+version: "1.0"
+
+session_b:
+  enabled: true
+  cron_interval_minutes: 10
+  max_concurrent: 1
+  budget_daily_jpy: 36  # 30% of 120
+  budget_per_task_jpy: 8
+  worktree_base: "/tmp/pdl_worktrees"
+  worktree_ttl_hours: 24
+  max_worktrees: 5
+
+file_protection:
+  forbidden:
+    - "agents/os_kernel.py"
+    - "tools/emergency_kill.py"
+    - "agents/approval_manager.py"
+    - "tools/loop_guard.py"
+    - ".env"
+    - "credentials.json"
+    - "token.json"
+    - "CLAUDE.md"
+    - "pdl/"
+  review_required:
+    - "app.py"
+    - "scheduler.py"
+    - "tools/llm_router.py"
+    - "tools/budget_guard.py"
+    - "tools/db_init.py"
+    - "worker_main.py"
+
+test_gate:
+  syntax_check: true
+  import_check: true
+  integration_smoke: true
+  regression_check: true

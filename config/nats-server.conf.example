@@ -1,0 +1,22 @@
+server_name: alpha
+listen: 0.0.0.0:4222
+http_port: 8222
+
+jetstream {
+  store_dir: /path/to/nats-data/jetstream
+  max_mem: 256MB
+  max_file: 1GB
+}
+
+cluster {
+  name: syutain
+  listen: 0.0.0.0:6222
+  routes: [
+    nats-route://BRAVO_IP:6222
+    nats-route://CHARLIE_IP:6222
+    nats-route://DELTA_IP:6222
+  ]
+}
+
+log_file: "/path/to/nats-data/logs/nats-server.log"
+log_size_limit: 10MB

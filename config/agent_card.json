@@ -1,0 +1,30 @@
+{
+  "name": "SYUTAINβ",
+  "description": "Autonomous multi-agent business OS with content generation, research, and monitoring capabilities",
+  "url": "https://syutain.local:8443",
+  "version": "V28",
+  "capabilities": {
+    "research": {
+      "description": "Multi-source AI research (Gmail, Tavily, Jina, RSS, YouTube)",
+      "pricing": "per_call"
+    },
+    "content_generation": {
+      "description": "Article and SNS content generation with quality checks",
+      "pricing": "per_article"
+    },
+    "trend_detection": {
+      "description": "Overseas trend detection with gap analysis",
+      "pricing": "per_call"
+    },
+    "system_monitoring": {
+      "description": "Multi-node system health monitoring",
+      "pricing": "free"
+    }
+  },
+  "authentication": {
+    "type": "api_key",
+    "header": "X-API-Key"
+  },
+  "protocols": ["mcp", "a2a", "http"],
+  "contact": "shimahara@syutain.io"
+}
