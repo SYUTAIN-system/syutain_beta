@@ -1923,14 +1923,49 @@ class SyutainScheduler:
 
                 for p in proposals:
                     try:
+                        title = p["title"] or "自動承認提案"
+
+                        # === V30: Build in Public方針チェック ===
+                        # note記事系の提案が外部AIニュース解説になっていないか検証
+                        _bip_violations = []
+                        _title_lower = title.lower()
+
+                        # 未リリースモデルの虚偽チェック
+                        _unreleased_models = ["deepseek v4", "deepseek-v4", "gpt-6", "claude 5", "gemini 4"]
+                        for um in _unreleased_models:
+                            if um in _title_lower:
+                                _bip_violations.append(f"未リリースモデル参照: {um}")
+
+                        # 外部AIニュース解説記事の検出
+                        _external_news_patterns = [
+                            "完全ガイド", "活用法", "使い方", "導入ガイド", "選定基準",
+                            "最新動向", "速報", "まとめ", "徹底比較", "入門",
+                        ]
+                        _has_external_pattern = any(ep in title for ep in _external_news_patterns)
+                        _has_syutain_ref = "SYUTAINβ" in title or "syutain" in _title_lower
+                        if _has_external_pattern and not _has_syutain_ref:
+                            _bip_violations.append(f"外部AIニュース解説記事の疑い: {title[:50]}")
+
+                        if _bip_violations:
+                            await conn.execute(
+                                "UPDATE proposal_history SET review_flag = 'rejected', adopted = FALSE, outcome_type = $1 WHERE id = $2",
+                                f"auto_rejected_bip_violation: {'; '.join(_bip_violations)}", p["id"],
+                            )
+                            logger.warning(f"提案自動承認拒否（BIP違反）: {title} — {_bip_violations}")
+                            try:
+                                from tools.discord_notify import notify_discord
+                                await notify_discord(
+                                    f"⚠️ 提案自動拒否（方針違反）: {title}\n理由: {'; '.join(_bip_violations)}"
+                                )
+                            except Exception:
+                                pass
+                            continue
+
                         # 提案をapprovedに更新
                         await conn.execute(
                             "UPDATE proposal_history SET review_flag = 'approved', adopted = TRUE WHERE id = $1",
                             p["id"],
                         )
-
-                        # ゴール作成とOSKernel実行をバックグラウンドで起動
-                        title = p["title"] or "自動承認提案"
                         # proposal_dataからobjective/why_nowを抽出してゴールのコンテキストにする
                         pdata = p["proposal_data"] or {}
                         if isinstance(pdata, str):
