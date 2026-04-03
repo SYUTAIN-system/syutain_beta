@@ -2034,7 +2034,13 @@ class SyutainScheduler:
                         # Discord通知
                         try:
                             from tools.discord_notify import notify_discord
-                            await notify_discord(f"✅ 提案自動承認: {title} (スコア: {p['score']})")
+                            first_action = pdata.get("first_action", "")
+                            why_first = why_now[0][:100] if why_now and isinstance(why_now, list) else ""
+                            await notify_discord(
+                                f"✅ 提案自動承認: {title} (スコア: {p['score']})\n"
+                                + (f"理由: {why_first}\n" if why_first else "")
+                                + (f"次のアクション: {first_action[:100]}" if first_action else "")
+                            )
                         except Exception:
                             pass
 
@@ -2393,9 +2399,9 @@ class SyutainScheduler:
                     try:
                         from tools.discord_notify import notify_error
                         for note in notifications[:3]:
-                            # 安定したdedupキー（ノード名+種別で固定）
-                            import re as _re
-                            dedup_key = _re.sub(r'[^a-zA-Z_]', '', note[:40])
+                            # 安定したdedupキー（日本語含むハッシュで一意性を担保）
+                            import hashlib
+                            dedup_key = "anomaly_" + hashlib.md5(note[:60].encode('utf-8')).hexdigest()[:12]
                             await notify_error(dedup_key, note, severity="error")
                     except Exception as e:
                         logger.error(f"異常検知Discord通知失敗: {e}")
@@ -3653,16 +3659,15 @@ class SyutainScheduler:
                     except Exception:
                         pass
 
-                    # Discord通知
-                    try:
-                        from tools.discord_notify import notify_discord
-                        await notify_discord(
-                            f"承認キュークリーンアップ完了\n"
-                            f"  期限切れ（72h超過→expired）: {expired_count}件\n"
-                            f"  削除（7日超過expired）: {deleted_count}件"
-                        )
-                    except Exception as e:
-                        logger.debug(f"クリーンアップ通知失敗: {e}")
+                    # Discord通知（実際にクリーンアップが発生した場合のみ）
+                    if expired_count > 0 or deleted_count > 0:
+                        try:
+                            from tools.discord_notify import notify_discord
+                            await notify_discord(
+                                f"承認キュークリーンアップ: 期限切れ{expired_count}件 / 削除{deleted_count}件"
+                            )
+                        except Exception as e:
+                            logger.debug(f"クリーンアップ通知失敗: {e}")
                 else:
                     logger.debug("承認キュークリーンアップ: 対象なし")
 

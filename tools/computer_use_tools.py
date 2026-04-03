@@ -91,11 +91,12 @@ class ComputerUseClient:
             budget_guard = get_budget_guard()
             budget_check = await budget_guard.check_before_call(COMPUTER_USE_COST_PER_CALL_JPY)
             if not budget_check["allowed"]:
-                logger.warning("Computer Use: 予算超過でスキップ")
+                remaining = budget_check.get("remaining_jpy", "?")
+                logger.warning(f"Computer Use: 予算超過でスキップ (残¥{remaining})")
                 try:
                     from tools.discord_notify import notify_discord
                     asyncio.create_task(notify_discord(
-                        "\u26a0\ufe0f Computer Use: API予算超過のため操作をスキップします"
+                        f"⚠️ Computer Use: API予算超過のため操作をスキップ（残予算¥{remaining}、操作コスト¥{COMPUTER_USE_COST_PER_CALL_JPY}）"
                     ))
                 except Exception:
                     pass

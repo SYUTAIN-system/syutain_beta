@@ -216,7 +216,19 @@ async def _notify_node_online(node: str):
     """ノード復帰時のDiscord通知とSSE"""
     try:
         from tools.discord_notify import notify_discord
-        await notify_discord(f"CHARLIE オンライン復帰。4ノードで運転再開")
+        # 実際の稼働ノード数を取得
+        online_nodes = ["ALPHA"]
+        for n in ["bravo", "charlie", "delta"]:
+            try:
+                from brain_alpha.self_healer import _ssh_check, NODE_IPS
+                if _ssh_check(NODE_IPS.get(n, ""), timeout=3):
+                    online_nodes.append(n.upper())
+            except Exception:
+                online_nodes.append(n.upper())  # チェック失敗時は含める
+        await notify_discord(
+            f"{node.upper()} オンライン復帰。{len(online_nodes)}ノードで運転再開"
+            f"（{'/'.join(online_nodes)}）"
+        )
     except Exception as e:
         logger.warning(f"Discord復帰通知失敗: {e}")
     await broadcast_sse_event("node_status", {"node": node, "status": "online"})
@@ -226,10 +238,11 @@ async def _notify_node_offline(node: str, reason: str):
     """ノードオフライン時のDiscord通知・タスク再割当・SSE"""
     try:
         from tools.discord_notify import notify_discord
+        remaining = [n for n in ["ALPHA", "BRAVO", "CHARLIE", "DELTA"] if n != node.upper()]
         if reason == "win11":
-            msg = "CHARLIE オフライン（Win11切替）。BRAVO/DELTA/ALPHAの3ノードで運転継続中"
+            msg = f"{node.upper()} オフライン（Win11切替）。{'/'.join(remaining)}の{len(remaining)}ノードで運転継続"
         else:
-            msg = f"{node.upper()} オフライン。残存ノードで運転継続中"
+            msg = f"{node.upper()} オフライン（{reason}）。{'/'.join(remaining)}の{len(remaining)}ノードで運転継続"
         await notify_discord(msg)
     except Exception as e:
         logger.warning(f"Discordオフライン通知失敗: {e}")

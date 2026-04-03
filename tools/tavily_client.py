@@ -83,11 +83,12 @@ class TavilyClient:
             budget_guard = get_budget_guard()
             budget_check = await budget_guard.check_before_call(TAVILY_COST_PER_CALL_JPY)
             if not budget_check["allowed"]:
+                remaining = budget_check.get("remaining_jpy", "?")
                 from tools.discord_notify import notify_discord
                 asyncio.create_task(notify_discord(
-                    "\u26a0\ufe0f Tavily検索: API予算超過のため検索をスキップします"
+                    f"⚠️ Tavily検索スキップ: 予算超過（残¥{remaining}）。検索クエリ: {query[:60]}"
                 ))
-                logger.warning("Tavily検索: 予算超過でスキップ")
+                logger.warning(f"Tavily検索: 予算超過でスキップ (残¥{remaining}, query={query[:40]})")
                 return {"query": query, "answer": "", "results": [], "error": "Budget exceeded"}
         except Exception as e:
             logger.warning(f"Tavily予算チェック失敗（処理続行）: {e}")

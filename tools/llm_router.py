@@ -490,9 +490,12 @@ async def _call_llm_internal(
             if not budget_check["allowed"]:
                 # 予算90%到達 → ローカルLLMフォールバック
                 logger.warning(f"予算超過によりローカルLLMへフォールバック: {budget_check['reason']}")
+                remaining = budget_check.get("remaining_jpy", "?")
+                daily_limit = budget_check.get("daily_limit_jpy", "?")
                 asyncio.create_task(notify_error(
                     "budget_90pct_fallback",
-                    "日次API予算90%到達。ローカルLLMのみで運転継続します",
+                    f"日次API予算90%到達（残¥{remaining}/日次上限¥{daily_limit}）。"
+                    f"ローカルLLMのみで運転継続。元のリクエスト: {task_type}/{quality}",
                     severity="error",
                 ))
                 provider = "local"
