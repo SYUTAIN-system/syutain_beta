@@ -683,18 +683,26 @@ ACTIONタグ（データ取得・操作が必要な場合。複数同時OK。自
 ■ コスト: [ACTION:budget_status]
 ■ エラー: [ACTION:error_check]
 ■ ゴール: [ACTION:goals_list] [ACTION:set_goal:テキスト]
-■ 提案: [ACTION:proposals_list] [ACTION:proposal_detail:ID]
+■ 提案: [ACTION:proposals_list] [ACTION:proposal_detail:ID] [ACTION:generate_proposal]
 ■ 成果物: [ACTION:artifacts_list] [ACTION:artifact_detail:ID]
-■ 承認: [ACTION:pending_approvals] [ACTION:approve:ID] [ACTION:reject:ID]
+■ 承認: [ACTION:pending_approvals_detail] [ACTION:approve:ID] [ACTION:reject:ID]
 ■ 情報収集: [ACTION:intel_digest] [ACTION:intel_search:キーワード] [ACTION:news_check]
-■ ノード: [ACTION:node_detail:bravo] [ACTION:model_info]
+■ ノード: [ACTION:node_detail:bravo] [ACTION:model_info] [ACTION:charlie_mode:status]
 ■ 人格: [ACTION:persona_check] [ACTION:persona_check:philosophy]
 ■ ブラウザ: [ACTION:browse:URL] [ACTION:browse:search:検索語] [ACTION:screenshot:URL]
 ■ 生成: [ACTION:generate:指示内容]
 ■ ジョブ実行: [ACTION:run_job:情報収集] (情報収集/SNS再生成/提案/キーワード/エンゲージメント/バックアップ)
 ■ リマインダー: [ACTION:remind:7:00|内容] [ACTION:remind:30m|内容]
 ■ Brain-α: [ACTION:escalate_alpha:指示内容] [ACTION:alpha_queue_status]
-自律判断: 状態に異常があればACTIONで詳細を取得し報告せよ。不要なら応答文のみ出力。"""
+■ 設定: [ACTION:set_budget:daily=120,monthly=2000] [ACTION:record_revenue:980,note,タイトル] [ACTION:trigger_review]
+自律判断: 状態に異常があればACTIONで詳細を取得し報告せよ。不要なら応答文のみ出力。
+
+【重要: 大知さんがコマンドの使い方を聞いたり「何ができる？」と聞いた場合】
+その時の状況に合わせて、今使える操作を自然言語で提案すること。例:
+- 「承認待ちがあります」の文脈なら「承認一覧を見る」「IDを指定して承認/却下」を案内
+- 「コストが気になる」の文脈なら「予算確認」「予算変更」を案内
+- 「何が起きてる？」なら「システム状態」「エラー確認」「ゴール一覧」を案内
+コマンド名を羅列するのではなく、「〇〇したいなら△△と言ってください」のように自然に伝える。"""
 
     try:
         # 3段階自動モデル選択（キーワード→文脈→品質フィードバック）
