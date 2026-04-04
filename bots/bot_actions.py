@@ -162,11 +162,76 @@ async def get_artifacts_list(limit: int = 5) -> list:
 async def get_pending_approvals() -> list:
     async with get_connection() as conn:
         rows = await conn.fetch(
-            """SELECT id, request_type, LEFT(request_data::text, 120) as preview, requested_at
+            """SELECT id, request_type, request_data, requested_at
             FROM approval_queue WHERE status='pending'
             ORDER BY requested_at DESC LIMIT 10"""
         )
         return [dict(r) for r in rows]
+
+
+@_register("pending_approvals_detail")
+async def get_pending_approvals_detail() -> str:
+    """承認待ちタスクの詳細を人間が読める形式で返す"""
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT id, request_type, request_data, requested_at
+            FROM approval_queue WHERE status='pending'
+            ORDER BY requested_at DESC LIMIT 10"""
+        )
+        if not rows:
+            return "✅ 承認待ちはありません"
+
+        lines = [f"📋 **承認待ち: {len(rows)}件**\n"]
+        for r in rows:
+            import json as _json
+            data = r["request_data"]
+            if isinstance(data, str):
+                try:
+                    data = _json.loads(data)
+                except Exception:
+                    pass
+
+            req_type = r["request_type"]
+            item_id = r["id"]
+            age_hours = (datetime.now(timezone.utc) - r["requested_at"]).total_seconds() / 3600
+
+            # タイプ別に分かりやすい説明を生成
+            if req_type == "product_publish":
+                title = data.get("title", "不明")[:60] if isinstance(data, dict) else "不明"
+                price = data.get("price_jpy", "?") if isinstance(data, dict) else "?"
+                lines.append(
+                    f"**#{item_id}** 📝 note記事公開\n"
+                    f"  タイトル: {title}\n"
+                    f"  価格: ¥{price}\n"
+                    f"  待機: {age_hours:.0f}時間\n"
+                    f"  → 承認: `承認 {item_id}` / 却下: `却下 {item_id}`\n"
+                )
+            elif req_type == "approval_request":
+                task_type = data.get("task_type", "不明") if isinstance(data, dict) else "不明"
+                desc = data.get("description", "")[:100] if isinstance(data, dict) else ""
+                lines.append(
+                    f"**#{item_id}** 🔄 タスク承認\n"
+                    f"  種類: {task_type}\n"
+                    f"  内容: {desc or '詳細なし'}\n"
+                    f"  待機: {age_hours:.0f}時間\n"
+                    f"  → 承認: `承認 {item_id}` / 却下: `却下 {item_id}`\n"
+                )
+            elif req_type == "x_post":
+                content = data.get("content", "")[:100] if isinstance(data, dict) else ""
+                lines.append(
+                    f"**#{item_id}** 🐦 X投稿\n"
+                    f"  内容: {content}\n"
+                    f"  → 承認: `承認 {item_id}` / 却下: `却下 {item_id}`\n"
+                )
+            else:
+                preview = str(data)[:100] if data else "詳細なし"
+                lines.append(
+                    f"**#{item_id}** {req_type}\n"
+                    f"  内容: {preview}\n"
+                    f"  → 承認: `承認 {item_id}` / 却下: `却下 {item_id}`\n"
+                )
+
+        return "\n".join(lines)
 
 
 @_register("approve")
@@ -174,11 +239,25 @@ async def approve_item(item_id: int = 0) -> str:
     if isinstance(item_id, str):
         item_id = int(item_id)
     async with get_connection() as conn:
+        # 承認対象の内容を取得してからapprove
+        row = await conn.fetchrow(
+            "SELECT request_type, request_data FROM approval_queue WHERE id=$1", item_id
+        )
+        if not row:
+            return f"ID {item_id} が見つかりません"
         await conn.execute(
             "UPDATE approval_queue SET status='approved', responded_at=NOW() WHERE id=$1",
             item_id,
         )
-    return f"承認しました (ID: {item_id})"
+        import json as _json
+        data = row["request_data"]
+        if isinstance(data, str):
+            try:
+                data = _json.loads(data)
+            except Exception:
+                pass
+        title = data.get("title", data.get("content", str(data)))[:60] if isinstance(data, dict) else str(data)[:60]
+    return f"✅ 承認しました (ID: {item_id})\n内容: {title}"
 
 
 @_register("reject")
@@ -186,11 +265,24 @@ async def reject_item(item_id: int = 0, reason: str = None) -> str:
     if isinstance(item_id, str):
         item_id = int(item_id)
     async with get_connection() as conn:
-        await conn.execute(
-            "UPDATE approval_queue SET status='rejected', responded_at=NOW() WHERE id=$1",
-            item_id,
+        row = await conn.fetchrow(
+            "SELECT request_type, request_data FROM approval_queue WHERE id=$1", item_id
         )
-    return f"却下しました (ID: {item_id})"
+        if not row:
+            return f"ID {item_id} が見つかりません"
+        await conn.execute(
+            "UPDATE approval_queue SET status='rejected', responded_at=NOW(), response=$2 WHERE id=$1",
+            item_id, reason or "Discordから却下",
+        )
+        import json as _json
+        data = row["request_data"]
+        if isinstance(data, str):
+            try:
+                data = _json.loads(data)
+            except Exception:
+                pass
+        title = data.get("title", data.get("content", str(data)))[:60] if isinstance(data, dict) else str(data)[:60]
+    return f"❌ 却下しました (ID: {item_id})\n内容: {title}" + (f"\n理由: {reason}" if reason else "")
 
 
 @_register("intel_digest")

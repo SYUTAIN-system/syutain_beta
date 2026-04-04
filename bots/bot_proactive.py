@@ -173,7 +173,41 @@ async def check_proactive_triggers(channel) -> str | None:
             except Exception as e:
                 logger.debug(f"予算チェック失敗: {e}")
 
-            # 5. タスクが1時間以上stuck
+            # 5. 承認待ちタスクの通知（2時間以上放置されているもの）
+            try:
+                pending_approvals = await conn.fetch(
+                    """SELECT id, request_type, request_data, requested_at
+                    FROM approval_queue WHERE status='pending'
+                    AND requested_at < NOW() - INTERVAL '2 hours'
+                    ORDER BY requested_at LIMIT 3"""
+                )
+                if pending_approvals:
+                    key = "pending_approvals_reminder"
+                    if proactive.can_emergency_alert(key, cooldown_minutes=360):  # 6時間に1回
+                        import json as _json
+                        approval_lines = []
+                        for pa in pending_approvals:
+                            data = pa["request_data"]
+                            if isinstance(data, str):
+                                try:
+                                    data = _json.loads(data)
+                                except Exception:
+                                    pass
+                            if pa["request_type"] == "product_publish":
+                                title = data.get("title", "不明")[:50] if isinstance(data, dict) else "不明"
+                                approval_lines.append(f"  #{pa['id']} 📝 note記事「{title}」")
+                            else:
+                                approval_lines.append(f"  #{pa['id']} {pa['request_type']}")
+                        parts.append(
+                            f"📋 **承認待ち {len(pending_approvals)}件**（2時間以上）\n"
+                            + "\n".join(approval_lines)
+                            + f"\n  → `!承認一覧` で詳細確認"
+                        )
+                        proactive.record_emergency_alert(key)
+            except Exception as e:
+                logger.debug(f"承認待ちチェック失敗: {e}")
+
+            # 6. タスクが1時間以上stuck
             try:
                 stuck = await conn.fetchval(
                     """SELECT COUNT(*) FROM tasks

@@ -255,14 +255,23 @@ async def on_reaction_add(reaction, user):
 @bot.command(name="承認")
 async def approve_cmd(ctx, approval_id: int):
     from bots.bot_actions import approve_item
-    await approve_item(approval_id)
-    await ctx.reply(f"承認しました。(ID: {approval_id})")
+    result = await approve_item(approval_id)
+    await ctx.reply(result)
 
 @bot.command(name="却下")
-async def reject_cmd(ctx, approval_id: int):
+async def reject_cmd(ctx, approval_id: int, *, reason: str = None):
     from bots.bot_actions import reject_item
-    await reject_item(approval_id)
-    await ctx.reply(f"却下しました。(ID: {approval_id})")
+    result = await reject_item(approval_id, reason=reason)
+    await ctx.reply(result)
+
+@bot.command(name="承認一覧")
+async def pending_list_cmd(ctx):
+    from bots.bot_actions import get_pending_approvals_detail
+    result = await get_pending_approvals_detail()
+    # 2000文字制限対応
+    if len(result) > 1900:
+        result = result[:1900] + "\n...(続きはWeb UIで確認)"
+    await ctx.reply(result)
 
 # Scheduled reports (JST timezone-aware)
 @tasks.loop(time=[dtime(hour=7, minute=0, tzinfo=JST)])
