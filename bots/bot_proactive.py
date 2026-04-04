@@ -59,17 +59,44 @@ class ProactiveIntelligence:
 
         return True
 
+    _ALERT_CACHE_FILE = "/tmp/syutain_alert_cooldowns.json"
+
+    def _load_alert_cache(self) -> dict:
+        """ファイルからクールダウン記録を復元（bot再起動に対応）"""
+        import json as _json
+        try:
+            with open(self._ALERT_CACHE_FILE, "r") as f:
+                data = _json.load(f)
+                # ISO形式文字列 → datetime に変換
+                return {k: datetime.fromisoformat(v) for k, v in data.items()}
+        except Exception:
+            return {}
+
+    def _save_alert_cache(self):
+        """クールダウン記録をファイルに永続化"""
+        import json as _json
+        try:
+            data = {k: v.isoformat() for k, v in self._last_emergency_alerts.items()}
+            with open(self._ALERT_CACHE_FILE, "w") as f:
+                _json.dump(data, f)
+        except Exception:
+            pass
+
     def can_emergency_alert(self, alert_key: str, cooldown_minutes: int = 5) -> bool:
-        """同一緊急アラートのスロットル（同じアラートを短時間で連発しない）"""
+        """同一緊急アラートのスロットル。ファイル永続化でbot再起動にも対応。"""
         now = datetime.now(timezone.utc)
+        # メモリキャッシュが空ならファイルから復元
+        if not self._last_emergency_alerts:
+            self._last_emergency_alerts = self._load_alert_cache()
         last = self._last_emergency_alerts.get(alert_key)
         if last and (now - last) < timedelta(minutes=cooldown_minutes):
             return False
         return True
 
     def record_emergency_alert(self, alert_key: str):
-        """緊急アラート送信を記録"""
+        """緊急アラート送信を記録（メモリ + ファイル永続化）"""
         self._last_emergency_alerts[alert_key] = datetime.now(timezone.utc)
+        self._save_alert_cache()
 
     def record_report(self):
         """報告を記録"""
