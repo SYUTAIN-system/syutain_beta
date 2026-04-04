@@ -1,4 +1,4 @@
-# SYUTAINβ V25（V30統合版）- Claude Code 絶対ルール26条
+# SYUTAINβ V25（V30統合版）- Claude Code 絶対ルール28条
 
 このファイルはClaude Codeがこのプロジェクトで作業する際に必ず守るべきルールです。
 
@@ -28,3 +28,5 @@
 24. 新しい判断基準はdaichi_dialogue_logに記録すること
 25. セッション終了時にmemory_manager.save_session_memory()を必ず実行すること
 26. 島原大知のtabooカテゴリ（persona_memory category='taboo'）は絶対に違反しないこと
+27. コード変更後は「出来てるはず」と推測せず、必ず実機で動作確認を行うこと。scheduler/Discord bot/全リモートノードへのデプロイ反映を確認し、構文チェック・行数一致・機能テストを実行すること
+28. scheduler再起動時はDiscord botも再起動が必要（別プロセス）。デプロイ時は両方の再起動と動作確認を行うこと
