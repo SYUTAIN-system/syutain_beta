@@ -353,20 +353,29 @@ async def check_emergency_alerts() -> str | None:
             except Exception as e:
                 logger.debug(f"リソース監視チェック失敗: {e}")
 
-            # 5. 予算90%超過
+            # 5. 予算90%超過（1日1回 + 閾値変化時のみ再通知）
             try:
                 import os
-                daily_budget = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "80")))
+                daily_budget = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "120")))
                 daily_spent = await conn.fetchval(
                     "SELECT COALESCE(SUM(amount_jpy), 0) FROM llm_cost_log WHERE recorded_at::date = CURRENT_DATE"
                 )
                 if daily_budget > 0 and daily_spent:
                     ratio = float(daily_spent) / daily_budget
                     if ratio >= 0.9:
-                        key = "budget_90"
-                        if proactive.can_emergency_alert(key, cooldown_minutes=30):
+                        # 閾値段階: 90%, 100%, 120% でそれぞれ1回だけ通知
+                        if ratio >= 1.2:
+                            key = "budget_120pct"
+                        elif ratio >= 1.0:
+                            key = "budget_100pct"
+                        else:
+                            key = "budget_90pct"
+                        # 各閾値につき1日1回（1440分=24時間）
+                        if proactive.can_emergency_alert(key, cooldown_minutes=1440):
+                            severity = "緊急" if ratio >= 1.0 else "警告"
                             alerts.append(
-                                f"\U0001f6a8 **緊急: 予算超過** 日次予算{ratio*100:.0f}%消費 (\\{float(daily_spent):.0f}/\\{daily_budget:.0f}円)"
+                                f"\U0001f6a8 **{severity}: 予算{'超過' if ratio >= 1.0 else '警告'}** "
+                                f"日次予算{ratio*100:.0f}%消費 (\\{float(daily_spent):.0f}/\\{daily_budget:.0f}円)"
                             )
                             proactive.record_emergency_alert(key)
             except Exception as e:
