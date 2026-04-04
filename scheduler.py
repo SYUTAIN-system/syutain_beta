@@ -597,6 +597,24 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # intel速報 X投稿（毎日11:30 JST）
+            self._scheduler.add_job(
+                self.intel_bulletin_x,
+                CronTrigger(hour=11, minute=30, timezone="Asia/Tokyo"),
+                id="intel_bulletin_x",
+                name="intel速報X投稿（毎日11:30）",
+                replace_existing=True,
+            )
+
+            # 週次インテルダイジェスト（毎週日曜20:00 JST）
+            self._scheduler.add_job(
+                self.weekly_intel_digest,
+                CronTrigger(day_of_week="sun", hour=20, minute=0, timezone="Asia/Tokyo"),
+                id="weekly_intel_digest",
+                name="週次インテルダイジェスト（日曜20:00）",
+                replace_existing=True,
+            )
+
             # ドキュメンタリー記事生成 #1（毎週水曜10:00 JST）
             self._scheduler.add_job(
                 self.documentary_generation,
