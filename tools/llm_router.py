@@ -37,6 +37,7 @@ _COST_RATES_JPY_PER_1K = {
     "claude-haiku-4-5":     {"input": 0.150,  "output": 0.750},   # $1.00/$5.00 per 1M
     "gpt-5-nano":           {"input": 0.0075, "output": 0.060},   # $0.05/$0.40 per 1M
     "gemini-2.5-flash-lite": {"input": 0.01125, "output": 0.045}, # $0.075/$0.30 per 1M
+    "gpt-4o-mini":          {"input": 0.0225, "output": 0.090},  # $0.15/$0.60 per 1M
     "_default":             {"input": 0.15,   "output": 0.15},
 }
 
