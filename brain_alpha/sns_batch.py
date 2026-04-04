@@ -174,6 +174,13 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
             hard_fail = True
             break
 
+    # 繰り返しポエムパターン検出（スコア上限0.30）
+    _overused_poems = ["風が止み", "画面は真っ暗", "息を殺し", "カットは続いて",
+                       "光の粒子", "静かにつなぎ", "指先を伸ばす", "紡ぎ出す"]
+    _poem_hits = sum(1 for p in _overused_poems if p in text)
+    if _poem_hits >= 2:
+        hard_fail = True
+
     # --- 軸1: 人間味 (0-1, w=0.17) ---
     # 口語表現、感情語、不完全さ、独白感が高評価
     human_score = 0.35  # ベースライン（0.3→0.35: 日本語の普通の文でも最低限の人間味あり）
@@ -567,7 +574,13 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     # daichi_content_patterns構造ガイド + NG語（全プラットフォーム共通）
     content_structure_guide = (
         "\n【投稿の構造ルール（daichi_content_patterns準拠）】\n"
-        "- 冒頭は必ず具体的な場面・体験・感覚から入れ。「AIは〜」「近年〜」のような抽象的な書き出しは禁止。\n"
+        "- 冒頭は毎回異なるパターンで入れ（同じ導入は禁止）。以下からランダムに選べ:\n"
+        "  A) 具体的な数字から入る（例:「52,438行。全部AIが書いた」「月987円。それが全コスト」）\n"
+        "  B) 問いかけから入る（例:「AIが嘘をついたらどう気づく？」「54回暴走を止めた仕組みの話」）\n"
+        "  C) 短い事実の断言（例:「3日間、誰も気づかなかった」「設計書を25回書き直した」）\n"
+        "  D) 日常の一瞬から入る（例:「さっきコード壊した」「朝5時、アラートが鳴った」）\n"
+        "- 「風が止み」「画面は真っ暗」「息を殺し」��カットは続く」系のポエム表現は禁止。繰り返し使われすぎている。\n"
+        "- 「AIは〜」「近年〜」のような抽象的な書き出しも禁止。\n"
         "- 例: 「深夜3時、画面が止まった」「正直、怖かった」「さっきコード壊した」\n"
         "- 自己開示を恐れるな。弱さ・恐怖・葛藤・失敗を隠さない。\n"
         "- 核心は短い一文で断言。「設計なき実装の末路だった」のように切れ味良く。\n"
@@ -1219,6 +1232,33 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             if not draft:
                 results["rejected"] += 1
                 continue
+
+            # === セマンティック重複チェック（直近投稿と類似していたらreject）===
+            try:
+                # 直近15投稿の内容と比較
+                _is_duplicate = False
+                draft_words = set(draft[:100])
+                for rp in recent_posts:
+                    if not rp:
+                        continue
+                    rp_words = set(rp[:100])
+                    # Jaccard類似度（文字レベル）
+                    intersection = len(draft_words & rp_words)
+                    union = len(draft_words | rp_words)
+                    if union > 0 and intersection / union > 0.6:
+                        _is_duplicate = True
+                        break
+                # さらに、キーフレーズの完全一致チェック
+                _key_phrases = ["風が止み", "画面は真っ暗", "息を殺し", "カットは続いて"]
+                _phrase_matches = sum(1 for kp in _key_phrases if kp in draft)
+                if _phrase_matches >= 2:
+                    _is_duplicate = True
+                if _is_duplicate:
+                    results["rejected"] += 1
+                    logger.info(f"セマンティック重複reject: {platform}/{account} — {draft[:40]}...")
+                    continue
+            except Exception:
+                pass
 
             # === HarnessLinter: 投稿前の機械的制約チェック ===
             try:
