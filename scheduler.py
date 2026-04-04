@@ -597,6 +597,24 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # SYUTAINβ日報（毎日12:00 JST — note無料連載用）
+            self._scheduler.add_job(
+                self.daily_syutain_report,
+                CronTrigger(hour=12, minute=0, timezone="Asia/Tokyo"),
+                id="daily_syutain_report",
+                name="SYUTAINβ日報（毎日12:00）",
+                replace_existing=True,
+            )
+
+            # Xスレッド（月木10:00 JST）
+            self._scheduler.add_job(
+                self.weekly_x_thread,
+                CronTrigger(day_of_week="mon,thu", hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="weekly_x_thread",
+                name="Xスレッド生成（月木10:00）",
+                replace_existing=True,
+            )
+
             # intel速報 X投稿（毎日11:30 JST）
             self._scheduler.add_job(
                 self.intel_bulletin_x,
@@ -4249,6 +4267,227 @@ class SyutainScheduler:
                 logger.info(f"weekly_intel_digest: 生成完了 ({len(digest_text)}文字, {len(rows)}件)")
         except Exception as e:
             logger.error(f"weekly_intel_digestエラー: {e}")
+
+    async def daily_syutain_report(self):
+        """毎日12:00 JST: SYUTAINβ日報（note無料連載用）をローカルLLMで自動生成"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+            from tools.event_logger import log_event
+            import os as _os
+
+            async with get_connection() as conn:
+                # 直近24時間のシステム実データを収集
+                data = {}
+
+                # LLMコスト
+                cost = await conn.fetchrow(
+                    "SELECT count(*) as calls, COALESCE(SUM(amount_jpy),0) as total FROM llm_cost_log WHERE recorded_at > NOW() - INTERVAL '24 hours'"
+                )
+                data["llm"] = {"calls": cost["calls"], "cost_jpy": round(float(cost["total"]), 2)} if cost else {}
+
+                # SNS投稿
+                sns = await conn.fetch(
+                    "SELECT platform, count(*) as cnt FROM posting_queue WHERE status='posted' AND posted_at > NOW() - INTERVAL '24 hours' GROUP BY platform"
+                )
+                data["sns"] = {r["platform"]: r["cnt"] for r in sns}
+
+                # エラー
+                errors = await conn.fetchval(
+                    "SELECT count(*) FROM event_log WHERE severity IN ('error','critical') AND created_at > NOW() - INTERVAL '24 hours'"
+                )
+                data["errors_24h"] = errors or 0
+
+                # LoopGuard
+                lg = await conn.fetchval(
+                    "SELECT count(*) FROM loop_guard_events WHERE created_at > NOW() - INTERVAL '24 hours'"
+                )
+                data["loopguard_24h"] = lg or 0
+
+                # ゴール
+                goals = await conn.fetch(
+                    "SELECT status, count(*) as cnt FROM goal_packets WHERE created_at > NOW() - INTERVAL '24 hours' GROUP BY status"
+                )
+                data["goals"] = {r["status"]: r["cnt"] for r in goals}
+
+                # イベント総数
+                events = await conn.fetchval(
+                    "SELECT count(*) FROM event_log WHERE created_at > NOW() - INTERVAL '24 hours'"
+                )
+                data["events_24h"] = events or 0
+
+                # 暗号通貨（最新BTC価格）
+                btc = await conn.fetchval(
+                    "SELECT payload->>'price' FROM event_log WHERE event_type='trade.price_snapshot' AND payload->>'pair'='BTC_JPY' ORDER BY created_at DESC LIMIT 1"
+                )
+                data["btc_jpy"] = btc or "N/A"
+
+                # ローカルLLMで日報生成
+                model_sel = choose_best_model_v6(
+                    task_type="content", quality="medium",
+                    budget_sensitive=True, needs_japanese=True,
+                )
+                result = await call_llm(
+                    prompt=(
+                        f"以下のSYUTAINβ実データから、今日のシステム日報を書いてください。\n\n"
+                        f"## データ\n{json.dumps(data, ensure_ascii=False, indent=2)}\n\n"
+                        f"## 出力ルール\n"
+                        f"- 500-800字で簡潔に\n"
+                        f"- 島原大知の一人称「僕」で、Build in Publicのドキュメンタリーとして書く\n"
+                        f"- 数字は全て実データをそのまま使う。捏造禁止\n"
+                        f"- 「壊れたこと」「動いていること」「気づいたこと」の3構成\n"
+                        f"- タイトルを1行目に（例: 「SYUTAINβ日報 #N — 今日は○○が壊れた」）\n"
+                        f"- 外部AIニュース解説は禁止。SYUTAINβ内部の出来事のみ\n"
+                    ),
+                    system_prompt="SYUTAINβの日報ライター。島原大知の文体で、実データに基づく日報を書く。",
+                    model_selection=model_sel,
+                )
+
+                report_text = result.get("text", "").strip()
+                if report_text and len(report_text) > 100:
+                    # ファイル保存
+                    from datetime import datetime as _dt
+                    drafts_dir = _os.path.join(_os.path.dirname(__file__), "data", "artifacts", "note_drafts")
+                    _os.makedirs(drafts_dir, exist_ok=True)
+                    filename = f"daily_report_{_dt.now().strftime('%Y%m%d')}.md"
+                    filepath = _os.path.join(drafts_dir, filename)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(report_text)
+
+                    await log_event("content.daily_report", "task", {
+                        "length": len(report_text), "filepath": filepath,
+                        "model": result.get("model_used"),
+                    })
+
+                    # Discord通知
+                    try:
+                        from tools.discord_notify import notify_discord
+                        await notify_discord(
+                            f"📓 SYUTAINβ日報生成完了 ({len(report_text)}字)\n"
+                            f"保存先: {filepath}"
+                        )
+                    except Exception:
+                        pass
+
+                    logger.info(f"daily_syutain_report: {len(report_text)}字 saved to {filepath}")
+        except Exception as e:
+            logger.error(f"daily_syutain_reportエラー: {e}")
+
+    async def weekly_x_thread(self):
+        """月木 10:00 JST: Xスレッド用コンテンツ（4-6ツイート）をローカルLLMで生成"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+            from tools.event_logger import log_event
+
+            weekday = datetime.now().weekday()
+            if weekday == 0:  # 月曜: 先週の数値スレッド
+                thread_theme = "weekly_metrics"
+                thread_title = "先週のSYUTAINβ運用数値"
+            elif weekday == 3:  # 木曜: 壊れた話スレッド
+                thread_theme = "weekly_failures"
+                thread_title = "今週壊れたもの・直したもの"
+            else:
+                return  # 月木以外はスキップ
+
+            async with get_connection() as conn:
+                data = {}
+
+                if thread_theme == "weekly_metrics":
+                    # 先週の数値データ
+                    llm = await conn.fetchrow(
+                        "SELECT count(*) as calls, COALESCE(SUM(amount_jpy),0) as cost FROM llm_cost_log WHERE recorded_at > NOW() - INTERVAL '7 days'"
+                    )
+                    data["llm_calls_7d"] = llm["calls"] if llm else 0
+                    data["llm_cost_7d"] = round(float(llm["cost"]), 2) if llm else 0
+
+                    sns = await conn.fetchrow(
+                        "SELECT count(*) as total FROM posting_queue WHERE status='posted' AND posted_at > NOW() - INTERVAL '7 days'"
+                    )
+                    data["sns_posted_7d"] = sns["total"] if sns else 0
+
+                    events = await conn.fetchval(
+                        "SELECT count(*) FROM event_log WHERE created_at > NOW() - INTERVAL '7 days'"
+                    )
+                    data["events_7d"] = events or 0
+
+                    lg = await conn.fetchval(
+                        "SELECT count(*) FROM loop_guard_events WHERE created_at > NOW() - INTERVAL '7 days'"
+                    )
+                    data["loopguard_7d"] = lg or 0
+
+                elif thread_theme == "weekly_failures":
+                    # 今週のエラーデータ
+                    errors = await conn.fetch(
+                        "SELECT event_type, count(*) as cnt FROM event_log WHERE severity IN ('error','critical') AND created_at > NOW() - INTERVAL '7 days' GROUP BY event_type ORDER BY cnt DESC LIMIT 5"
+                    )
+                    data["errors"] = [{"type": r["event_type"], "count": r["cnt"]} for r in errors]
+
+                    lg = await conn.fetch(
+                        "SELECT layer_name, count(*) as cnt FROM loop_guard_events WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY layer_name ORDER BY cnt DESC"
+                    )
+                    data["loopguard"] = [{"layer": r["layer_name"], "count": r["cnt"]} for r in lg]
+
+                model_sel = choose_best_model_v6(
+                    task_type="content", quality="medium",
+                    budget_sensitive=True, needs_japanese=True,
+                )
+                result = await call_llm(
+                    prompt=(
+                        f"以下のSYUTAINβ実データから、Xスレッド（4-6ツイート）を生成してください。\n\n"
+                        f"## テーマ: {thread_title}\n"
+                        f"## データ\n{json.dumps(data, ensure_ascii=False, indent=2)}\n\n"
+                        f"## 出力ルール\n"
+                        f"- 各ツイートは日本語140字以内（厳守）\n"
+                        f"- 1ツイート目: フックとなる数字や事実\n"
+                        f"- 2-4ツイート目: 詳細（実データ引用必須）\n"
+                        f"- 最終ツイート: 学びor次週の課題\n"
+                        f"- 各ツイートを「---」で区切って出力\n"
+                        f"- 一人称「僕」。島原大知として書く\n"
+                        f"- 数字は実データをそのまま使う。捏造禁止\n"
+                        f"- Build in Public: SYUTAINβの実体験のみ。外部AIニュース解説禁止\n"
+                    ),
+                    system_prompt="SYUTAINβのXスレッドライター。Build in Public方針で実データに基づくスレッドを書く。",
+                    model_selection=model_sel,
+                )
+
+                thread_text = result.get("text", "").strip()
+                if thread_text and len(thread_text) > 50:
+                    # スレッドを分割してposting_queueに投入
+                    tweets = [t.strip() for t in thread_text.split("---") if t.strip()]
+                    scheduled_time = datetime.now().replace(hour=12, minute=0, second=0)
+
+                    for i, tweet in enumerate(tweets[:6]):
+                        if len(tweet) > 150:
+                            tweet = tweet[:147] + "..."
+                        thread_ctx = json.dumps({"thread_id": f"thread_{datetime.now().strftime('%Y%m%d')}_{thread_theme}", "position": i + 1, "total": len(tweets)})
+                        await conn.execute(
+                            """INSERT INTO posting_queue
+                               (platform, account, content, scheduled_at, status, quality_score, theme_category, thread_context)
+                               VALUES ('x', 'syutain', $1, $2, 'pending', 0.80, $3, $4)""",
+                            tweet,
+                            scheduled_time + timedelta(minutes=i * 3),
+                            f"thread_{thread_theme}",
+                            thread_ctx,
+                        )
+
+                    await log_event("content.x_thread_generated", "task", {
+                        "theme": thread_theme, "tweets": len(tweets),
+                        "model": result.get("model_used"),
+                    })
+
+                    try:
+                        from tools.discord_notify import notify_discord
+                        await notify_discord(
+                            f"🧵 Xスレッド生成: {thread_title} ({len(tweets)}ツイート)\n"
+                            f"12:00から3分間隔で投稿予定"
+                        )
+                    except Exception:
+                        pass
+
+                    logger.info(f"weekly_x_thread: {thread_theme} {len(tweets)}tweets queued")
+        except Exception as e:
+            logger.error(f"weekly_x_threadエラー: {e}")
 
     def stop(self):
         """スケジューラーを停止"""
