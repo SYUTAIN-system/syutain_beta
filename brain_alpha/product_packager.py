@@ -87,10 +87,22 @@ def _extract_category(text: str) -> str:
 
 def _split_content(body: str) -> tuple[str, str]:
     """記事を無料プレビュー部分と有料部分に分割"""
+    # content_pipelineが既に「---ここから有料---」マーカーを含んでいる場合、そこで分割
+    paywall_markers = ["---ここから有料---", "ここから有料---", "---ここから有料"]
+    for marker in paywall_markers:
+        if marker in body:
+            pos = body.index(marker)
+            preview = body[:pos].rstrip()
+            full = body[pos + len(marker):].lstrip()
+            # プレビュー末尾に有料誘導（まだなければ追加）
+            if "ここから先は有料です" not in preview:
+                preview += "\n\n---\n\n**ここから先は有料です。** 全文を読むには購入してください。"
+            return preview, full
+
     if len(body) <= FREE_PREVIEW_LENGTH:
         return body, ""
 
-    # 文の区切りで分割（500文字付近）
+    # マーカーなし: 文の区切りで分割（500文字付近）
     split_pos = FREE_PREVIEW_LENGTH
     for sep in ["。\n", "。", "\n\n", "\n"]:
         pos = body.rfind(sep, 0, FREE_PREVIEW_LENGTH + 100)
@@ -101,7 +113,6 @@ def _split_content(body: str) -> tuple[str, str]:
     preview = body[:split_pos].rstrip()
     full = body[split_pos:].lstrip()
 
-    # プレビュー末尾に有料誘導
     preview += "\n\n---\n\n**ここから先は有料です。** 全文を読むには購入してください。"
 
     return preview, full

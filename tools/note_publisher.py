@@ -185,7 +185,15 @@ class NotePublisher:
         import tempfile
 
         title = package.get("title", "")
-        body = package.get("body_preview", "") + "\n\n---ここから有料---\n\n" + package.get("body_full", "")
+        body_preview = package.get("body_preview", "")
+        body_full = package.get("body_full", "")
+        # 既にペイウォールマーカーが含まれている場合は追加しない
+        if body_full and "ここから有料" not in body_preview:
+            body = body_preview + "\n\n---ここから有料---\n\n" + body_full
+        elif body_full:
+            body = body_preview + "\n\n" + body_full
+        else:
+            body = body_preview
         price = package.get("price_jpy", 0)
         tags = package.get("tags", [])
         if isinstance(tags, str):

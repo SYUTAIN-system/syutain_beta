@@ -367,18 +367,35 @@ def mechanical_quality_check(content: str) -> dict:
 
         # === 15. 重複コンテンツチェック（本文が2回出力されていないか） ===
         max_points += 1.0
-        # 500字以上の連続ブロックが2回出現していないかチェック
-        content_body = content[200:]  # ヘッダー部分をスキップ
         _duplicate_found = False
-        if len(content_body) > 2000:
-            # 記事の前半500字ブロックが後半にも出現するか
-            test_block = content_body[100:600]
-            second_occurrence = content_body.find(test_block, 600)
-            if second_occurrence > 0:
+        if len(content) > 2000:
+            # 方法1: タイトル行（H1）が2回出現
+            h1_lines = [l for l in lines if l.strip().startswith("# ") and len(l.strip()) > 5]
+            if len(h1_lines) >= 2 and h1_lines[0].strip() == h1_lines[1].strip():
                 _duplicate_found = True
-                issues.append("重複コンテンツ検出: 本文が2回出力されている可能性")
-        if not _duplicate_found:
-            score_points += 1.0
+                issues.append("重複コンテンツ検出: タイトル（H1）が2回出現")
+            # 方法2: 200字ブロックが後半にも出現
+            if not _duplicate_found:
+                content_body = content[200:]
+                test_block = content_body[100:400]
+                if test_block:
+                    second = content_body.find(test_block, 400)
+                    if second > 0:
+                        _duplicate_found = True
+                        issues.append("重複コンテンツ検出: 本文ブロックが2回出力")
+            # 方法3: 「---ここから有料---」マーカーが2回以上
+            if not _duplicate_found:
+                paywall_count = content.count("ここから有料")
+                if paywall_count >= 2:
+                    _duplicate_found = True
+                    issues.append(f"重複コンテンツ検出: ペイウォールマーカーが{paywall_count}回出現")
+        if _duplicate_found:
+            # 重複はD判定（即reject）
+            return {
+                "score": 0.0, "rank": "D", "issues": issues, "passed": False,
+                "details": {"duplicate_detected": True, "meta_leaked": False},
+            }
+        score_points += 1.0
 
         # スコア算出
         score = round(score_points / max_points, 3) if max_points > 0 else 0.0
