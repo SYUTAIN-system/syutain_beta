@@ -615,6 +615,31 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # Bluesky intel長文投稿（毎日12:30/15:30 JST — 2本生成）
+            self._scheduler.add_job(
+                self.intel_bulletin_bluesky,
+                CronTrigger(hour=12, minute=30, timezone="Asia/Tokyo"),
+                id="intel_bulletin_bluesky_1",
+                name="Bluesky intel投稿#1（12:30）",
+                replace_existing=True,
+            )
+            self._scheduler.add_job(
+                self.intel_bulletin_bluesky,
+                CronTrigger(hour=15, minute=30, timezone="Asia/Tokyo"),
+                id="intel_bulletin_bluesky_2",
+                name="Bluesky intel投稿#2（15:30）",
+                replace_existing=True,
+            )
+
+            # GitHub README自動更新（毎日09:30 JST）
+            self._scheduler.add_job(
+                self.update_github_readme,
+                CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
+                id="update_github_readme",
+                name="GitHub README更新（毎日09:30）",
+                replace_existing=True,
+            )
+
             # intel速報 X投稿（毎日11:30 JST）
             self._scheduler.add_job(
                 self.intel_bulletin_x,
@@ -4264,6 +4289,134 @@ class SyutainScheduler:
                 logger.info(f"weekly_intel_digest: 生成完了 ({len(digest_text)}文字, {len(rows)}件)")
         except Exception as e:
             logger.error(f"weekly_intel_digestエラー: {e}")
+
+    async def intel_bulletin_bluesky(self):
+        """Bluesky intel長文投稿（毎日13:00/16:00 — 日2本）: intel_itemsからSYUTAINβ視点でコメント"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+
+            async with get_connection() as conn:
+                # 今日のBluesky intel投稿数を確認
+                today_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM posting_queue
+                    WHERE platform = 'bluesky' AND theme_category = 'intel_bulletin'
+                    AND scheduled_at > CURRENT_DATE
+                """) or 0
+                if today_count >= 2:
+                    logger.info("intel_bulletin_bluesky: 本日2本生成済み（スキップ）")
+                    return
+
+                rows = await conn.fetch("""
+                    SELECT title, summary, source, importance_score
+                    FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '48 hours'
+                    AND importance_score >= 0.4
+                    AND source IN ('overseas_trend', 'english_article', 'trend_detector', 'tavily', 'crypto_research')
+                    ORDER BY importance_score DESC
+                    LIMIT 5
+                """)
+                if not rows:
+                    return
+
+                # 今日まだ使っていないアイテムを選択
+                item = rows[min(today_count, len(rows) - 1)]
+                model_sel = choose_best_model_v6(
+                    task_type="content", quality="medium",
+                    budget_sensitive=True, needs_japanese=True,
+                )
+                result = await call_llm(
+                    prompt=(
+                        f"以下の情報から、Bluesky投稿文を1つ生成してください。\n"
+                        f"タイトル: {item['title']}\n"
+                        f"要約: {(item['summary'] or '')[:200]}\n"
+                        f"ソース: {item['source']}\n\n"
+                        f"ルール:\n"
+                        f"- 200-280文字\n"
+                        f"- SYUTAINβの情報収集システムが検出した情報として書く\n"
+                        f"- 「SYUTAINβの情報パイプラインが検出:」で始める\n"
+                        f"- 事実を簡潔に述べた後、SYUTAINβの運用との関連を1-2文で\n"
+                        f"- Build in Public: 自分のシステムとの関連を必ず入れる\n"
+                        f"投稿文のみ出力:"
+                    ),
+                    system_prompt="SYUTAINβのBluesky投稿生成。280文字以内。",
+                    model_selection=model_sel, max_tokens=400,
+                )
+                draft = (result.get("text") or "").strip()
+                if draft:
+                    if len(draft) > 300:
+                        draft = draft[:297] + "..."
+                    from datetime import datetime as dt
+                    from zoneinfo import ZoneInfo
+                    jst = dt.now(ZoneInfo("Asia/Tokyo"))
+                    # 1本目→13:00、2本目→16:00
+                    post_hour = 13 if today_count == 0 else 16
+                    await conn.execute(
+                        """INSERT INTO posting_queue
+                           (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                           VALUES ('bluesky', 'syutain', $1, $2, 'pending', 0.75, 'intel_bulletin')""",
+                        draft, jst.replace(hour=post_hour, minute=0, second=0, microsecond=0),
+                    )
+                    logger.info(f"intel_bulletin_bluesky: 投稿キュー追加 ({len(draft)}文字, {post_hour}:00予定)")
+        except Exception as e:
+            logger.error(f"intel_bulletin_blueskyエラー: {e}")
+
+    async def update_github_readme(self):
+        """毎日09:30 JST: READMEにシステム状況を自動反映"""
+        try:
+            import os as _os
+            from tools.db_pool import get_connection
+
+            readme_path = _os.path.join(_os.path.dirname(__file__), "README.md")
+            if not _os.path.exists(readme_path):
+                return
+
+            async with get_connection() as conn:
+                # 最新のシステム統計を取得
+                llm_count = await conn.fetchval("SELECT count(*) FROM llm_cost_log") or 0
+                llm_cost = await conn.fetchval("SELECT COALESCE(SUM(amount_jpy), 0) FROM llm_cost_log") or 0
+                events = await conn.fetchval("SELECT count(*) FROM event_log") or 0
+                sns = await conn.fetchval("SELECT count(*) FROM posting_queue WHERE status='posted'") or 0
+
+                # READMEの末尾に統計セクションを更新
+                readme = open(readme_path, "r", encoding="utf-8").read()
+
+                stats_section = (
+                    f"\n---\n\n"
+                    f"## Live Stats (auto-updated)\n\n"
+                    f"| Metric | Value |\n"
+                    f"|--------|-------|\n"
+                    f"| LLM Calls | {llm_count:,} |\n"
+                    f"| Total Cost | ¥{float(llm_cost):,.0f} |\n"
+                    f"| Events Logged | {events:,} |\n"
+                    f"| SNS Posts | {sns:,} |\n"
+                    f"| Last Updated | {datetime.now().strftime('%Y-%m-%d %H:%M JST')} |\n"
+                )
+
+                # 既存のLive Statsセクションを置換、なければ追記
+                if "## Live Stats" in readme:
+                    import re
+                    readme = re.sub(r'\n---\n\n## Live Stats.*$', stats_section, readme, flags=re.DOTALL)
+                else:
+                    readme += stats_section
+
+                with open(readme_path, "w", encoding="utf-8") as f:
+                    f.write(readme)
+
+                # git commit & push
+                import subprocess
+                subprocess.run(["git", "add", "README.md"], cwd=_os.path.dirname(__file__), capture_output=True)
+                result = subprocess.run(
+                    ["git", "commit", "-m", f"Update live stats ({datetime.now().strftime('%Y-%m-%d')})"],
+                    cwd=_os.path.dirname(__file__), capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    subprocess.run(["git", "push", "origin", "main"], cwd=_os.path.dirname(__file__), capture_output=True)
+                    logger.info("README live stats updated and pushed")
+                else:
+                    logger.info("README: no changes to commit")
+        except Exception as e:
+            logger.error(f"update_github_readmeエラー: {e}")
 
     async def daily_syutain_report(self):
         """毎日12:00 JST: SYUTAINβ日報（note無料連載用）をローカルLLMで自動生成"""
