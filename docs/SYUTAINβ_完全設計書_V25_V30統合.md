@@ -3234,15 +3234,107 @@ node_modules/
 
 ---
 
+## 付録: ファイル・コード役割マップ
+
+島原大知が構造を把握するためのガイド。「このファイルは何をしていて、何に影響するか」。
+
+### コア制御（変更時にシステム全体に影響）
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `scheduler.py`（4,918行） | **全自動ジョブの司令塔**。SNSバッチ、noteドラフト、暗号通貨収集、提案処理、日報、品質チェック等の全スケジュール管理。ここを変えると全ての定期処理に影響 | SNS投稿タイミング、note記事生成、コスト予測、モード切替 |
+| `tools/llm_router.py`（1,121行） | **全LLM呼び出しの交通整理**。どのタスクにどのモデル（ローカル/API）を使うか決める。`choose_best_model_v6()`が全呼び出しの入口 | LLMコスト、応答速度、品質 |
+| `CLAUDE.md`（26条） | **Claude Codeの絶対ルール**。Claude Codeセッション開始時に読まれる | コード生成の方針全体 |
+| `feature_flags.yaml`（v30） | **機能のON/OFF**。Web UIから参照 | 各機能の有効/無効 |
+
+### SNS投稿関連
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `brain_alpha/sns_batch.py`（1,400行+） | **SNS投稿の生成エンジン**。テーマ選定→プロンプト構築→LLM生成→品質スコアリング→重複チェック→ハッシュタグ付与→キュー投入 | 49件/日のSNS投稿の内容・品質・ハッシュタグ |
+| `tools/social_tools.py`（830行） | **SNS投稿の実行**。X/Bluesky/Threadsへの実際のAPI送信。Blueskyのリンクカード（facets）もここ | 投稿の送信成功/失敗、リンクの機能 |
+| `strategy/daichi_content_patterns.md` | 島原大知の文体パターン。sns_batchのプロンプトに注入される | 投稿の文体・トーン |
+| `strategy/daichi_writing_style.md` | 島原大知の文体ルール | 同上 |
+
+### note記事関連
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `brain_alpha/content_pipeline.py`（1,348行） | **note記事の6段階生成パイプライン**。テーマ選定→タイトル→構成→初稿→リライト→批評。Build in Public方針、一人称「僕」、実データ注入がここ | 記事のテーマ・内容・品質 |
+| `brain_alpha/note_quality_checker.py`（1,236行） | **記事の品質ゲート**。15項目機械チェック+ファクト検証+Haiku+GPT-5.4の4段階。ここを通過しないと公開されない | 記事の公開可否 |
+| `brain_alpha/product_packager.py` | 品質チェック通過後の記事を「商品パッケージ」化。無料/有料分割、価格設定（FREE_UNTIL）、承認キュー投入 | 記事の無料/有料分類、公開パイプラインへの投入 |
+| `tools/note_publisher.py`（677行） | **noteへの実際の公開処理**。SSH→BRAVO→Playwright経由。URL検証、リトライ、SNS告知 | 記事がnote.comに実際に公開されるか |
+| `scripts/note_publish_playwright.py`（478行） | BRAVOで動くPlaywrightスクリプト。ログイン→記事入力→公開ボタン→マイページ検証 | 公開の成功/失敗 |
+| `strategy/note_genre_templates.py` | タイトル生成の3軸テンプレート（キーワード×切り口×感情） | タイトルの構造 |
+
+### 提案・承認
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `agents/proposal_engine.py`（39,465B） | **3層提案エンジン**。Layer1提案→Layer2反論→Layer3代替案。Build in Public方針、スコアキャップ、未リリースモデル検証がここ | 「次に何をすべきか」の提案内容 |
+| `agents/approval_manager.py` | **承認フロー管理**。Tier1(人間)/Tier2(自動+通知)/Tier3(完全自動)。SNS投稿・商品公開・価格設定はここを通る | 何が自動承認され、何が人間の判断を必要とするか |
+
+### 情報収集
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `tools/info_pipeline.py`（29,895B） | 6ソースからの情報収集（Tavily/Jina/YouTube/RSS/競合/海外トレンド） | intel_itemsテーブルの内容 |
+| `tools/overseas_trend_detector.py`（233行） | 英語15キーワードで海外トレンド検出→日本語要約→DB保存 | 英語記事の日本語要約、SNS/記事の素材 |
+| `tools/tavily_client.py` | Tavily検索API | 外部検索の実行 |
+| `tools/jina_client.py` | Jina Reader API（全文取得） | 記事全文の取得、コスト（¥3/回） |
+
+### 安全装置
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `tools/loop_guard.py`（17,710B） | **9層ループ防止壁**。暴走を構造的に防ぐ | タスクの強制停止、エスカレーション |
+| `tools/budget_guard.py` | 予算ガード。日次¥120/月次¥2,000超過で停止 | API呼び出しの許可/拒否 |
+| `tools/emergency_kill.py` | 緊急停止。50ステップ/90%予算/5同一エラーで発動 | システム全体の即時停止 |
+| `tools/content_redactor.py` | 秘密情報除去（17パターン）。SNS/記事公開前に実行 | APIキー・IP等の漏洩防止 |
+
+### Discord Bot（Brain-β）
+
+| ファイル | 役割 | 影響範囲 |
+|---------|------|---------|
+| `bots/discord_bot.py` | **Discordボット本体**。コマンド（!承認、!予算設定等）、朝夕レポート | Discordでの操作全般 |
+| `bots/bot_conversation.py` | **チャット応答エンジン**。ACTIONタグ、プロアクティブ報告、自然言語コマンドガイド | 島原大知との対話の内容・品質 |
+| `bots/bot_actions.py` | **全34種のアクション**。承認/却下/予算設定/収益記録/ステータス確認等 | Discordから実行できる操作の範囲 |
+| `bots/bot_proactive.py` | **自律的な状態報告+緊急アラート**。予算超過/ノード障害/承認待ちの通知 | 通知の頻度・内容 |
+
+### 5段階自律ループ
+
+| ファイル | 役割 |
+|---------|------|
+| `agents/perceiver.py` | Step 1: 認識（14項目チェック、環境走査） |
+| `agents/planner.py` | Step 2: 計画（DAG生成、ノード割当） |
+| `agents/executor.py` | Step 3: 実行（NATSディスパッチ、2段階精錬） |
+| `agents/verifier.py` | Step 4: 検証（Sprint Contract照合） |
+| `agents/stop_decider.py` | Step 5: 停止判断（COMPLETE/CONTINUE/ESCALATE/STOP） |
+| `agents/os_kernel.py` | ループ全体の統合制御、ゴール管理 |
+
+### インフラ
+
+| ファイル | 役割 |
+|---------|------|
+| `app.py` | FastAPI（64エンドポイント）、Web UI API |
+| `worker_main.py` | リモートノード（BRAVO/CHARLIE/DELTA）のワーカー |
+| `tools/db_pool.py` | PostgreSQL接続プール |
+| `tools/db_init.py`（23,449B） | 45テーブルのDDL |
+| `tools/nats_client.py` | NATSメッセージング（6ストリーム） |
+| `tools/discord_notify.py` | Discord Webhook通知 |
+
+---
+
 ## 変更履歴
 
 | バージョン | 日付 | 変更者 | 内容 |
 |:--|:--|:--|:--|
 | V25 | 2026-03-15 | 島原大知 × Claude Opus 4.6 | 最終完全設計書。V20〜V24を再構成・統合 |
-| V25（V30統合版） | 2026-04-04 | 島原大知 × Claude Opus 4.6 | ALPHA LLM撤去、BRAVO 27B追加、KV Cache Q8全ノード、Build in Public方針、6層品質防御、SNS拡散力強化、英語記事取り込み、GitHub公開セキュリティ、夜間モード拡張（23:00-09:00）、月額予算¥2,000、note_draft_generation統合、**提案エンジン改修（スコアキャップ、全3層BIP方針、未リリースモデル外部検証、本文検査、DeepSeek V4事件対応）**、統計更新（52,325行Python/132ファイル）、スケジューラ70ジョブ |
+| V25（V30統合版） | 2026-04-04 | 島原大知 × Claude Opus 4.6 | ALPHA LLM撤去、BRAVO 27B追加、KV Cache Q8全ノード、Build in Public方針、6層品質防御、SNS拡散力強化、英語記事取り込み、GitHub公開セキュリティ、夜間モード拡張（23:00-09:00）、月額予算¥2,000、note_draft_generation統合、提案エンジン改修、統計更新 |
+| V25（V30統合版 rev.2） | 2026-04-04 | 島原大知 × Claude Opus 4.6 | **4/4午前〜午後の追加変更**: Ollama常駐化(KEEP_ALIVE=-1)、intel活用4施策(X速報/週次ダイジェスト/システム改善提案/経営日報注目トレンド)、SYUTAINβ日報(12:00毎日)、Xスレッド(月木10:00)、Bluesky intel投稿(日2本)、GitHub README自動更新(09:30)、高エンゲージメントリポスト(火金14:00)、note日報自動公開、SNSセマンティック重複チェック+ポエム禁止、Threadsハッシュタグ5個化、content/analysis/researchのローカルLLM移行、note記事一人称「僕」統一+年齢捏造防止+2重出力防止+ペイウォール結合修正、theme_hint漏洩防止、アラートファイル永続化、Discord完結型ワークフロー(!承認一覧/!予算設定/!収益記録/!charlie/!レビュー/!提案生成)、自然言語コマンドガイド、note公開マイページ検証、暗号通貨19通貨+変動リサーチ、Jinaコスト¥3修正、AutoAgent方式SNS品質自動改善ループ、ファイル役割マップ追加 |
 
 ---
 
 最終更新：2026年4月4日
 設計者：島原大知 × Claude Opus 4.6
-バージョン：V25（V30統合版）
+バージョン：V25（V30統合版 rev.2）
