@@ -1194,3 +1194,101 @@ async def get_alpha_queue_status() -> dict:
         }
     except Exception as e:
         return {"error": f"キュー取得失敗: {e}"}
+
+
+# ===== V30: Discord完結型操作（Web UI不要化）=====
+
+
+@_register("set_budget")
+async def set_budget(daily: str = "", monthly: str = "") -> str:
+    """予算上限を変更。例: set_budget daily=150 monthly=2500"""
+    import os
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    lines = open(env_path, "r").readlines()
+    changes = []
+    if daily:
+        daily_val = int(daily)
+        lines = [l if not l.startswith("DAILY_API_BUDGET_JPY=") else f"DAILY_API_BUDGET_JPY={daily_val}\n" for l in lines]
+        changes.append(f"日次: ¥{daily_val}")
+    if monthly:
+        monthly_val = int(monthly)
+        lines = [l if not l.startswith("MONTHLY_API_BUDGET_JPY=") else f"MONTHLY_API_BUDGET_JPY={monthly_val}\n" for l in lines]
+        changes.append(f"月次: ¥{monthly_val}")
+    if changes:
+        with open(env_path, "w") as f:
+            f.writelines(lines)
+        return f"✅ 予算変更: {', '.join(changes)}\n⚠️ scheduler再起動で反映"
+    return "使い方: set_budget daily=150 monthly=2500"
+
+
+@_register("record_revenue")
+async def record_revenue(amount: str = "0", platform: str = "note", product: str = "", note: str = "") -> str:
+    """収益を記録。例: record_revenue 980 note 記事タイトル"""
+    amount_jpy = int(amount)
+    async with get_connection() as conn:
+        await conn.execute(
+            """INSERT INTO commerce_transactions
+               (platform, product_name, revenue_jpy, notes, created_at)
+               VALUES ($1, $2, $3, $4, NOW())""",
+            platform, product or f"{platform}収益", amount_jpy, note,
+        )
+    return f"💰 収益記録: ¥{amount_jpy:,} ({platform}) {product}"
+
+
+@_register("charlie_mode")
+async def charlie_mode(mode: str = "status") -> str:
+    """CHARLIE Win11/Ubuntu切替。mode=win11 or ubuntu or status"""
+    import os
+    ssh_user = os.getenv("REMOTE_SSH_USER", "user")
+    charlie_ip = os.getenv("CHARLIE_IP", "127.0.0.1")
+    if mode == "status":
+        async with get_connection() as conn:
+            state = await conn.fetchval(
+                "SELECT state FROM node_state WHERE node_name='charlie'"
+            )
+        return f"CHARLIE状態: {state or '不明'}"
+    elif mode == "win11":
+        try:
+            import asyncio
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", f"{ssh_user}@{charlie_ip}",
+                "bash", "~/syutain_beta/scripts/safe_shutdown.sh",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            return "🔄 CHARLIEシャットダウン開始（Win11切替用）"
+        except Exception as e:
+            return f"❌ CHARLIE操作失敗: {e}"
+    elif mode == "ubuntu":
+        return "ℹ️ CHARLIEをUbuntuに戻す場合は、物理的にUbuntuで起動してください。起動後にBrain-βが自動検出します。"
+    return "使い方: charlie_mode win11 / charlie_mode ubuntu / charlie_mode status"
+
+
+@_register("trigger_review")
+async def trigger_review() -> str:
+    """Brain-αレビューサイクルを手動トリガー"""
+    try:
+        from brain_alpha.startup_review import run_startup_review
+        result = await run_startup_review()
+        return f"🔄 Brain-αレビュー完了\n{str(result)[:500]}"
+    except Exception as e:
+        return f"❌ レビュートリガー失敗: {e}"
+
+
+@_register("generate_proposal")
+async def trigger_proposal(channel: str = "note") -> str:
+    """提案を手動生成"""
+    try:
+        from agents.proposal_engine import ProposalEngine
+        pe = ProposalEngine()
+        await pe.initialize()
+        result = await pe.generate_proposal(
+            context="Discord経由の手動提案リクエスト",
+            objective="revenue",
+            target_icp="hot_icp",
+            primary_channel=channel,
+        )
+        title = result.get("title", "無題")
+        score = result.get("total_score", 0)
+        return f"💡 提案生成: {title} (スコア: {score})"
+    except Exception as e:
+        return f"❌ 提案生成失敗: {e}"

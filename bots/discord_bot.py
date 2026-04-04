@@ -273,6 +273,45 @@ async def pending_list_cmd(ctx):
         result = result[:1900] + "\n...(続きはWeb UIで確認)"
     await ctx.reply(result)
 
+@bot.command(name="予算設定")
+async def budget_cmd(ctx, daily: int = 0, monthly: int = 0):
+    """予算変更。例: !予算設定 120 2000"""
+    from bots.bot_actions import set_budget
+    result = await set_budget(daily=str(daily) if daily else "", monthly=str(monthly) if monthly else "")
+    await ctx.reply(result)
+
+@bot.command(name="収益記録")
+async def revenue_cmd(ctx, amount: int = 0, platform: str = "note", *, product: str = ""):
+    """収益記録。例: !収益記録 980 note 記事タイトル"""
+    from bots.bot_actions import record_revenue
+    result = await record_revenue(amount=str(amount), platform=platform, product=product)
+    await ctx.reply(result)
+
+@bot.command(name="charlie")
+async def charlie_cmd(ctx, mode: str = "status"):
+    """CHARLIE操作。例: !charlie win11 / !charlie status"""
+    from bots.bot_actions import charlie_mode
+    result = await charlie_mode(mode=mode)
+    await ctx.reply(result)
+
+@bot.command(name="レビュー")
+async def review_cmd(ctx):
+    """Brain-αレビューを手動トリガー"""
+    from bots.bot_actions import trigger_review
+    await ctx.reply("🔄 レビュー実行中...")
+    result = await trigger_review()
+    if len(result) > 1900:
+        result = result[:1900] + "..."
+    await ctx.reply(result)
+
+@bot.command(name="提案生成")
+async def proposal_cmd(ctx, channel: str = "note"):
+    """提案を手動生成。例: !提案生成 note"""
+    from bots.bot_actions import trigger_proposal
+    await ctx.reply("💡 提案生成中...")
+    result = await trigger_proposal(channel=channel)
+    await ctx.reply(result)
+
 # Scheduled reports (JST timezone-aware)
 @tasks.loop(time=[dtime(hour=7, minute=0, tzinfo=JST)])
 async def morning_report():
