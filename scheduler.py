@@ -615,6 +615,15 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # 高エンゲージメント投稿リライト（火金14:00 JST）
+            self._scheduler.add_job(
+                self.repost_high_engagement,
+                CronTrigger(day_of_week="tue,fri", hour=14, minute=0, timezone="Asia/Tokyo"),
+                id="repost_high_engagement",
+                name="高エンゲージメントリポスト（火金14:00）",
+                replace_existing=True,
+            )
+
             # Bluesky intel長文投稿（毎日12:30/15:30 JST — 2本生成）
             self._scheduler.add_job(
                 self.intel_bulletin_bluesky,
@@ -4290,6 +4299,73 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"weekly_intel_digestエラー: {e}")
 
+    async def repost_high_engagement(self):
+        """火金14:00 JST: 過去の高エンゲージメント投稿をリライトして再投稿"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+
+            async with get_connection() as conn:
+                # 過去30日の高エンゲージメント投稿を取得
+                rows = await conn.fetch("""
+                    SELECT platform, content, quality_score,
+                        COALESCE(likes, 0) + COALESCE(reposts, 0) + COALESCE(replies, 0) as engagement
+                    FROM posting_queue
+                    WHERE status = 'posted' AND posted_at > NOW() - INTERVAL '30 days'
+                    AND (likes > 0 OR reposts > 0 OR replies > 0)
+                    ORDER BY engagement DESC LIMIT 5
+                """)
+                if not rows:
+                    logger.info("repost_high_engagement: 高エンゲージメント投稿なし")
+                    return
+
+                # 今日リポスト済みか確認
+                already = await conn.fetchval("""
+                    SELECT COUNT(*) FROM posting_queue
+                    WHERE theme_category = 'repost' AND scheduled_at > CURRENT_DATE
+                """) or 0
+                if already >= 2:
+                    return
+
+                top = rows[min(already, len(rows) - 1)]
+                original = top["content"][:200]
+
+                model_sel = choose_best_model_v6(
+                    task_type="content", quality="medium",
+                    budget_sensitive=True, needs_japanese=True,
+                )
+                result = await call_llm(
+                    prompt=(
+                        f"以下の過去のSNS投稿が好評でした。同じテーマで別の切り口でリライトしてください。\n\n"
+                        f"元投稿: {original}\n\n"
+                        f"ルール:\n"
+                        f"- 元投稿と全く同じ文にしない。切り口・表現を変える\n"
+                        f"- 同じテーマ・メッセージだが新鮮な表現で\n"
+                        f"- {top['platform']}向け。島原大知の一人称「僕」\n"
+                        f"- 150文字以内\n"
+                        f"投稿文のみ出力:"
+                    ),
+                    system_prompt="SNSリライト。元の良さを活かしつつ新鮮に。",
+                    model_selection=model_sel, max_tokens=200,
+                )
+                rewrite = (result.get("text") or "").strip()
+                if rewrite and len(rewrite) > 20:
+                    if len(rewrite) > 150:
+                        rewrite = rewrite[:147] + "..."
+                    from datetime import datetime as dt
+                    from zoneinfo import ZoneInfo
+                    jst = dt.now(ZoneInfo("Asia/Tokyo"))
+                    await conn.execute(
+                        """INSERT INTO posting_queue
+                           (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                           VALUES ($1, 'syutain', $2, $3, 'pending', 0.75, 'repost')""",
+                        top["platform"], rewrite,
+                        jst.replace(hour=15, minute=0, second=0, microsecond=0),
+                    )
+                    logger.info(f"repost_high_engagement: リライト投稿キュー追加 ({top['platform']})")
+        except Exception as e:
+            logger.error(f"repost_high_engagementエラー: {e}")
+
     async def intel_bulletin_bluesky(self):
         """Bluesky intel長文投稿（毎日13:00/16:00 — 日2本）: intel_itemsからSYUTAINβ視点でコメント"""
         try:
@@ -4518,6 +4594,18 @@ class SyutainScheduler:
                         )
                     except Exception:
                         pass
+
+                    # note自動公開パイプラインに乗せる（無料記事として）
+                    try:
+                        title_line = report_text.split("\n", 1)[0].lstrip("#").strip()
+                        await conn.execute("""
+                            INSERT INTO product_packages
+                                (platform, title, body_preview, body_full, price_jpy, status, tags, category)
+                            VALUES ('note', $1, $2, '', 0, 'approved', '["SYUTAINβ","日報","AI","BuildInPublic"]', 'daily_report')
+                        """, title_line[:100], report_text)
+                        logger.info(f"daily_syutain_report: note公開パイプラインに追加")
+                    except Exception as pkg_err:
+                        logger.warning(f"daily_syutain_report: note公開パイプライン追加失敗: {pkg_err}")
 
                     logger.info(f"daily_syutain_report: {len(report_text)}字 saved to {filepath}")
         except Exception as e:

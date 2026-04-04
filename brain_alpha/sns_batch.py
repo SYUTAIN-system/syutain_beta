@@ -57,14 +57,18 @@ THEME_POOL = [
 
 # テーマ別ハッシュタグ（プラットフォーム別、最大2個）
 THEME_HASHTAGS = {
-    "AI技術": {"x": ["#AI開発", "#個人開発"], "threads": ["#AI", "#テック", "#個人開発"]},
-    "開発進捗": {"x": ["#SYUTAINβ", "#AI開発"], "threads": ["#AI", "#開発記録", "#非エンジニア"]},
-    "VTuber業界": {"x": ["#VTuber"], "threads": ["#VTuber", "#クリエイター"]},
-    "哲学/思考": {"x": [], "threads": ["#思考", "#エッセイ"]},
-    "ビジネス": {"x": ["#AI事業"], "threads": ["#ビジネス", "#AI活用"]},
-    "映画/映像": {"x": ["#映像制作"], "threads": ["#映像", "#クリエイター"]},
-    "業界批評": {"x": ["#AI"], "threads": ["#AI", "#テック"]},
-    "自己内省": {"x": [], "threads": ["#エッセイ"]},
+    "AI技術": {"x": ["#AI開発", "#個人開発"], "threads": ["#AI", "#テック", "#個人開発", "#自動化", "#AIエージェント"]},
+    "開発進捗": {"x": ["#SYUTAINβ", "#AI開発"], "threads": ["#AI", "#開発記録", "#非エンジニア", "#個人開発", "#BuildInPublic"]},
+    "VTuber業界": {"x": ["#VTuber"], "threads": ["#VTuber", "#クリエイター", "#映像制作", "#エンタメ", "#配信"]},
+    "哲学/思考": {"x": [], "threads": ["#思考", "#エッセイ", "#AI時代", "#働き方", "#自己成長"]},
+    "ビジネス": {"x": ["#AI事業"], "threads": ["#ビジネス", "#AI活用", "#起業", "#フリーランス", "#副業"]},
+    "映画/映像": {"x": ["#映像制作"], "threads": ["#映像", "#クリエイター", "#VFX", "#動画編集", "#カラグレ"]},
+    "業界批評": {"x": ["#AI"], "threads": ["#AI", "#テック", "#業界分析", "#トレンド", "#テクノロジー"]},
+    "自己内省": {"x": [], "threads": ["#エッセイ", "#日記", "#振り返り", "#成長", "#挑戦"]},
+    "日常": {"x": [], "threads": ["#日常", "#フリーランス", "#クリエイター"]},
+    "音楽/趣味": {"x": [], "threads": ["#趣味", "#SunoAI", "#作詞"]},
+    "カメラ/写真": {"x": ["#写真"], "threads": ["#カメラ", "#写真", "#撮影"]},
+    "雑談": {"x": [], "threads": ["#雑談", "#つぶやき"]},
 }
 
 # 時間帯別テーマ重み
@@ -1342,9 +1346,9 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         tag_str = " " + " ".join(tags[:2])
                         if len(draft) + len(tag_str) <= 150:
                             draft = draft + tag_str
-                    # Threads: 末尾に追加（280字制限に余裕がある）
+                    # Threads: 末尾に追加（500字制限に余裕がある、最大5個）
                     elif platform == "threads":
-                        tag_str = "\n" + " ".join(tags[:3])
+                        tag_str = "\n" + " ".join(tags[:5])
                         if len(draft) + len(tag_str) <= 500:
                             draft = draft + tag_str
             except Exception:
