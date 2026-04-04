@@ -211,7 +211,7 @@ async def enrich_overseas_trends() -> int:
                 AND processed = false
                 AND url IS NOT NULL AND url != ''
                 ORDER BY importance_score DESC
-                LIMIT 5
+                LIMIT 3
             """)
 
             for row in rows:

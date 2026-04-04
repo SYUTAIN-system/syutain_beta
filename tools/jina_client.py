@@ -20,8 +20,8 @@ logger = logging.getLogger("syutain.jina_client")
 JINA_API_KEY = os.getenv("JINA_API_KEY", "")
 JINA_READER_URL = "https://r.jina.ai"
 
-# 日次呼び出し上限（安全リミット: 100回/日）
-JINA_DAILY_LIMIT = int(os.getenv("JINA_DAILY_LIMIT", "100"))
+# 日次呼び出し上限（¥3/回 × 20回 = ¥60/日）
+JINA_DAILY_LIMIT = int(os.getenv("JINA_DAILY_LIMIT", "20"))
 # 1回あたりの概算コスト（円）— $0.02/page = ¥3.00
 JINA_COST_PER_CALL_JPY = float(os.getenv("JINA_COST_PER_CALL_JPY", "3.0"))
 

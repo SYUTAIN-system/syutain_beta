@@ -1006,7 +1006,7 @@ class SyutainScheduler:
                     SELECT id, url FROM intel_items
                     WHERE review_flag = 'actionable' AND url IS NOT NULL
                     AND (metadata IS NULL OR metadata::text NOT LIKE '%full_text%')
-                    LIMIT 10
+                    LIMIT 5
                 """)
                 for row in rows:
                     if not row["url"]:
