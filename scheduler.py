@@ -615,6 +615,15 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # SNSプロンプト自動改善（毎週水曜03:00 JST — AutoAgent方式）
+            self._scheduler.add_job(
+                self.auto_improve_sns_prompt,
+                CronTrigger(day_of_week="wed", hour=3, minute=0, timezone="Asia/Tokyo"),
+                id="auto_improve_sns_prompt",
+                name="SNS品質自動改善（水曜03:00）",
+                replace_existing=True,
+            )
+
             # 高エンゲージメント投稿リライト（火金14:00 JST）
             self._scheduler.add_job(
                 self.repost_high_engagement,
@@ -4298,6 +4307,116 @@ class SyutainScheduler:
                 logger.info(f"weekly_intel_digest: 生成完了 ({len(digest_text)}文字, {len(rows)}件)")
         except Exception as e:
             logger.error(f"weekly_intel_digestエラー: {e}")
+
+    async def auto_improve_sns_prompt(self):
+        """毎週水曜03:00: SNS投稿プロンプトの自動改善ループ（AutoAgent方式）
+        1. 先週のSNS品質スコアを分析
+        2. 低スコアの失敗パターンをグループ化
+        3. ローカルLLMでプロンプト改善案を生成
+        4. 改善案をDB記録（次回バッチで適用→スコア計測→keep/discard）
+        """
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
+                # 1. 先週のSNS品質データ収集
+                stats = await conn.fetch("""
+                    SELECT platform,
+                        round(avg(quality_score)::numeric, 3) as avg_quality,
+                        count(*) as total,
+                        count(*) FILTER (WHERE quality_score < 0.65) as low_quality,
+                        count(*) FILTER (WHERE status = 'rejected') as rejected
+                    FROM posting_queue
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    GROUP BY platform
+                """)
+                if not stats:
+                    return
+
+                # 2. 低品質投稿のパターン分析
+                low_posts = await conn.fetch("""
+                    SELECT platform, content, quality_score, theme_category
+                    FROM posting_queue
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    AND quality_score < 0.65 AND quality_score > 0
+                    ORDER BY quality_score ASC LIMIT 10
+                """)
+
+                high_posts = await conn.fetch("""
+                    SELECT platform, content, quality_score, theme_category
+                    FROM posting_queue
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    AND quality_score >= 0.80
+                    ORDER BY quality_score DESC LIMIT 5
+                """)
+
+                stats_text = "\n".join(
+                    f"{r['platform']}: avg={r['avg_quality']}, total={r['total']}, low={r['low_quality']}, rejected={r['rejected']}"
+                    for r in stats
+                )
+                low_samples = "\n---\n".join(
+                    f"[{r['platform']}/{r['theme_category']}] score={r['quality_score']:.3f}\n{r['content'][:150]}"
+                    for r in low_posts[:5]
+                )
+                high_samples = "\n---\n".join(
+                    f"[{r['platform']}/{r['theme_category']}] score={r['quality_score']:.3f}\n{r['content'][:150]}"
+                    for r in high_posts[:3]
+                )
+
+                # 3. ローカルLLMで改善案を生成
+                model_sel = choose_best_model_v6(
+                    task_type="analysis", quality="medium",
+                    budget_sensitive=True, needs_japanese=True,
+                )
+                result = await call_llm(
+                    prompt=(
+                        f"以下のSNS投稿の品質分析データに基づき、投稿品質を改善するための具体的な提案を3つ出してください。\n\n"
+                        f"## 先週のスコア統計\n{stats_text}\n\n"
+                        f"## 低品質投稿サンプル（改善が必要）\n{low_samples}\n\n"
+                        f"## 高品質投稿サンプル（参考）\n{high_samples}\n\n"
+                        f"## 出力形式（JSON）\n"
+                        f'{{"improvements": ['
+                        f'{{"issue": "問題の説明", "fix": "具体的な改善策", "apply_to": "x/bluesky/threads/all"}},'
+                        f'...]}}\n\n'
+                        f"ルール:\n"
+                        f"- 低品質投稿の共通パターンを特定する\n"
+                        f"- 高品質投稿の何が良いかを分析する\n"
+                        f"- 「風が止み」等のポエム表現は既に禁止済み\n"
+                        f"- 具体的で実装可能な提案にする\n"
+                        f"JSONのみ出力:"
+                    ),
+                    system_prompt="SNS品質改善アナリスト。データに基づく具体的提案を出す。",
+                    model_selection=model_sel, max_tokens=800,
+                )
+
+                analysis_text = (result.get("text") or "").strip()
+
+                # 4. 改善提案をDB記録 + event_log
+                await log_event("sns.auto_improve_analysis", "system", {
+                    "stats": stats_text,
+                    "low_count": sum(r["low_quality"] for r in stats),
+                    "analysis": analysis_text[:500],
+                    "model": result.get("model_used"),
+                })
+
+                # Discord通知
+                try:
+                    from tools.discord_notify import notify_discord
+                    total_posts = sum(r["total"] for r in stats)
+                    avg_all = sum(float(r["avg_quality"]) * r["total"] for r in stats) / max(total_posts, 1)
+                    await notify_discord(
+                        f"🔄 SNS品質自動分析（AutoAgent方式）\n"
+                        f"先週: {total_posts}投稿, 平均品質{avg_all:.3f}\n"
+                        f"改善提案:\n{analysis_text[:300]}"
+                    )
+                except Exception:
+                    pass
+
+                logger.info(f"auto_improve_sns_prompt: 分析完了 ({len(analysis_text)}文字)")
+        except Exception as e:
+            logger.error(f"auto_improve_sns_promptエラー: {e}")
 
     async def repost_high_engagement(self):
         """火金14:00 JST: 過去の高エンゲージメント投稿をリライトして再投稿"""
