@@ -188,7 +188,6 @@ _DELTA_TASKS = {
 _LOCAL_OK_TASKS = {
     "drafting",           # ローカル0.76 > API 0.71（実データ）
     "variation_gen",      # 多様性生成、品質より量
-    # chat_light は _DEEPSEEK_FINAL_TASKS で処理（ローカルではなくDeepSeek V3.2）
     "sns_draft",          # 短文、ローカルで十分
     "quality_scoring",    # スコアリング用（低品質でOK）
     "persona_extraction", # キーワード抽出系
@@ -197,15 +196,15 @@ _LOCAL_OK_TASKS = {
     "intel_summary",      # 要約、ローカルで十分
     "batch_process",      # 大量処理、コスト重視
     "bulk_draft",         # 大量ドラフト
+    "content",            # V30: ローカル0.62≈API 0.61（同等）。常駐LLMで高速化済み
+    "analysis",           # V30: ローカル0.67 vs API 0.75。差は小さくコスト削減優先
+    "research",           # V30: ローカル0.62 vs API 0.66。差は小さくコスト削減優先
 }
 
 # APIの方が品質が高いタスク → Gemini Flash（無料枠）優先
-# 実データ: analysis ローカル0.67 < API 0.75、research ローカル0.62 < API 0.66
+# V30: content/analysis/researchをローカルに移動。品質が重要なものだけAPI
 _API_PREFERRED_TASKS = {
-    "analysis",           # 分析力が必要。ローカル0.67 < API 0.75
-    "research",           # 調査の網羅性。ローカル0.62 < API 0.66
     "proposal",           # 3層提案、構造化思考が必要
-    "content",            # コンテンツ生成、ローカル0.62≈API 0.61だがAPIの方が安定
     "note_article",       # 長文記事、品質重要
     "product_desc",       # 商品説明、購買に直結
     "booth_description",  # Booth商品説明
