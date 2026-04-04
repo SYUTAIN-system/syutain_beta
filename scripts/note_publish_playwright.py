@@ -227,13 +227,18 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
                     except Exception:
                         continue
 
-                # Step 6c: 確認ダイアログの「公開する」「公開」「投稿する」ボタン
+                # Step 6c: 公開設定画面の「投稿する」ボタン + 確認ダイアログ
                 confirm_selectors = [
-                    'button:has-text("公開する")',
+                    # ヘッダー右上の「投稿する」ボタン（公開設定画面）
                     'button:has-text("投稿する")',
+                    'button:has-text("公開する")',
+                    # ヘッダー/ナビ内のボタン
+                    'header button:has-text("投稿")',
+                    'nav button:has-text("投稿")',
+                    '[class*="header"] button:has-text("投稿")',
+                    # ダイアログ内の公開ボタン
                     'button:has-text("OK")',
                     'button:has-text("はい")',
-                    # ダイアログ内の公開ボタン（2つ目の公開ボタン）
                     'dialog button:has-text("公開")',
                     '[role="dialog"] button:has-text("公開")',
                     '.modal button:has-text("公開")',
@@ -300,13 +305,25 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
                 pass
 
             # 公開成功の判定
-            # 正式な公開URLは note.com/{user}/n/{note_id} の形式
-            # エディタURLは editor.note.com/notes/{note_id}/... の形式
             import re as _re
             is_published_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', final_url))
             is_editor_url = "editor.note.com" in final_url or "/edit/" in final_url or "/publish/" in final_url
 
-            if is_published_url:
+            # ページ内テキストで「記事が公開されました」を検出（モーダル表示中もeditor URLのまま）
+            try:
+                page_text = await page.inner_text("body")
+                has_publish_success_text = "記事が公開されました" in page_text
+            except Exception:
+                has_publish_success_text = False
+
+            if is_published_url or has_publish_success_text:
+                # URLまたはテキストで公開成功を確認
+                if has_publish_success_text and not is_published_url:
+                    # モーダル表示中でURLはまだeditor — note IDからURLを構築
+                    note_id_match = _re.search(r'/notes/([a-z0-9]+)', final_url)
+                    if note_id_match:
+                        final_url = f"https://note.com/5070/n/{note_id_match.group(1)}"
+                        print(f"  → 公開成功モーダル検出。URLを構築: {final_url}")
                 result["success"] = True
                 result["url"] = final_url
                 print(f"\n公開成功: {final_url}")

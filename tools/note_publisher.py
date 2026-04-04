@@ -77,11 +77,31 @@ class NotePublisher:
 
             logger.info(f"note.com公開開始: pkg={package_id} 『{package['title']}』")
 
-            # 2+3. SSH経由でBRAVOのPlaywrightで直接ログイン+記事作成
-            create_result = await self._publish_via_ssh(package)
-            if not create_result.get("success"):
-                result["error"] = create_result.get("error", "記事作成失敗")
+            # 2+3. SSH経由でBRAVOのPlaywrightで直接ログイン+記事作成（最大2回試行）
+            create_result = None
+            for attempt in range(2):
+                create_result = await self._publish_via_ssh(package)
+                if create_result.get("success"):
+                    break
+                logger.warning(
+                    f"note公開試行{attempt+1}/2 失敗: {create_result.get('error', '不明')}"
+                )
+                if attempt == 0:
+                    # 1回目失敗: 10秒待って再試行
+                    await asyncio.sleep(10)
+
+            if not create_result or not create_result.get("success"):
+                result["error"] = create_result.get("error", "記事作成失敗（2回試行）") if create_result else "記事作成失敗"
                 await self._update_status(package_id, "publish_failed", error=result["error"])
+                try:
+                    from tools.discord_notify import notify_error
+                    await notify_error(
+                        "note_publish_failed",
+                        f"note公開失敗（2回試行）: {package.get('title', '')[:50]}\n{result['error'][:100]}",
+                        severity="error",
+                    )
+                except Exception:
+                    pass
                 return result
 
             publish_url = create_result.get("url", "")
