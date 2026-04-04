@@ -304,41 +304,33 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
             except Exception:
                 pass
 
-            # 公開成功の判定
+            # === 公開成功の判定（3段階） ===
             import re as _re
-            is_published_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', final_url))
-            is_editor_url = "editor.note.com" in final_url or "/edit/" in final_url or "/publish/" in final_url
 
-            # ページ内テキストで「記事が公開されました」を検出（モーダル表示中もeditor URLのまま）
+            # 判定1: ページ内テキストで「記事が公開されました」を検出
+            has_publish_success_text = False
             try:
                 page_text = await page.inner_text("body")
                 has_publish_success_text = "記事が公開されました" in page_text
+                if has_publish_success_text:
+                    print("  → 「記事が公開されました」テキスト検出 ✓")
             except Exception:
-                has_publish_success_text = False
+                pass
 
-            if is_published_url or has_publish_success_text:
-                # URLまたはテキストで公開成功を確認
-                if has_publish_success_text and not is_published_url:
-                    # モーダル表示中でURLはまだeditor — note IDからURLを構築
-                    note_id_match = _re.search(r'/notes/([a-z0-9]+)', final_url)
-                    if note_id_match:
-                        final_url = f"https://note.com/5070/n/{note_id_match.group(1)}"
-                        print(f"  → 公開成功モーダル検出。URLを構築: {final_url}")
-                result["success"] = True
-                result["url"] = final_url
-                print(f"\n公開成功: {final_url}")
-            elif is_editor_url:
-                # エディタURLのままの場合、公開ボタンを再試行
-                print(f"  ⚠ まだエディタ画面: {final_url}")
+            # 判定2: URLが公開URLか
+            is_published_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', final_url))
+            is_editor_url = "editor.note.com" in final_url or "/edit/" in final_url or "/publish/" in final_url
+
+            # まだエディタで、成功テキストもない場合は再試行
+            if is_editor_url and not has_publish_success_text:
+                print(f"  ⚠ エディタ画面のまま: {final_url}")
                 print("  → 公開ボタン再試行...")
-
-                # 再試行: 画面上の全ボタンから公開系を探す
                 retry_selectors = [
-                    'button:has-text("公開する")',
                     'button:has-text("投稿する")',
+                    'button:has-text("公開する")',
+                    'header button:has-text("投稿")',
                     '[role="dialog"] button:has-text("公開")',
                     'button:has-text("公開")',
-                    'button[type="submit"]',
                 ]
                 retry_clicked = False
                 for sel in retry_selectors:
@@ -353,37 +345,101 @@ async def publish_article(title: str, body: str, price: int = 0, tags: list = No
                                 text = await btn.text_content()
                                 print(f"  → 再試行クリック: '{text}' ({sel})")
                                 await btn.click()
-                                await asyncio.sleep(4)
+                                await asyncio.sleep(5)
                                 retry_clicked = True
                                 break
                     except Exception:
                         continue
 
-                # 再試行後のURL確認
                 await asyncio.sleep(3)
-                retry_url = page.url
-                is_published_after_retry = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', retry_url))
+                try:
+                    page_text2 = await page.inner_text("body")
+                    if "記事が公開されました" in page_text2:
+                        has_publish_success_text = True
+                        print("  → 再試行後「記事が公開されました」テキスト検出 ✓")
+                except Exception:
+                    pass
+                final_url = page.url
+                is_published_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', final_url))
 
                 try:
                     await page.screenshot(path="/tmp/note_retry_result.png")
                 except Exception:
                     pass
 
-                if is_published_after_retry:
-                    result["success"] = True
-                    result["url"] = retry_url
-                    print(f"\n再試行後に公開成功: {retry_url}")
+            # === 判定3（最終確認）: マイページに遷移して記事の存在を確認 ===
+            verified_url = ""
+            if is_published_url or has_publish_success_text:
+                # note IDを取得（URLまたはエディタURLから）
+                note_id = ""
+                if is_published_url:
+                    m = _re.search(r'/n/([a-z0-9]+)', final_url)
+                    note_id = m.group(1) if m else ""
                 else:
-                    result["success"] = False
-                    result["url"] = retry_url
-                    result["error"] = f"公開完了を確認できませんでした（再試行後もエディタ: {retry_url}）"
-                    print(f"\n公開失敗: {retry_url}")
+                    m = _re.search(r'/notes/([a-z0-9]+)', final_url)
+                    note_id = m.group(1) if m else ""
+
+                if note_id:
+                    # マイページの記事一覧から公開されているか確認
+                    print(f"  → マイページで公開確認中... (note_id: {note_id})")
+                    try:
+                        await page.goto("https://note.com/5070", wait_until="networkidle", timeout=15000)
+                        await asyncio.sleep(2)
+                        # マイページのHTML内にnote_idが含まれるか
+                        mypage_html = await page.content()
+                        if note_id in mypage_html:
+                            verified_url = f"https://note.com/5070/n/{note_id}"
+                            print(f"  → マイページで記事確認成功 ✓: {verified_url}")
+                        else:
+                            print(f"  ⚠ マイページでnote_id '{note_id}' が見つからず")
+                            # 直接URLにアクセスして確認
+                            test_url = f"https://note.com/5070/n/{note_id}"
+                            try:
+                                resp = await page.goto(test_url, wait_until="domcontentloaded", timeout=10000)
+                                if resp and resp.status == 200:
+                                    verified_url = test_url
+                                    print(f"  → 直接URL確認成功 ✓: {verified_url}")
+                                else:
+                                    print(f"  ⚠ 直接URLアクセス: status={resp.status if resp else 'N/A'}")
+                            except Exception as url_err:
+                                print(f"  ⚠ 直接URLアクセス失敗: {url_err}")
+                    except Exception as mypage_err:
+                        print(f"  ⚠ マイページ確認失敗: {mypage_err}")
+                        # フォールバック: note_idからURL構築
+                        verified_url = f"https://note.com/5070/n/{note_id}"
+
+                    try:
+                        await page.screenshot(path="/tmp/note_verify_result.png")
+                    except Exception:
+                        pass
+
+            # === 最終判定 ===
+            if verified_url:
+                result["success"] = True
+                result["url"] = verified_url
+                print(f"\n公開確認完了: {verified_url}")
+            elif is_published_url:
+                result["success"] = True
+                result["url"] = final_url
+                print(f"\n公開成功（URL確認）: {final_url}")
+            elif has_publish_success_text:
+                # テキストで成功確認だがURL取得できず
+                note_id_match = _re.search(r'/notes/([a-z0-9]+)', final_url)
+                if note_id_match:
+                    constructed_url = f"https://note.com/5070/n/{note_id_match.group(1)}"
+                    result["success"] = True
+                    result["url"] = constructed_url
+                    print(f"\n公開成功（テキスト検出、URL構築）: {constructed_url}")
+                else:
+                    result["success"] = True
+                    result["url"] = final_url
+                    result["warning"] = "公開成功だが正式URL未取得"
+                    print(f"\n公開成功（テキスト検出）: {final_url}")
             else:
-                # 不明なURL — 成功とは判定しない
                 result["success"] = False
                 result["url"] = final_url
-                result["error"] = f"公開後のURL形式が不明: {final_url}"
-                print(f"\n不明な状態: {final_url}")
+                result["error"] = f"公開を確認できませんでした: {final_url}"
+                print(f"\n公開失敗: {final_url}")
 
         except Exception as e:
             result["error"] = str(e)
