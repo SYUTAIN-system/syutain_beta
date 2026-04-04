@@ -144,6 +144,26 @@ class ProposalEngine:
                         "UPDATE intel_items SET processed = true WHERE id = ANY($1::int[])",
                         used_ids,
                     )
+
+                # system_insightsを持つアイテムからシステム改善示唆を抽出
+                insight_rows = await conn.fetch(
+                    """SELECT title, metadata->>'system_insights' as system_insights
+                    FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '48 hours'
+                    AND metadata IS NOT NULL
+                    AND metadata::text LIKE '%system_insights%'
+                    AND metadata->>'system_insights' != ''
+                    ORDER BY importance_score DESC
+                    LIMIT 5"""
+                )
+                if insight_rows:
+                    lines.append("")
+                    lines.append("## システム改善示唆（intel_itemsから抽出）")
+                    for ir in insight_rows:
+                        insight_text = (ir['system_insights'] or '')[:150]
+                        if insight_text:
+                            lines.append(f"- {ir['title']}: {insight_text}")
+
                 return "\n".join(lines)
         except Exception as e:
             logger.warning(f"intel_items取得失敗: {e}")

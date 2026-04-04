@@ -822,6 +822,26 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # === intel活用ジョブ ===
+
+            # X @syutain_beta「今日のAI速報」（毎日11:30 JST）
+            self._scheduler.add_job(
+                self.intel_bulletin_x,
+                CronTrigger(hour=11, minute=30, timezone="Asia/Tokyo"),
+                id="intel_bulletin_x",
+                name="X AI速報投稿（毎日11:30）",
+                replace_existing=True,
+            )
+
+            # 週次インテルダイジェスト（毎週日曜20:00 JST）
+            self._scheduler.add_job(
+                self.weekly_intel_digest,
+                CronTrigger(day_of_week="sun", hour=20, minute=0, timezone="Asia/Tokyo"),
+                id="weekly_intel_digest",
+                name="週次インテルダイジェスト（日曜20:00）",
+                replace_existing=True,
+            )
+
             self._scheduler.start()
             logger.info("スケジューラー起動完了")
 
@@ -4024,6 +4044,193 @@ class SyutainScheduler:
                 )
         except Exception as e:
             logger.error(f"gstack週次振り返りエラー: {e}")
+
+    async def intel_bulletin_x(self):
+        """X @syutain_beta「今日のAI速報」: intel_itemsから重要アイテムを選定してX投稿キューに追加"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
+                # 直近24時間の重要intel_itemsを取得（importance_score >= 0.5）
+                rows = await conn.fetch("""
+                    SELECT id, title, source, importance_score, summary
+                    FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '24 hours'
+                    AND importance_score >= 0.5
+                    AND source IN ('overseas_trend', 'english_article', 'trend_detector', 'tavily')
+                    ORDER BY importance_score DESC
+                    LIMIT 3
+                """)
+                if not rows:
+                    logger.info("intel_bulletin_x: 重要アイテムなし（スキップ）")
+                    return
+
+                # 今日既に生成済みか確認
+                already = await conn.fetchval("""
+                    SELECT COUNT(*) FROM posting_queue
+                    WHERE platform = 'x' AND account = 'syutain'
+                    AND theme_category = 'intel_bulletin'
+                    AND scheduled_at > CURRENT_DATE
+                """)
+                if already and already > 0:
+                    logger.info("intel_bulletin_x: 本日既に生成済み")
+                    return
+
+                # トップ1アイテムでX投稿文を生成
+                top = rows[0]
+                model_sel = choose_best_model_v6(
+                    task_type="sns",
+                    quality="medium",
+                    budget_sensitive=True,
+                    needs_japanese=True,
+                )
+                prompt = (
+                    f"以下の情報から、X（Twitter）投稿文を1つ生成してください。\n"
+                    f"タイトル: {top['title']}\n"
+                    f"要約: {(top['summary'] or '')[:200]}\n"
+                    f"ソース: {top['source']}\n\n"
+                    f"フォーマット（150文字以内厳守）:\n"
+                    f"🌐 SYUTAINβ情報検出: [タイトル要約]. [SYUTAINβの視点からの1行コメント]\n\n"
+                    f"ルール:\n"
+                    f"- 150文字以内（絶対厳守）\n"
+                    f"- 冒頭は「🌐 SYUTAINβ情報検出:」で始める\n"
+                    f"- SYUTAINβがAIシステムとして検出したという視点\n"
+                    f"- ハッシュタグ不要\n"
+                    f"投稿文のみ出力:"
+                )
+                result = await call_llm(
+                    prompt=prompt,
+                    system_prompt="SYUTAINβのSNS投稿生成。150文字以内で簡潔に。",
+                    model_selection=model_sel,
+                    goal_id="intel_bulletin_x",
+                    max_tokens=200,
+                )
+                draft = (result.get("text") or "").strip()
+                if not draft or len(draft) > 150:
+                    # 150文字超の場合は切り詰め
+                    draft = draft[:147] + "..." if draft else None
+
+                if draft:
+                    from datetime import datetime as dt
+                    from zoneinfo import ZoneInfo
+                    jst_now = dt.now(ZoneInfo("Asia/Tokyo"))
+                    await conn.execute(
+                        """INSERT INTO posting_queue
+                           (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        "x", "syutain", draft,
+                        jst_now.replace(hour=12, minute=0, second=0, microsecond=0),
+                        "pending", 0.7, "intel_bulletin",
+                    )
+                    await log_event("intel.bulletin_x_queued", "system", {
+                        "intel_id": top["id"],
+                        "title": top["title"][:80],
+                        "draft_length": len(draft),
+                    })
+                    logger.info(f"intel_bulletin_x: 投稿キュー追加 ({len(draft)}文字)")
+        except Exception as e:
+            logger.error(f"intel_bulletin_xエラー: {e}")
+
+    async def weekly_intel_digest(self):
+        """週次インテルダイジェスト: 過去7日間のintel_itemsをまとめてBluesky+note_draftsに保存"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.llm_router import choose_best_model_v6, call_llm
+            from tools.event_logger import log_event
+
+            async with get_connection() as conn:
+                # 過去7日間のimportance_score >= 0.3のアイテムを取得
+                rows = await conn.fetch("""
+                    SELECT id, title, source, importance_score, summary, category
+                    FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    AND importance_score >= 0.3
+                    ORDER BY importance_score DESC
+                    LIMIT 10
+                """)
+                if len(rows) < 5:
+                    logger.info(f"weekly_intel_digest: アイテム不足 ({len(rows)}/5件) スキップ")
+                    return
+
+                # ソース別グループ化してコンテキスト作成
+                context_lines = []
+                for r in rows:
+                    context_lines.append(
+                        f"- [{r['source']}] {r['title']} "
+                        f"(重要度:{r['importance_score']:.1f}, カテゴリ:{r['category']})"
+                    )
+                    if r['summary']:
+                        context_lines.append(f"  要約: {(r['summary'] or '')[:100]}")
+
+                model_sel = choose_best_model_v6(
+                    task_type="content",
+                    quality="medium",
+                    budget_sensitive=True,
+                    needs_japanese=True,
+                )
+                prompt = (
+                    f"以下の今週SYUTAINβが収集した情報（{len(rows)}件）から、\n"
+                    f"「今週SYUTAINβが検出した注目情報」というタイトルの週次ダイジェストを生成してください。\n\n"
+                    f"## 収集情報\n"
+                    + "\n".join(context_lines) + "\n\n"
+                    f"## ルール\n"
+                    f"- 500文字以内\n"
+                    f"- 冒頭: 「📊 今週SYUTAINβが検出した注目情報（週次ダイジェスト）」\n"
+                    f"- トップ3-5件を簡潔に紹介\n"
+                    f"- SYUTAINβがAIシステムとして自動収集・選定した情報であることを明記\n"
+                    f"- Build in Public方針と矛盾しない（「システムが検出した情報」として出す）\n"
+                    f"ダイジェスト本文のみ出力:"
+                )
+                result = await call_llm(
+                    prompt=prompt,
+                    system_prompt="SYUTAINβの週次情報ダイジェスト生成。500文字以内で簡潔に。",
+                    model_selection=model_sel,
+                    goal_id="weekly_intel_digest",
+                    max_tokens=600,
+                )
+                digest_text = (result.get("text") or "").strip()
+                if not digest_text:
+                    logger.warning("weekly_intel_digest: LLM生成失敗")
+                    return
+
+                from datetime import datetime as dt
+                from zoneinfo import ZoneInfo
+                jst_now = dt.now(ZoneInfo("Asia/Tokyo"))
+
+                # Bluesky posting_queueに追加
+                await conn.execute(
+                    """INSERT INTO posting_queue
+                       (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    "bluesky", "syutain", digest_text[:300],
+                    jst_now.replace(hour=20, minute=30, second=0, microsecond=0),
+                    "pending", 0.8, "intel_digest_weekly",
+                )
+
+                # note_draftsにも保存
+                try:
+                    week_label = jst_now.strftime("%Y-W%W")
+                    await conn.execute(
+                        """INSERT INTO note_drafts
+                           (title, body, status, category, created_at)
+                           VALUES ($1, $2, $3, $4, NOW())""",
+                        f"今週SYUTAINβが検出した注目情報（{week_label}）",
+                        digest_text,
+                        "draft",
+                        "intel_digest",
+                    )
+                except Exception as e:
+                    logger.warning(f"weekly_intel_digest: note_drafts保存失敗（続行）: {e}")
+
+                await log_event("intel.weekly_digest_generated", "system", {
+                    "items_count": len(rows),
+                    "digest_length": len(digest_text),
+                })
+                logger.info(f"weekly_intel_digest: 生成完了 ({len(digest_text)}文字, {len(rows)}件)")
+        except Exception as e:
+            logger.error(f"weekly_intel_digestエラー: {e}")
 
     def stop(self):
         """スケジューラーを停止"""

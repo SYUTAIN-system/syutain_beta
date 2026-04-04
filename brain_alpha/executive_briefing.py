@@ -122,6 +122,23 @@ async def generate_executive_briefing() -> dict:
                 revenue = 0
             data["monthly_revenue"] = float(revenue)
 
+            # 注目トレンド（intel_itemsから直近24時間のトップ3）
+            try:
+                trend_rows = await conn.fetch("""
+                    SELECT title, source, importance_score
+                    FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '24 hours'
+                    AND importance_score >= 0.4
+                    ORDER BY importance_score DESC
+                    LIMIT 3
+                """)
+                data["trending_intel"] = [
+                    {"title": r["title"][:80], "source": r["source"], "score": float(r["importance_score"])}
+                    for r in trend_rows
+                ]
+            except Exception:
+                data["trending_intel"] = []
+
     except Exception as e:
         logger.error(f"経営日報データ収集失敗: {e}")
         return {"status": "error", "error": str(e)}
@@ -154,6 +171,9 @@ async def generate_executive_briefing() -> dict:
 
 **注意事項:**
 - （エラー、承認待ち、問題点を実データから記載）
+
+**🌐 注目トレンド（SYUTAINβ検出）:**
+- （trending_intelデータがあれば上位3件を簡潔に記載。なければ「検出なし」）
 
 **💡 今日やるべき1つのこと:**
 （Build in Public方針に沿った具体的なアクション1つ。外部AIツール販売の提案は禁止。SYUTAINβの運用改善・記録公開・リーチ拡大に関するアクションを提案すること）
