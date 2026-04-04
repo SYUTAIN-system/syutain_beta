@@ -346,6 +346,8 @@ def mechanical_quality_check(content: str) -> dict:
         _task_leak_patterns = [
             "を元に", "を書く", "する記事", "具体的な", "に関する記事",
             "trend_detector", "goal_id", "task_id", "package_id",
+            "intel_items", "persona_memory", "自由テーマ:", "独自視点で書く",
+            "他のメディアにない", "切り口を重視", "theme_hint",
         ]
         for pat in _task_leak_patterns:
             if pat in title_line:

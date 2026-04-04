@@ -3310,28 +3310,24 @@ class SyutainScheduler:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
 
     async def generate_daily_content_morning(self):
-        """07:30 JST: 海外トレンド先取り — trend_detector結果をベースに記事生成"""
+        """07:30 JST: SYUTAINβ運用レポート"""
         await self._generate_daily_content_impl(
             slot_name="morning",
-            theme_hint="海外トレンド先取り: trend_detectorが検出した日本語記事が少ない海外トレンドを元に、"
-                       "日本の読者向けに先取り解説する記事を書く。具体的なツール名・サービス名・数字を含めること。",
+            theme_hint=None,  # content_pipelineが実データからBIP方針でテーマ自動選定
         )
 
     async def generate_daily_content_midday(self):
-        """12:00 JST: SYUTAINβ実データベース — システム運用データから記事生成"""
+        """12:00 JST: SYUTAINβ実データ記事"""
         await self._generate_daily_content_impl(
             slot_name="midday",
-            theme_hint="SYUTAINβ実データベース: SYUTAINβの実際の運用データ（コスト・収益・エラー率・"
-                       "LLM使用量・SNSエンゲージメント等）を元に、AIシステム運用のリアルを語る記事を書く。"
-                       "数値の裏付けがある内容を優先すること。",
+            theme_hint=None,  # content_pipelineが実データからBIP方針でテーマ自動選定
         )
 
     async def generate_daily_content_evening(self):
-        """18:00 JST: 自由テーマ — intel_items + persona driven"""
+        """18:00 JST: SYUTAINβ自由テーマ"""
         await self._generate_daily_content_impl(
             slot_name="evening",
-            theme_hint="自由テーマ: intel_itemsで収集した最新情報とpersona_memoryの価値観を組み合わせて、"
-                       "島原大知の独自視点で書く自由テーマの記事。他のメディアにない切り口を重視すること。",
+            theme_hint=None,  # content_pipelineが実データからBIP方針でテーマ自動選定
         )
 
     async def generate_daily_content(self):
@@ -3523,10 +3519,11 @@ class SyutainScheduler:
             for r in results:
                 gpt5 = r.get("gpt5")
                 if gpt5 and gpt5.get("publish_verdict") == "publish_ready":
+                    from datetime import date as _date
+                    free_note = "（※6月まで無料公開）" if _date.today() < _date(2026, 6, 1) else ""
                     await notify_discord(
-                        f"✅ 記事『{r.get('title', '不明')}』が品質チェック通過。"
-                        f"推奨価格: ¥{gpt5.get('pricing_recommendation', '-')}。"
-                        f"チェックコスト: ¥{r.get('cost_jpy', 0):.1f}"
+                        f"✅ 記事『{r.get('title', '不明')[:50]}』が品質チェック通過。"
+                        f"チェックコスト: ¥{r.get('cost_jpy', 0):.1f}{free_note}"
                     )
                 elif gpt5 and gpt5.get("publish_verdict") == "needs_edit":
                     instructions = gpt5.get("edit_instructions", [])[:3]
