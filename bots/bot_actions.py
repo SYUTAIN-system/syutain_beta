@@ -1228,9 +1228,9 @@ async def record_revenue(amount: str = "0", platform: str = "note", product: str
     async with get_connection() as conn:
         await conn.execute(
             """INSERT INTO commerce_transactions
-               (platform, product_name, revenue_jpy, notes, created_at)
-               VALUES ($1, $2, $3, $4, NOW())""",
-            platform, product or f"{platform}収益", amount_jpy, note,
+               (platform, product_id, revenue_jpy, amount_jpy, status, created_at)
+               VALUES ($1, $2, $3, $4, 'completed', NOW())""",
+            platform, product or f"{platform}収益", amount_jpy, amount_jpy,
         )
     return f"💰 収益記録: ¥{amount_jpy:,} ({platform}) {product}"
 
