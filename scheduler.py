@@ -528,6 +528,16 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # Brain-β 健全性監査（1時間毎、幻覚確認劇/定型接頭辞/生例外/working_fact注入状況）
+            self._scheduler.add_job(
+                self.brain_beta_health_audit,
+                IntervalTrigger(hours=1),
+                id="brain_beta_health_audit",
+                name="Brain-β健全性監査（1h）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
             # Brain-α相互評価（毎日06:00）
             self._scheduler.add_job(
                 self.brain_cross_evaluate,
@@ -3505,6 +3515,15 @@ class SyutainScheduler:
             )
         except Exception as e:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
+
+    async def brain_beta_health_audit(self):
+        """2026-04-05 改善施策の実運用観測。
+        幻覚確認劇、定型接頭辞再発、生例外露出、working_fact注入を監査しアラート発砲。"""
+        try:
+            from tools.brain_beta_health_audit import run_audit
+            await run_audit()
+        except Exception as e:
+            logger.warning(f"brain_beta_health_audit 失敗: {e}")
 
     async def sunset_working_facts(self):
         """persona_memory の working_fact は寿命付き。
