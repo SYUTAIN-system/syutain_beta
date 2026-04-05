@@ -47,7 +47,8 @@ _DESTRUCTIVE_ACTIONS = {
     "charlie_mode",                                # ノードモード切替
     "escalate_alpha",                              # Brain-αへ指示送信
     "remind",                                      # リマインダー作成
-    "commission_article",                          # 記事執筆依頼（新規）
+    "commission_article",                          # 記事執筆依頼
+    "x_research",                                  # Grok X調査 (API コスト ~¥15-30)
 }
 
 # ユーザーが明示的に同意を示したと判定するキーワード
@@ -1418,3 +1419,59 @@ async def commission_article(arg: str = "") -> str:
         f"  構成: {structure_hint or '(自動選定)'}\n"
         f"Brain-α が次のサイクルで執筆開始する。完成したらこのチャットに通知する。"
     )
+
+
+@_register("x_research")
+async def x_research_action(arg: str = "") -> str:
+    """Grok (xAI) の Live Search を使って X のリアルタイムトレンドを調査。
+    arg 形式: "トピック" または "トピック|mode" (mode=balanced/tech/creator/business)
+    """
+    if not arg or not arg.strip():
+        return "❌ トピックが空です。例: x_research:AIエージェントの最新動向"
+    parts = arg.split("|", 1)
+    topic = parts[0].strip()[:300]
+    mode = parts[1].strip() if len(parts) >= 2 else "balanced"
+    if mode not in ("balanced", "tech", "creator", "business"):
+        mode = "balanced"
+    try:
+        from tools.x_trend_research import research_x_trends
+        result = await research_x_trends(
+            topic=topic, hours=24, count=5, mode=mode, save_to_intel=True,
+        )
+    except Exception as e:
+        return f"❌ X調査失敗: {e}"
+
+    if not result.get("ok"):
+        return f"❌ X調査失敗: {result.get('error', '不明')}"
+
+    parsed = result.get("parsed", {})
+    clusters = parsed.get("clusters", []) or []
+    conclusions = parsed.get("today_conclusions", []) or []
+    materials = parsed.get("materials", []) or []
+    cost = result.get("cost_jpy", 0.0)
+    saved = result.get("intel_saved", 0)
+
+    lines = [f"🔍 **X リサーチ: {topic}** (mode={mode}, cost=¥{cost:.1f}, intel保存={saved}件)\n"]
+    if clusters:
+        lines.append("**空気のクラスター:**")
+        for c in clusters[:5]:
+            if isinstance(c, dict):
+                lines.append(f"  - {c.get('name', '無題')}")
+        lines.append("")
+    if conclusions:
+        lines.append("**今日の狙うべきテーマ:**")
+        for t in conclusions[:3]:
+            lines.append(f"  • {t}")
+        lines.append("")
+    if materials:
+        lines.append("**素材 (上位):**")
+        for m in materials[:3]:
+            if not isinstance(m, dict):
+                continue
+            title = (m.get("note_angle") or m.get("summary") or "")[:80]
+            url = m.get("url", "")
+            lines.append(f"  • {title}")
+            if url:
+                lines.append(f"    {url}")
+    lines.append(f"\n全素材は intel_items テーブル (category='x_trend', source='grok_x_research') で参照可能")
+    return "\n".join(lines)[:1900]

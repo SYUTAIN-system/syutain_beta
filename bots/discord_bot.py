@@ -170,6 +170,35 @@ async def on_message(message):
             await save_message(channel_id, "syutain_beta", result)
             return
 
+    # ★ X リサーチ直接ルート (Grok xAI Live Search)
+    # パターン: "Xで〜を調べて" / "Xで〜調査" / "Grokで〜" / "xトレンド 〜"
+    _x_research_m = _re.match(
+        r'^(?:X(?:\s*\(Twitter\))?|Twitter|Grok|グロク|グロック)\s*で?\s*(.+?)'
+        r'(?:を?(?:調べて|調査して?|リサーチ|検索して?|探して?)|\s*トレンド)?\s*[。.!！]?\s*$',
+        user_msg, _re.IGNORECASE,
+    )
+    if not _x_research_m:
+        _x_research_m = _re.match(r'^[xX]トレンド\s+(.+)$', user_msg)
+    if _x_research_m:
+        _q = _x_research_m.group(1).strip()
+        # 短すぎ、または「今の状況」等の別ルート語とぶつかったら skip
+        _bad_prefixes = ("今の", "今日の", "昨日", "明日", "システム", "状況", "調子")
+        if (
+            len(_q) >= 3
+            and not any(_q.startswith(p) for p in _bad_prefixes)
+            and "状況" not in _q[:10]
+        ):
+            try:
+                from bots.bot_actions import x_research_action
+                await message.reply("🔍 Grok で X をリサーチ中... (30-60秒)", mention_author=False)
+                result = await x_research_action(_q)
+            except Exception as e:
+                logger.warning(f"X調査失敗: {e}")
+                result = f"X調査失敗: {e}"
+            await message.reply(result, mention_author=False)
+            await save_message(channel_id, "syutain_beta", result)
+            return
+
     # セッションコンテキスト取得
     ctx = session_manager.get_or_create(channel_id)
     ctx.touch()
@@ -397,6 +426,26 @@ async def commission_cmd(ctx, *, brief: str = ""):
         return
     from bots.bot_actions import commission_article
     result = await commission_article(brief)
+    await ctx.reply(result)
+
+@bot.command(name="xリサーチ", aliases=["xresearch", "Xリサーチ", "x_research"])
+async def x_research_cmd(ctx, *, topic: str = ""):
+    """Grok (xAI) で X トレンドをリサーチ。例: !xリサーチ AIエージェント動向
+    mode指定: !xリサーチ AI動向|tech (balanced/tech/creator/business)"""
+    if not topic.strip():
+        await ctx.reply(
+            "使い方: `!xリサーチ <トピック>` または `!xリサーチ <トピック>|<mode>`\n"
+            "mode: balanced(デフォルト) / tech / creator / business"
+        )
+        return
+    await ctx.reply(f"🔍 Grok で「{topic[:100]}」を X リサーチ中... (30-60秒)")
+    from bots.bot_actions import x_research_action
+    try:
+        result = await x_research_action(topic)
+    except Exception as e:
+        result = f"X調査失敗: {e}"
+    if len(result) > 1900:
+        result = result[:1900] + "\n...(省略)"
     await ctx.reply(result)
 
 @bot.command(name="予算設定")

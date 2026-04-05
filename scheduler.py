@@ -538,6 +538,24 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # Grok X トレンドリサーチ (朝 08:30 / 夕方 19:30 JST、1日2回)
+            self._scheduler.add_job(
+                self.grok_x_research_morning,
+                CronTrigger(hour=8, minute=30, timezone="Asia/Tokyo"),
+                id="grok_x_research_morning",
+                name="Grok Xリサーチ 朝（08:30 tech+creator）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            self._scheduler.add_job(
+                self.grok_x_research_evening,
+                CronTrigger(hour=19, minute=30, timezone="Asia/Tokyo"),
+                id="grok_x_research_evening",
+                name="Grok Xリサーチ 夕方（19:30 business+balanced）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
             # Brain-α相互評価（毎日06:00）
             self._scheduler.add_job(
                 self.brain_cross_evaluate,
@@ -3512,6 +3530,42 @@ class SyutainScheduler:
             await run_audit()
         except Exception as e:
             logger.warning(f"brain_beta_health_audit 失敗: {e}")
+
+    async def grok_x_research_morning(self):
+        """朝 08:30: tech モード + creator モードで X リサーチ。intel_items に蓄積。"""
+        try:
+            from tools.x_trend_research import research_x_trends
+            tech = await research_x_trends(
+                topic="AI エージェント、Claude Code、Codex、Build in Public、個人開発者の動き",
+                hours=24, count=5, mode="tech", save_to_intel=True,
+            )
+            creator = await research_x_trends(
+                topic="AI映像制作、VTuber、ドローン、広告マーケティングのトレンド",
+                hours=24, count=5, mode="creator", save_to_intel=True,
+            )
+            total_cost = (tech.get("cost_jpy", 0.0) or 0.0) + (creator.get("cost_jpy", 0.0) or 0.0)
+            total_saved = (tech.get("intel_saved", 0) or 0) + (creator.get("intel_saved", 0) or 0)
+            logger.info(f"Grok朝Xリサーチ完了: cost=¥{total_cost:.1f} intel保存={total_saved}件")
+        except Exception as e:
+            logger.error(f"grok_x_research_morning 失敗: {e}")
+
+    async def grok_x_research_evening(self):
+        """夕方 19:30: business モード + balanced モードで X リサーチ。"""
+        try:
+            from tools.x_trend_research import research_x_trends
+            biz = await research_x_trends(
+                topic="起業、個人事業、SaaS、Build in Public の経営判断、非エンジニアの AI 活用",
+                hours=24, count=5, mode="business", save_to_intel=True,
+            )
+            balanced = await research_x_trends(
+                topic="映像制作×AI、メディア、文化、Grok/Claude/GPT の最新動向",
+                hours=24, count=5, mode="balanced", save_to_intel=True,
+            )
+            total_cost = (biz.get("cost_jpy", 0.0) or 0.0) + (balanced.get("cost_jpy", 0.0) or 0.0)
+            total_saved = (biz.get("intel_saved", 0) or 0) + (balanced.get("intel_saved", 0) or 0)
+            logger.info(f"Grok夕Xリサーチ完了: cost=¥{total_cost:.1f} intel保存={total_saved}件")
+        except Exception as e:
+            logger.error(f"grok_x_research_evening 失敗: {e}")
 
     async def sunset_working_facts(self):
         """persona_memory の working_fact は寿命付き。
