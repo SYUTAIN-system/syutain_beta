@@ -101,3 +101,15 @@ syutain_beta/
 ## ライセンス
 
 プライベートプロジェクト。無断複製・配布禁止。
+
+---
+
+## Live Stats (auto-updated)
+
+| Metric | Value |
+|--------|-------|
+| LLM Calls | 11,262 |
+| Total Cost | ¥1,158 |
+| Events Logged | 36,423 |
+| SNS Posts | 522 |
+| Last Updated | 2026-04-05 09:30 JST |
