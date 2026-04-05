@@ -2,15 +2,63 @@
 
 4台のPC（ALPHA / BRAVO / CHARLIE / DELTA）が連携して動く、自律型のビジネス運営システムです。
 AIが提案→承認→実行→検証のサイクルを自動で回し、コンテンツ制作・SNS運用・EC管理・情報収集を行います。
+**Build in Public**方針で、システム自身が自分の運用データから note 記事を生成して公開しています。
 
-## どんなことができるか
+## 今のシステムで出来ること（2026-04-06 現在、実機能）
 
-- **コンテンツ自動生成**: ブログ記事、SNS投稿、商品説明文をAIが下書き→品質チェック→仕上げ
-- **SNS運用**: X(Twitter)、Instagram、note への自動投稿（人間の承認後に実行）
-- **EC管理**: Shopify / BASE の商品登録・在庫監視・価格最適化
-- **情報収集**: Web検索・ニュース監視・競合分析を自動で実行
-- **ブラウザ操作**: Webサイトの自動操作（4段階のフォールバック付き）
-- **暗号通貨**: BTC/ETHの自動売買シグナル生成（承認後に実行）
+### コンテンツ生成・公開
+- **note 記事自動生成**: SYUTAINβ の実運用データ（エラー・コスト・判断記録）を素材に、Build in Public ドキュメンタリー記事を 5段階パイプラインで生成。6層品質防御（機械15項目 / 外部検索ファクト検証 / Haiku / GPT-5.4 / factbook / fact_density スコア）を通過したもののみ公開。Playwright で note.com に自動公開（日次上限5本）
+- **SNS 投稿自動生成**: 8軸スコア（事実密度・人間味・ペルソナ・完結性・エンゲージメント・AI臭の無さ・構造性・情報密度）で評価、品質0.75以上は自動承認、それ未満は人間承認。ポエム化防止の構造的防御あり
+- **ドキュメンタリー記事**: 週次（水曜/土曜10:00）に SYUTAINβ自身の運用データから note 記事を生成
+- **海外 AI トレンド取り込み**: 英語一次情報を取得 → 要約 → 日本語記事化
+- **Discord 経由の記事執筆依頼**: Discord で「noteで〜について書いて」と言うだけで `article_commission_queue` に投入 → 3分以内に執筆開始 → 完成したら会話トーンで通知（2026-04-05 新設）
+
+### SNS 運用（実装済みプラットフォーム）
+- **X (Twitter)**: `execute_approved_x` — @syutain_beta / @Sima_daichi アカウント
+- **Bluesky**: `execute_approved_bluesky` — AT Protocol 経由
+- **Threads**: `execute_approved_threads` — Meta Graph API 経由
+- **note.com**: Playwright 経由の自動公開
+- **Bluesky 自動フォロー/アンフォロー**: 日次14:00 に関連ユーザーを最大30人フォロー、日曜15:00 に7日間フォローバックなしをアンフォロー
+- **エンゲージメント収集**: 投稿後のいいね/リポスト/返信を48時間ウィンドウで収集・分析
+
+### 情報収集・インテル
+- **24 ソース横断バズ検出**: HackerNews / Reddit 16サブレディット / GitHub Trending / Zenn / Yahoo!Realtime 代替 / Togetter / はてなブックマーク 8 カテゴリ / Bluesky Popular 等
+- **Web 検索**: Tavily Search API（日本語対応）
+- **URL → テキスト**: Jina Reader API
+- **RSS / YouTube**: テック・ビジネス系、YouTube Data API v3
+- **週次インテルダイジェスト**: 日曜20:00 に収集した情報を自動整理
+- **X AI速報投稿**: 毎日11:30 に intel から速報抽出して X に投稿
+
+### ブラウザ自動化（BRAVO の 4層スタック）
+1. Lightpanda (CDP) — 軽量サイトの高速抽出
+2. Stagehand v3 — AI 駆動の自然言語操作（自己修復・アクションキャッシュ）
+3. Chromium — 重い SPA のフォールバック
+4. GPT-5.4 Computer Use — ログイン画面・CAPTCHA・複雑UI
+
+### EC / 決済（実装済み）
+- **Stripe**: 商品作成・価格設定・Checkout セッション（承認必須）
+- **Booth**: デジタル商品販売（Booth セッションクッキー経由）
+- **収益記録**: `commerce_transactions` テーブルに売上を記録・可視化
+
+### 暗号通貨監視（取引は承認必須）
+- **監視対象: 19通貨** — BTC/ETH/XRP/SOL/DOGE/LTC/BCH/DOT/LINK/ATOM/ADA/SUI + XLM/XTZ/ASTR/DAI/FCR/NAC/WILD
+- **取引所**: GMOコイン + bitbank（ccxt 経由）
+- **30分毎の価格スナップショット**、3% 以上の変動で異常アラート → リサーチ自動実行
+- 取引安全設定: 1回最大¥50,000 / 日次上限¥100,000
+
+### Discord Brain-β（対話エージェント、2026-04-05 徹底改善）
+- **7カテゴリ意図分類**: greeting / status / statement / query / consult / philosophy / command を軽量パターンマッチで即時判定
+- **破壊的ACTION直接ルート**: 承認/却下/記事執筆依頼は正規表現マッチで LLM を一切経由せず直接ハンドラに流す（幻覚確認劇防止）
+- **working_fact protocol**: ユーザーの事実宣言（「エラー解消した」等）を自動で persona_memory に記録し、以降の応答で DB状態より優先して注入
+- **`!` コマンド**: `!承認一覧 / !承認 / !却下 / !状態 / !予算 / !記事 / !依頼 / !charlie / !レビュー / !提案生成 / !予算設定 / !収益記録`
+- **毎時健全性監査**: `brain_beta_health_audit` が幻覚確認劇再発・定型接頭辞率・生Python例外露出・working_fact注入実績・コマンド発動頻度を測定、critical で Discord アラート
+
+### 自律運用・ガバナンス
+- **5段階自律ループ**: Perception → Plan → Execute → Verify → Stop Decide（OS Kernel 統括）
+- **3層提案エンジン**: 提案 → 反論 → 代替案 → 収益スコアリング
+- **9層 LoopGuard + 6条件 Emergency Kill**（下記「安全装置」参照）
+- **4 tier 承認ポリシー**（下記「安全装置」参照、`docs/approval_policy.md` に詳細）
+- **Brain-α / Brain-β 交差評価**: 毎日06:00 に 2モデルで相互評価
 
 ## 4台のPC構成
 
