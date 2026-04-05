@@ -15,7 +15,7 @@ logger = logging.getLogger("syutain.db_pool")
 _pool: Optional[asyncpg.Pool] = None
 
 
-async def init_pool(min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
+async def init_pool(min_size: int = 2, max_size: int = 15) -> asyncpg.Pool:
     """起動時に1回だけ呼ぶ。FastAPIのlifespan等から"""
     global _pool
     if _pool is None or _pool._closed:

@@ -49,6 +49,7 @@ TIER_2_AUTO_WITH_NOTIFICATION = [
     "task_reschedule",   # タスクリスケジュール
     "content_draft",     # コンテンツ下書き
     "browser_collect",   # ブラウザ情報収集
+    "commission_article", # 島原からの記事執筆依頼（Discord チャット経由、予防的分類）
 ]
 
 TIER_3_FULLY_AUTO = [

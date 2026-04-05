@@ -235,11 +235,15 @@ class BudgetGuard:
         }
 
     async def record_chat_spend(self, amount_jpy: float, model: str = ""):
-        """チャット経由のAPI支出を記録（日次/月次にも加算、予算チェック付き）"""
+        """チャット経由のAPI支出を記録（日次/月次にも加算、予算チェック付き）
+
+        注: 現在は chat_agent 側で二重計上回避のため呼ばれていない（dead code）。
+        呼び出される場合に備えて AttributeError を回避するためグローバル定数を参照。"""
         # 予算チェック（90%制限）
-        daily_pct = (self._daily_spend_jpy + amount_jpy) / self._daily_budget * 100
-        if daily_pct >= self._stop_pct:
-            logger.warning(f"チャット予算超過: 日次{daily_pct:.1f}%（停止閾値{self._stop_pct}%）")
+        stop_pct = 90
+        daily_pct = (self._daily_spend_jpy + amount_jpy) / DAILY_BUDGET_JPY * 100
+        if daily_pct >= stop_pct:
+            logger.warning(f"チャット予算超過: 日次{daily_pct:.1f}%（停止閾値{stop_pct}%）")
             return  # 加算しない
         self._chat_spend_jpy += amount_jpy
         self._daily_spend_jpy += amount_jpy

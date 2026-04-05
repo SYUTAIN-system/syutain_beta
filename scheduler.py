@@ -957,12 +957,15 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
-            # 海外トレンド先取り検出（毎日08:00 JST）
+            # 海外トレンド先取り検出 v2（毎日08:00 JST、enrichパイプライン）
+            # 注: ID 衝突を避けるため overseas_trend_detection_v2 にリネーム
+            # 旧 overseas_trend_detection (self.overseas_trend_detection, L3994) は
+            # tools.overseas_trend_detector + enrich_overseas_trends を使う別実装
             self._scheduler.add_job(
                 self.detect_overseas_trends,
-                CronTrigger(hour=8, minute=0, timezone="Asia/Tokyo"),
-                id="overseas_trend_detection",
-                name="海外トレンド検出（毎日08:00）",
+                CronTrigger(hour=8, minute=30, timezone="Asia/Tokyo"),
+                id="overseas_trend_detection_v2",
+                name="海外トレンド検出v2（毎日08:30）",
                 replace_existing=True,
             )
 
@@ -1053,23 +1056,8 @@ class SyutainScheduler:
 
             # === intel活用ジョブ ===
 
-            # X @syutain_beta「今日のAI速報」（毎日11:30 JST）
-            self._scheduler.add_job(
-                self.intel_bulletin_x,
-                CronTrigger(hour=11, minute=30, timezone="Asia/Tokyo"),
-                id="intel_bulletin_x",
-                name="X AI速報投稿（毎日11:30）",
-                replace_existing=True,
-            )
-
-            # 週次インテルダイジェスト（毎週日曜20:00 JST）
-            self._scheduler.add_job(
-                self.weekly_intel_digest,
-                CronTrigger(day_of_week="sun", hour=20, minute=0, timezone="Asia/Tokyo"),
-                id="weekly_intel_digest",
-                name="週次インテルダイジェスト（日曜20:00）",
-                replace_existing=True,
-            )
+            # 注: intel_bulletin_x と weekly_intel_digest は L815/L824 で既に登録済み
+            # ここでの重複登録は削除（2026-04-05 audit 発見）
 
             self._scheduler.start()
             logger.info("スケジューラー起動完了")
