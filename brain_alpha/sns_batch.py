@@ -1016,6 +1016,27 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 AND (review_flag = 'actionable' OR importance_score >= 0.7)
                 ORDER BY importance_score DESC, created_at DESC LIMIT 8"""
             )
+            # Grok #5: 今 X で使われているハッシュタグをバッチ先頭で 1 回だけ取得（コスト効率化）
+            try:
+                from tools.grok_helpers import grok_trending_hashtags
+                # バッチのテーマ推定: intel_rows のタイトルから代表語を抽出
+                topic_guess = "AIエージェント 映像 個人開発"
+                if intel_rows:
+                    first_title = (intel_rows[0]["title"] or "")[:100]
+                    if first_title:
+                        topic_guess = first_title
+                gh = await grok_trending_hashtags(topic_guess, platform="x", limit=6)
+                if gh.get("ok") and gh.get("hashtags"):
+                    tag_line = " ".join(gh["hashtags"][:6])
+                    intel_context_hashtag = (
+                        f"\n【直近24hで X で実際に使われているハッシュタグ（Grok 実測）】\n"
+                        f"{tag_line}\n"
+                        f"※投稿に使う場合は上記から選ぶ。捏造ハッシュタグは禁止。\n"
+                    )
+                    persona_hint += intel_context_hashtag
+                    logger.info(f"SNSバッチ: Grok hashtags = {gh['hashtags'][:6]} ({gh.get('cost_jpy', 0):.2f}円)")
+            except Exception as gh_err:
+                logger.debug(f"SNSバッチ: Grokハッシュタグ取得スキップ: {gh_err}")
             if intel_rows:
                 intel_lines = []
                 for ir in intel_rows:

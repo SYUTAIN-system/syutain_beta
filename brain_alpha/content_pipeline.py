@@ -917,6 +917,30 @@ async def generate_publishable_content(
             except Exception:
                 detected_genre = "ai_tech"
 
+        # Stage 1.6: Grok による時事性スコア評価（#6 Grok活用）
+        # 記事のテーマが現在進行形の話題か判定し、公開タイミングを提案
+        topicality_info: dict = {}
+        try:
+            from tools.grok_helpers import grok_topicality_score
+            ts = await grok_topicality_score(title=selected_theme, summary=selected_theme[:300])
+            if ts.get("ok"):
+                topicality_info = {
+                    "score": ts.get("topicality_score", 0.5),
+                    "buzz_level": ts.get("current_buzz_level", "medium"),
+                    "publish_urgency": ts.get("publish_urgency", "this_week"),
+                    "reasoning": ts.get("reasoning", "")[:200],
+                }
+                logger.info(
+                    f"Stage 1.6 時事性: score={topicality_info['score']:.2f} "
+                    f"urgency={topicality_info['publish_urgency']} ({ts.get('cost_jpy', 0):.2f}円)"
+                )
+                stages.append({
+                    "stage": 1.6, "name": "時事性評価", "status": "success",
+                    "detail": f"score={topicality_info['score']:.2f} urgency={topicality_info['publish_urgency']}",
+                })
+        except Exception as e:
+            logger.debug(f"Stage 1.6 時事性評価スキップ: {e}")
+
         # ===== Stage 1.5: 3軸タイトル生成 =====
         title_candidates = []
         if _HAS_GENRE_TEMPLATES and detected_genre:
@@ -1120,7 +1144,7 @@ async def generate_publishable_content(
             if not first_draft or len(first_draft) < 6000:
                 raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低6000字必要）")
 
-            # 事実検証チェック
+            # 事実検証チェック (static)
             factual_issues = _verify_factual_claims(first_draft)
             if factual_issues:
                 logger.warning(f"Stage 3 事実検証: {len(factual_issues)}件の問題 — {factual_issues}")
@@ -1131,6 +1155,36 @@ async def generate_publishable_content(
                         f"初稿に重大な事実誤認が{len(critical)}件: "
                         + "; ".join(critical[:3])
                     )
+
+            # 事実検証 Stage 3.5: Grok による時事ファクトチェック（#1 Grok活用）
+            # 主要な事実主張を抽出して Grok に渡す（多くても5個）
+            try:
+                import re as _re_grok
+                # 数字・固有名詞を含む文を主張として抽出
+                sentences = _re_grok.split(r'(?<=[。\.])', first_draft)
+                claims_to_check = []
+                for s in sentences:
+                    s_stripped = s.strip()
+                    if 30 <= len(s_stripped) <= 200 and _re_grok.search(r'\d{4}年|\d{1,3}%|\$[\d,]+|¥[\d,]+', s_stripped):
+                        claims_to_check.append(s_stripped)
+                    if len(claims_to_check) >= 5:
+                        break
+                if claims_to_check:
+                    from tools.grok_helpers import grok_fact_check
+                    fc = await grok_fact_check(claims_to_check, topic_hint=selected_theme[:150])
+                    if fc.get("ok"):
+                        grok_critical = fc.get("critical_issues", [])
+                        if grok_critical:
+                            logger.warning(f"Stage 3.5 Grokファクト検証: 虚偽{len(grok_critical)}件 — {grok_critical}")
+                            if len(grok_critical) >= 2:
+                                raise ValueError(
+                                    f"Grok検証で虚偽が{len(grok_critical)}件: " + "; ".join(grok_critical[:2])
+                                )
+            except ValueError:
+                raise
+            except Exception as grok_err:
+                # Grok 失敗は致命的ではない（static check は通過済み）
+                logger.debug(f"Stage 3.5 Grokファクト検証スキップ: {grok_err}")
 
             stages.append({
                 "stage": 3,

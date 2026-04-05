@@ -556,6 +556,46 @@ class SyutainScheduler:
                 misfire_grace_time=300,
             )
 
+            # Grok 競合・自己言及モニタリング (#3、毎日06:00 JST 朝レポ前)
+            self._scheduler.add_job(
+                self.grok_competitor_monitor,
+                CronTrigger(hour=6, minute=0, timezone="Asia/Tokyo"),
+                id="grok_competitor_monitor",
+                name="Grok 競合モニタリング（毎日06:00）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
+            # Grok 類似障害事例リサーチ (#7、毎日06:30 JST、直近24h error/critical を集約)
+            self._scheduler.add_job(
+                self.grok_incident_research,
+                CronTrigger(hour=6, minute=30, timezone="Asia/Tokyo"),
+                id="grok_incident_research",
+                name="Grok 障害事例リサーチ（毎日06:30）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
+            # Grok ペルソナ検証ループ (#8、月曜07:00 JST 週次)
+            self._scheduler.add_job(
+                self.grok_persona_verify_loop,
+                CronTrigger(day_of_week="mon", hour=7, minute=0, timezone="Asia/Tokyo"),
+                id="grok_persona_verify_loop",
+                name="Grok ペルソナ検証（月曜07:00）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
+            # Grok コンテンツカレンダー予測 (#10、日曜21:00 JST 週次)
+            self._scheduler.add_job(
+                self.grok_upcoming_events,
+                CronTrigger(day_of_week="sun", hour=21, minute=0, timezone="Asia/Tokyo"),
+                id="grok_upcoming_events",
+                name="Grok 週次コンテンツカレンダー（日曜21:00）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
             # Brain-α相互評価（毎日06:00）
             self._scheduler.add_job(
                 self.brain_cross_evaluate,
@@ -3566,6 +3606,188 @@ class SyutainScheduler:
             logger.info(f"Grok夕Xリサーチ完了: cost=¥{total_cost:.1f} intel保存={total_saved}件")
         except Exception as e:
             logger.error(f"grok_x_research_evening 失敗: {e}")
+
+    async def grok_competitor_monitor(self):
+        """#3 Grok 競合・自己言及モニタリング (毎日06:00 JST、朝レポ前)"""
+        try:
+            from tools.grok_helpers import grok_monitor_mentions
+            from tools.db_pool import get_connection
+            keywords = [
+                "SYUTAINβ", "シュタイン", "syutain_beta", "Sima_daichi",
+                "島原大知", "Build in Public 個人開発",
+                "Claude Code エージェント", "非エンジニア AI 開発",
+            ]
+            r = await grok_monitor_mentions(keywords, hours=24)
+            if r.get("ok"):
+                mentions = r.get("mentions", [])
+                insights = r.get("key_insights", [])
+                cost = r.get("cost_jpy", 0.0)
+                logger.info(f"Grok競合モニター完了: mentions={len(mentions)} insights={len(insights)} (¥{cost:.1f})")
+                # 重要度high の言及があれば event_log に記録 + Discord 通知
+                high_mentions = [m for m in mentions if isinstance(m, dict) and m.get("importance") == "high"]
+                if high_mentions:
+                    async with get_connection() as conn:
+                        await conn.execute(
+                            """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                               VALUES ('grok.competitor_monitor', 'intel', 'info', 'alpha', $1::jsonb, NOW())""",
+                            json.dumps({"high_mentions": high_mentions[:5], "insights": insights[:3], "cost_jpy": cost}, ensure_ascii=False),
+                        )
+                    try:
+                        from tools.discord_notify import notify_discord
+                        mlines = [f"🔔 競合/言及モニター: 重要{len(high_mentions)}件"]
+                        for m in high_mentions[:3]:
+                            mlines.append(f"  {m.get('author', '?')}: {(m.get('summary') or '')[:80]}")
+                            if m.get('url'):
+                                mlines.append(f"    {m['url']}")
+                        await notify_discord("\n".join(mlines))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"grok_competitor_monitor 失敗: {e}")
+
+    async def grok_incident_research(self):
+        """#7 Grok 類似障害事例リサーチ (毎日06:30 JST)
+        直近24hのエラーを集約して Grok に類似事例・解決策を問い合わせる"""
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                errors = await conn.fetch(
+                    """SELECT event_type, source_node, LEFT(payload::text, 300) as payload
+                       FROM event_log
+                       WHERE severity IN ('error', 'critical')
+                       AND created_at > NOW() - INTERVAL '24 hours'
+                       ORDER BY created_at DESC LIMIT 8"""
+                )
+            if not errors:
+                logger.info("grok_incident_research: エラーなし、スキップ")
+                return
+            error_summary = "\n".join(
+                f"- {r['event_type']} ({r['source_node']}): {r['payload'][:200]}"
+                for r in errors
+            )
+            from tools.grok_helpers import grok_similar_incidents
+            r = await grok_similar_incidents(error_summary, tech_stack="Python 3.14 + PostgreSQL 49テーブル + NATS + Ollama + Claude Code + discord.py")
+            if r.get("ok"):
+                cases = r.get("similar_cases", [])
+                suggested = r.get("suggested_fix", "")
+                known_bug = r.get("known_bug", "unknown")
+                cost = r.get("cost_jpy", 0.0)
+                logger.info(f"Grok障害事例リサーチ: cases={len(cases)} known_bug={known_bug} (¥{cost:.1f})")
+                async with get_connection() as conn:
+                    await conn.execute(
+                        """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                           VALUES ('grok.incident_research', 'self_heal', 'info', 'alpha', $1::jsonb, NOW())""",
+                        json.dumps({
+                            "errors_analyzed": len(errors),
+                            "similar_cases": cases[:5],
+                            "suggested_fix": suggested[:500],
+                            "known_bug": known_bug,
+                            "cost_jpy": cost,
+                        }, ensure_ascii=False),
+                    )
+                # 高関連度の事例があれば Discord 通知
+                high_rel = [c for c in cases if isinstance(c, dict) and c.get("relevance") == "high"]
+                if high_rel:
+                    try:
+                        from tools.discord_notify import notify_discord
+                        lines = [f"🔧 類似障害事例発見: {len(high_rel)}件"]
+                        for c in high_rel[:3]:
+                            lines.append(f"  {(c.get('description') or '')[:100]}")
+                            if c.get('resolution'):
+                                lines.append(f"    解: {(c.get('resolution') or '')[:100]}")
+                            if c.get('source'):
+                                lines.append(f"    出典: {c['source']}")
+                        await notify_discord("\n".join(lines))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"grok_incident_research 失敗: {e}")
+
+    async def grok_persona_verify_loop(self):
+        """#8 Grok ペルソナ検証ループ (月曜07:00 JST、週次)
+        直近週の daichi_dialogue_log 発言を Grok で公開情報と照合"""
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                rows = await conn.fetch(
+                    """SELECT daichi_message FROM daichi_dialogue_log
+                       WHERE created_at > NOW() - INTERVAL '7 days'
+                       AND daichi_message IS NOT NULL AND length(daichi_message) > 30
+                       ORDER BY created_at DESC LIMIT 10"""
+                )
+            if not rows:
+                logger.info("grok_persona_verify: 対象発言なし、スキップ")
+                return
+            from tools.grok_helpers import grok_persona_verify
+            conflicts_found = []
+            total_cost = 0.0
+            for r in rows[:5]:  # 予算配慮で 5 件まで
+                msg = r["daichi_message"]
+                if not msg:
+                    continue
+                res = await grok_persona_verify(msg, context="SYUTAINβ 運用中の島原大知の発言")
+                total_cost += res.get("cost_jpy", 0.0) if res.get("ok") else 0.0
+                if res.get("ok") and not res.get("consistent", True):
+                    conflicts_found.append({
+                        "statement": (msg or "")[:200],
+                        "conflicts": res.get("conflicts", []),
+                        "refinement": res.get("persona_refinement", ""),
+                    })
+            logger.info(f"Grok ペルソナ検証: {len(rows)}件中 {len(conflicts_found)}件の矛盾候補 (¥{total_cost:.1f})")
+            if conflicts_found:
+                async with get_connection() as conn:
+                    await conn.execute(
+                        """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                           VALUES ('grok.persona_verify', 'persona', 'warning', 'alpha', $1::jsonb, NOW())""",
+                        json.dumps({"conflicts": conflicts_found[:5], "cost_jpy": total_cost}, ensure_ascii=False),
+                    )
+        except Exception as e:
+            logger.error(f"grok_persona_verify_loop 失敗: {e}")
+
+    async def grok_upcoming_events(self):
+        """#10 Grok コンテンツカレンダー予測 (日曜21:00 JST、週次)
+        翌週のイベント・製品発表を予測して intel_items に保存"""
+        try:
+            from tools.grok_helpers import grok_upcoming_events
+            from tools.db_pool import get_connection
+            r = await grok_upcoming_events(days=7)
+            if not r.get("ok"):
+                logger.warning(f"grok_upcoming_events 失敗: {r.get('error')}")
+                return
+            events = r.get("events", [])
+            cost = r.get("cost_jpy", 0.0)
+            logger.info(f"Grokコンテンツカレンダー: {len(events)}件予測 (¥{cost:.1f})")
+            if events:
+                async with get_connection() as conn:
+                    for ev in events[:15]:
+                        if not isinstance(ev, dict):
+                            continue
+                        date = (ev.get("date") or "")[:20]
+                        title = (ev.get("title") or "")[:200]
+                        url = (ev.get("source_url") or "")[:500]
+                        note_angle = (ev.get("note_angle") or "")[:500]
+                        sns_timing = (ev.get("sns_timing") or "")[:200]
+                        relevance = ev.get("relevance", "medium")
+                        imp_score = {"high": 0.9, "medium": 0.6, "low": 0.3}.get(relevance, 0.5)
+                        try:
+                            await conn.execute(
+                                """INSERT INTO intel_items
+                                   (source, keyword, title, summary, url, importance_score,
+                                    category, review_flag, metadata, created_at)
+                                   VALUES ('grok_upcoming_events', $1, $2, $3, $4, $5,
+                                           'content_calendar', 'actionable', $6::jsonb, NOW())""",
+                                date[:100], title,
+                                f"{title}\n予定: {date}\nnote ネタ案: {note_angle}\nSNS タイミング: {sns_timing}",
+                                url, imp_score,
+                                json.dumps({
+                                    "date": date, "note_angle": note_angle,
+                                    "sns_timing": sns_timing, "relevance": relevance,
+                                }, ensure_ascii=False),
+                            )
+                        except Exception as ie:
+                            logger.debug(f"upcoming_event intel insert skip: {ie}")
+        except Exception as e:
+            logger.error(f"grok_upcoming_events 失敗: {e}")
 
     async def sunset_working_facts(self):
         """persona_memory の working_fact は寿命付き。
