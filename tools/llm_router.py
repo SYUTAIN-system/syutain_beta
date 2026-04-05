@@ -38,8 +38,20 @@ _COST_RATES_JPY_PER_1K = {
     "gpt-5-nano":           {"input": 0.0075, "output": 0.060},   # $0.05/$0.40 per 1M
     "gemini-2.5-flash-lite": {"input": 0.01125, "output": 0.045}, # $0.075/$0.30 per 1M
     "gpt-4o-mini":          {"input": 0.0225, "output": 0.090},  # $0.15/$0.60 per 1M
+    "qwen3.6-plus":         {"input": 0.0,    "output": 0.0},    # OpenRouter無料
+    "nemotron-3-nano-30b":  {"input": 0.0,    "output": 0.0},    # OpenRouter無料
     "_default":             {"input": 0.15,   "output": 0.15},
 }
+
+# ===== OpenRouter 無料モデル設定 =====
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+# Qwen 3.6 Plus: 深い思考タスク用（38 tok/s、高品質）
+OPENROUTER_QWEN36_MODEL = "qwen/qwen3.6-plus:free"
+# Nemotron-3 Nano 30B: chat/chat_light用（184 tok/s、高速）
+OPENROUTER_NEMOTRON30B_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+_openrouter_daily_count = 0
+_openrouter_daily_date = ""
+_OPENROUTER_DAILY_LIMIT = 180  # 安全マージン（上限200、Qwen3.6+Nemotron30B合算）
 
 
 def _estimate_cost_jpy(model: str, prompt: str) -> float:
@@ -57,6 +69,26 @@ def _calc_actual_cost_jpy(model: str, prompt_tokens: int, completion_tokens: int
     rates = _COST_RATES_JPY_PER_1K.get(model, _COST_RATES_JPY_PER_1K["_default"])
     cost = (prompt_tokens / 1000) * rates["input"] + (completion_tokens / 1000) * rates["output"]
     return round(cost, 4)
+
+
+def _openrouter_available() -> bool:
+    """OpenRouter Qwen 3.6 Plusが利用可能か（APIキー設定済み & 日次制限内）"""
+    global _openrouter_daily_count, _openrouter_daily_date
+    if not OPENROUTER_API_KEY:
+        return False
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    if _openrouter_daily_date != today:
+        _openrouter_daily_count = 0
+        _openrouter_daily_date = today
+    return _openrouter_daily_count < _OPENROUTER_DAILY_LIMIT
+
+
+def _openrouter_record_use():
+    """OpenRouter使用をカウント"""
+    global _openrouter_daily_count
+    _openrouter_daily_count += 1
+
 
 # ===== ノード負荷状態（NATS経由で更新される）=====
 _node_load = {
@@ -298,7 +330,16 @@ def _choose_best_model_v6_impl(
         return {"provider": "google", "model": "gemini-2.5-pro", "tier": "A", "via": "openrouter",
                 "note": f"知能指数{intelligence_required}≥50"}
 
-    if final_publish and quality in ["high", "premium"]:
+    # === final_publish時のTier S/Aルート（ただしQwen3.6対象は先に評価）===
+    # 2026-04-05: Gemini 2.5 Pro(有料)より無料Qwen 3.6 Plusを優先するため、
+    # Qwen3.6対象タスクならここをスキップして後段のOpenRouter無料ルートへ
+    _QWEN36_TASKS_EARLY = {
+        "proposal", "proposal_generation", "strategy", "competitive_analysis",
+        "content_final", "note_article_final", "booth_description_final",
+        "complex_analysis", "persona_deep_analysis",
+        "note_article", "product_desc", "booth_description", "note_draft",
+    }
+    if final_publish and quality in ["high", "premium"] and task_type not in _QWEN36_TASKS_EARLY:
         if anthropic_available and task_type in ["strategy", "pricing", "btob"]:
             return {"provider": "anthropic", "model": "claude-sonnet-4-6", "tier": "S", "via": "direct",
                     "note": "最終公開+戦略タスク"}
@@ -379,12 +420,31 @@ def _choose_best_model_v6_impl(
 
     # === Tier A: APIの方が品質が高いタスク ===
 
-    # 分析・調査・提案・コンテンツ → Gemini Flash（無料枠）優先
+    # OpenRouter Qwen 3.6 Plus（無料、1Mコンテキスト、高品質だが低速）
+    # 「考える力」が必要で速度が許容されるタスクのみ。chat等の速度重要タスクは対象外
+    _QWEN36_TASKS = {
+        "proposal", "proposal_generation", "strategy", "competitive_analysis",  # 深い思考が必要
+        "content_final", "note_article_final", "booth_description_final",       # 最終品質
+        "complex_analysis", "persona_deep_analysis",                            # 深い分析
+        "note_article", "product_desc", "booth_description", "note_draft",      # コンテンツ生成
+    }
+    if task_type in _QWEN36_TASKS and _openrouter_available():
+        return {"provider": "openrouter", "model": "qwen3.6-plus", "tier": "A", "via": "openrouter",
+                "openrouter_model_id": OPENROUTER_QWEN36_MODEL,
+                "note": f"Qwen 3.6 Plus(無料)→{task_type}"}
+
+    # Gemini Flash フォールバック（API優先タスク）
     if task_type in _API_PREFERRED_TASKS:
         return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
                 "note": f"API優先({task_type})→Gemini Flash"}
 
-    # Claude Haiku推奨タスク（高い推論力が必要）
+    # chat/chat_light → OpenRouter Nemotron-3 Nano 30B（無料、高速184tok/s）
+    if task_type in ("chat", "chat_light") and _openrouter_available():
+        return {"provider": "openrouter", "model": "nemotron-3-nano-30b", "tier": "A", "via": "openrouter",
+                "openrouter_model_id": OPENROUTER_NEMOTRON30B_MODEL,
+                "note": f"Nemotron-3-Nano-30B(無料,184tok/s)→{task_type}"}
+
+    # Claude Haiku推奨タスク（高い推論力が必要、chat/chat_light以外）
     if task_type in _HAIKU_TASKS:
         if anthropic_available:
             return {"provider": "anthropic", "model": "claude-haiku-4-5", "tier": "A", "via": "direct",
@@ -392,7 +452,7 @@ def _choose_best_model_v6_impl(
         return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
                 "note": f"Haiku不可→Gemini Flash"}
 
-    # DeepSeek最終品質
+    # DeepSeek最終品質（chat_light以外）
     if task_type in _DEEPSEEK_FINAL_TASKS:
         return {"provider": "deepseek", "model": "deepseek-v3.2", "tier": "A", "via": "direct",
                 "note": f"最終品質({task_type})→DeepSeek"}
@@ -492,10 +552,12 @@ async def _call_llm_internal(
                 logger.warning(f"予算超過によりローカルLLMへフォールバック: {budget_check['reason']}")
                 remaining = budget_check.get("remaining_jpy", "?")
                 daily_limit = budget_check.get("daily_limit_jpy", "?")
+                _task_type_hint = (model_selection or {}).get("task_type", "unknown")
+                _quality_hint = (model_selection or {}).get("quality", "unknown")
                 asyncio.create_task(notify_error(
                     "budget_90pct_fallback",
                     f"日次API予算90%到達（残¥{remaining}/日次上限¥{daily_limit}）。"
-                    f"ローカルLLMのみで運転継続。元のリクエスト: {task_type}/{quality}",
+                    f"ローカルLLMのみで運転継続。元のリクエスト: {_task_type_hint}/{_quality_hint}",
                     severity="error",
                 ))
                 provider = "local"
@@ -527,8 +589,20 @@ async def _call_llm_internal(
             result = await _call_deepseek(prompt, system_prompt, model)
         elif provider == "google":
             result = await _call_google(prompt, system_prompt, model)
-        elif via == "openrouter":
-            result = await _call_openrouter(prompt, system_prompt, model, max_tokens=max_tokens)
+        elif provider == "openrouter" or via == "openrouter":
+            # openrouter_model_idがあればそれを使う（例: qwen/qwen3.6-plus:free）
+            or_model = model_selection.get("openrouter_model_id", model) if model_selection else model
+            try:
+                result = await _call_openrouter(prompt, system_prompt, or_model, max_tokens=max_tokens)
+                if provider == "openrouter":
+                    _openrouter_record_use()
+            except Exception as or_err:
+                # OpenRouter失敗 → Gemini Flashにフォールバック
+                logger.warning(f"OpenRouter失敗({or_model}): {or_err} → Gemini Flashフォールバック")
+                result = await _call_google(prompt, system_prompt, "gemini-2.5-flash")
+                model = "gemini-2.5-flash"
+                provider = "google"
+                tier = "A"
         else:
             result = await _call_openrouter(prompt, system_prompt, model)
 
@@ -607,12 +681,19 @@ async def _call_llm_internal(
                           result.get("completion_tokens", 0), True)
 
                 # 警告レベルに応じてDiscord通知（dedupはnotify_error内で処理）
-                if spend_result.get("alert_level") == "stop":
-                    asyncio.create_task(notify_error(
-                        "budget_90pct_stop",
-                        f"API予算90%超過: {spend_result.get('message', '')}",
-                        severity="critical",
-                    ))
+                if spend_result.get("alert_level") in ("stop", "warn_budget_exceeded"):
+                    # 予算超過通知は1日1回のみ（連続通知防止）
+                    from datetime import date as _date
+                    _budget_alert_key = f"budget_exceeded_{_date.today().isoformat()}"
+                    if not hasattr(choose_best_model_v6, '_budget_alerted'):
+                        choose_best_model_v6._budget_alerted = set()
+                    if _budget_alert_key not in choose_best_model_v6._budget_alerted:
+                        choose_best_model_v6._budget_alerted.add(_budget_alert_key)
+                        asyncio.create_task(notify_error(
+                            "budget_90pct_warn",
+                            f"API予算90%超過（処理は継続中）: {spend_result.get('message', '')}",
+                            severity="warning",
+                        ))
             except Exception as e:
                 log_usage("budget_record", model, 0, 0, False, str(e))
                 logger.error(f"予算記録失敗（処理続行）: {e}")

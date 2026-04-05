@@ -24,13 +24,16 @@ _LONG_DEDUP_PREFIXES = ("budget_", "cost_", "予算", "Ollama", "proactive", "no
 
 
 def _should_send(error_type: str, severity: str) -> bool:
-    """severity-based dedup判定。CRITICALは常に送信、ERRORは5分/1時間dedup"""
-    if severity == "critical":
-        return True
+    """severity-based dedup判定。全severityでdedupを適用。"""
     now = time.time()
     last = _recent_notifications.get(error_type, 0.0)
-    # 予算系は1時間dedup、それ以外は5分dedup
-    interval = DEDUP_INTERVAL_LONG if any(error_type.startswith(p) for p in _LONG_DEDUP_PREFIXES) else DEDUP_INTERVAL
+    # 予算系・critical系は6時間dedup、それ以外は5分/1時間dedup
+    if severity == "critical":
+        interval = 21600  # 6時間（criticalでも連続通知しない）
+    elif any(error_type.startswith(p) for p in _LONG_DEDUP_PREFIXES):
+        interval = DEDUP_INTERVAL_LONG  # 1時間
+    else:
+        interval = DEDUP_INTERVAL  # 5分
     if now - last < interval:
         return False
     _recent_notifications[error_type] = now

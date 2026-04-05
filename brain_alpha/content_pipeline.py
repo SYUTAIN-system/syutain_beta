@@ -41,7 +41,7 @@ except ImportError:
 
 
 def _sanitize_title(title: str, fallback_theme: str = "") -> str:
-    """タイトルからプロンプト指示の漏洩を除去し、80文字以内に制限する"""
+    """タイトルからプロンプト指示の漏洩を除去し、25文字以内に制限する"""
     if not title:
         return fallback_theme or "無題"
 
@@ -53,6 +53,9 @@ def _sanitize_title(title: str, fallback_theme: str = "") -> str:
         r"|^\*\*note|^\*\*有料|ドラフト|Stage|フォーマット"
         r"|^#"
         r"|（\d+円）"
+        r"|自由テーマ|intel_items|persona_memory|theme_hint|trend_detector"
+        r"|海外トレンド先取り|独自視点で書く|記事を書く|テーマの記事"
+        r"|収集した最新情報|価値観を組み合わせ"
         r")",
     )
     for line in lines:
@@ -70,9 +73,15 @@ def _sanitize_title(title: str, fallback_theme: str = "") -> str:
     # **太字**記法を除去
     sanitized = sanitized.strip("*").strip()
 
-    # 80文字制限（長すぎるタイトルはプロンプト漏洩の疑い）
-    if len(sanitized) > 80:
-        sanitized = sanitized[:77] + "..."
+    # 25文字制限（noteのタイトルは端的に。長すぎるのはプロンプト漏洩の疑い）
+    if len(sanitized) > 25:
+        # 句読点で切れる位置を探す
+        for i in range(min(25, len(sanitized)), 10, -1):
+            if sanitized[i-1] in "。！？」—":
+                sanitized = sanitized[:i]
+                break
+        else:
+            sanitized = sanitized[:22] + "..."
 
     # 空になった場合はフォールバック
     if not sanitized:
@@ -173,10 +182,17 @@ def _verify_factual_claims(content: str) -> list[str]:
 
 def _sanitize_article_output(content: str) -> str:
     """LLM生成結果からメタ指示漏洩・応答アーティファクトを除去する。
-    Stage 3, 4, 4.5 の全出力に適用する。"""
+    Stage 3, 4, 4.5 の全出力に適用する。
+
+    3段階で除去:
+    1. 冒頭のLLM応答アーティファクト除去
+    2. 本文全体のプロンプト漏洩除去（行単位）
+    3. 不要な定型文・マーカーの除去
+    """
     if not content:
         return content
 
+    # === Stage 1: 冒頭のLLM応答アーティファクト除去 ===
     lines = content.split("\n")
     cleaned_lines = []
 
@@ -208,8 +224,91 @@ def _sanitize_article_output(content: str) -> str:
     while cleaned_lines and cleaned_lines[-1].strip() in ("```", ""):
         cleaned_lines.pop()
 
-    result = "\n".join(cleaned_lines).strip()
-    return result if result else content
+    content = "\n".join(cleaned_lines).strip()
+
+    # === Stage 2: 本文全体のプロンプト漏洩除去（行単位スキャン）===
+    _prompt_leak_patterns = re.compile(
+        r'(?:自由テーマ|intel_items|persona_memory|theme_hint|trend_detector'
+        r'|content_pipeline|choose_best_model|model_selection'
+        r'|system_prompt|user_prompt|few_shot'
+        r'|Stage \d|Phase [A-E]|構成案に基づき'
+        r'|記事本文のみを出力|メタ情報や説明は不要'
+        r'|note有料記事タイトル|購買意欲を最大化'
+        r'|ジャンルキーワード|感情トリガー|切り口'
+        r'|Axis \d|3軸タイトル'
+        r'|CLAUDE\.md|LoopGuard|Emergency Kill'
+        r'|fabrication_risk|quality_score'
+        r'|max_tokens|temperature|repeat_penalty)',
+        re.IGNORECASE,
+    )
+
+    final_lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        # プロンプト漏洩パターンを含む行をスキップ（ただしコードブロック内は除外）
+        if _prompt_leak_patterns.search(stripped) and not stripped.startswith("```"):
+            # 見出し行（## 等）はスキップしない（記事構造を壊さないため）
+            if not stripped.startswith("#"):
+                continue
+        final_lines.append(line)
+
+    content = "\n".join(final_lines)
+
+    # === Stage 3: 不要な定型文・マーカーの除去 ===
+    _remove_patterns = [
+        r'\*\*ここから先は有料です。?\*\*[^\n]*',
+        r'ここから先は有料です[。]?[^\n]*',
+        r'---ここから有料---',
+        r'ここから有料---',
+        r'---ここから有料',
+        r'全文を読むには購入してください',
+        r'\[SYUTAINβ auto-generated\]',
+        r'記事本文のみを出力。?',
+        r'メタ情報や説明は不要。?',
+        r'# タイトルから始めて.*?まとめで終わる。?',
+        r'\*この記事はSYUTAIN.?が生成し.*?監修しています。\*',
+    ]
+    for pat in _remove_patterns:
+        content = re.sub(pat, '', content)
+
+    # === Stage 4: 重複H1除去（theme_hintタイトルと本文タイトルが共存する問題）===
+    h1_matches = list(re.finditer(r'^# .+$', content, re.MULTILINE))
+    if len(h1_matches) >= 2:
+        # 最初のH1がtheme_hintなら除去して2番目を残す
+        first_h1 = h1_matches[0].group()
+        _leak_check = re.compile(
+            r'(?:自由テーマ|intel_items|persona_memory|theme_hint|trend_detector'
+            r'|海外トレンド先取り|独自視点で書く|記事を書く|テーマの記事'
+            r'|収集した最新情報|価値観を組み合わせ)'
+        )
+        if _leak_check.search(first_h1) or len(first_h1) > 60:
+            # 最初のH1を除去
+            content = content[:h1_matches[0].start()] + content[h1_matches[0].end():]
+
+    # === Stage 5: 番号リストの修正（1. 2. 1. 2. の繰り返しを正規化）===
+    # 番号付きリストの連番を収集して、リセットされている箇所を箇条書きに変換
+    lines_for_list = content.split("\n")
+    fixed_lines = []
+    number_sequence = []  # (行インデックス, 番号)
+    for i, line in enumerate(lines_for_list):
+        m = re.match(r'^(\d+)\.\s+(.+)', line.strip())
+        if m:
+            number_sequence.append((i, int(m.group(1))))
+        fixed_lines.append(line)
+    # 連番のリセットを検出（1→2→1→2のパターン）
+    if len(number_sequence) >= 4:
+        for j in range(2, len(number_sequence)):
+            idx, num = number_sequence[j]
+            prev_idx, prev_num = number_sequence[j-1]
+            if num <= prev_num:
+                # 番号がリセットされた→箇条書きに変換
+                fixed_lines[idx] = re.sub(r'^\s*\d+\.\s+', '- ', fixed_lines[idx])
+    content = "\n".join(fixed_lines)
+
+    # 連続する空行を2行以内に
+    content = re.sub(r'\n{4,}', '\n\n\n', content)
+
+    return content.strip() if content.strip() else content
 
 
 # AIツールのリリース年タイムライン（事実検証用）
@@ -232,12 +331,18 @@ _FACTUAL_VERIFICATION_RULES = """
 - 島原大知の実体験として語る場合、以下のタイムラインに矛盾してはならない:
   - ChatGPT公開: 2022年11月
   - Claude公開: 2023年3月
-  - SYUTAINβ開発開始: 2025年後半
-  - SYUTAINβ本格稼働: 2026年3月
-- 2022年以前のAIツール利用エピソードは捏造になる。書くな。
+  - 島原大知がAI/Claude Codeを使い始めた: 2026年2月28日（それ以前のAI利用体験は捏造）
+  - SYUTAINβ開発開始: 2026年2月28日
+  - SYUTAINβ本格稼働: 2026年3月19日
+- 2026年2月28日以前のAIツール利用エピソードは捏造になる。書くな。
 - 「ある会社で」「友人が」等の匿名エピソードは禁止。実体験か、明確に「仮の話として」と断ること
 - 具体的な数値を書く場合、出典が必要。SYUTAINβの実データか、公開情報のみ使用可
 - 年号を書く場合、その年に該当テクノロジーが存在していたか確認すること
+- **ハーネスエンジニアリング**は島原大知が命名/考案した方法論ではない。既存の方法論を適用しているだけ。「命名した」「考え出した」「誕生させた」「提唱した」「発明した」は禁止。「実践している」「適用している」「使っている」が正しい表現
+- **「私は…と呼ぶ」「僕が…と命名した」「これを…と名付けた」等の自己命名パターン全般は禁止**（概念を自分が作ったと偽装することの再発防止）
+- **SYUTAINβは島原大知の個人開発プロジェクトで、運用チーム・開発メンバー・同僚・離職者は存在しない**。「運用チーム」「開発チーム」「メンバーが会社を去った」「離職率」「ある担当者は」「開発メンバーの1人」等の記述は全て捏造として禁止
+- **実在しないツールを「使っている」と書かない**。SYUTAINβの実運用は: PostgreSQL + NATS + Tailscale + Ollama + FastAPI + Next.js + Playwright + Discord.py のみ。Grafana/Prometheus/Restic/Datadog/NewRelic/Sentry等は使っていない
+- **出典不明の外部事例を捏造しない**: 「BBC/NYTimes/WSJ等が〇〇を試験導入」「滞在時間2.1倍」「ある調査会社のデータ」→ 裏付けがない場合は書かない
 """
 
 # 構造チェックリスト（Stage 3 system promptに注入）
@@ -782,8 +887,8 @@ async def generate_publishable_content(
                 result_title = await call_llm(
                     prompt=title_prompt,
                     system_prompt=(
-                        "島原大知のnote有料記事タイトル生成アシスタント。\n"
-                        "読者の購買意欲を最大化するタイトルを生成する。\n"
+                        "島原大知のnote記事タイトル生成アシスタント（6月まで全記事無料公開）。\n"
+                        "読者のクリック率を最大化するタイトルを生成する。\n"
                         "タイトルのみを改行区切りで出力。説明不要。"
                     ),
                     model_selection=model_sel_title,
@@ -816,15 +921,37 @@ async def generate_publishable_content(
                     "detail": f"エラー: {e}",
                 })
 
-        # ===== Stage 2: 構成案（Phase A-E） =====
+        # ===== Stage 2: 構成案（記事構成パターンに基づく） =====
         try:
             model_sel_outline = choose_best_model_v6(
                 task_type="drafting", quality="medium",
                 budget_sensitive=True, needs_japanese=True,
             )
 
+            # 記事構成パターンライブラリからテーマに最適なパターンを自動選択
+            _selected_pattern = None
+            _pattern_prompt = None
+            try:
+                from strategy.article_structure_patterns import select_best_pattern, build_pattern_prompt
+                _selected_pattern = select_best_pattern(selected_theme, detected_genre)
+                _pattern_prompt = build_pattern_prompt(_selected_pattern)
+                stages.append({
+                    "stage": "1.8",
+                    "name": "構成パターン選択",
+                    "status": "success",
+                    "detail": f"パターン: {_selected_pattern['name']} | 感情曲線: {_selected_pattern['emotion_curve']}",
+                })
+            except Exception as pat_err:
+                logger.warning(f"記事構成パターン選択失敗（フォールバック）: {pat_err}")
+
             # ジャンルテンプレートが利用可能ならテンプレートベースのプロンプトを使用
-            if _HAS_GENRE_TEMPLATES and detected_genre:
+            if _pattern_prompt:
+                genre_outline_prompt = (
+                    f"テーマ「{selected_theme}」の記事構成案を作成してください。\n\n"
+                    f"{_pattern_prompt}\n\n"
+                    f"{persona_text[:1000]}"
+                )
+            elif _HAS_GENRE_TEMPLATES and detected_genre:
                 genre_outline_prompt = build_structure_prompt_with_template(
                     selected_theme, detected_genre, target_length,
                 )
@@ -835,17 +962,17 @@ async def generate_publishable_content(
             result_outline = await call_llm(
                 prompt=(
                     genre_outline_prompt if genre_outline_prompt else
-                    f"テーマ「{selected_theme}」で{target_length}字以上のnote有料記事（500円）の構成案を作成してください。\n\n"
-                    "## noteの有料記事構造（必ず守る）\n"
-                    "noteでは「ここから先は有料です」の区切り（ペイウォール）がある。\n"
-                    "無料パート（冒頭1000-1500字）で読者の購買意欲を最大化し、有料パートで価値を提供する。\n\n"
-                    "### 無料パート（冒頭〜ペイウォール前）約1500-2000字:\n"
+                    f"テーマ「{selected_theme}」で{target_length}字以上のnote記事（無料公開）の構成案を作成してください。\n\n"
+                    "## 記事構造（6月まで全文無料公開）\n"
+                    "【6月まで全記事無料公開】ペイウォール・有料区切りは入れない。全文を無料で読める構成にする。\n"
+                    "全文を無料で公開する。冒頭でテーマの核心を提示し、本文で具体的な価値を提供する。ペイウォールは設置しない。\n\n"
+                    "### 冒頭（導入部）約1500-2000字:\n"
                     "- 【フック】冒頭3行で「この記事は自分のためにある」と思わせる問いかけや衝撃的な事実\n"
                     "- 【共感】読者の悩み・課題を具体的に言語化（「こういう経験ありませんか？」）\n"
                     "- 【権威】なぜ島原大知がこのテーマで書く資格があるか（実績・経験を数字で）\n"
                     "- 【予告】この記事で得られることを箇条書き3-5個で明示\n"
-                    "- 【クリフハンガー】「でも、一番大事なことはこの先にある」的な引きで有料部分への期待を最大化\n\n"
-                    "### 有料パート（ペイウォール後）約4500-8000字:\n"
+                    "- 【クリフハンガー】「でも、一番大事なことはこの先にある」的な引きで続きへの期待を高める\n\n"
+                    "### 本論（メインコンテンツ）約4500-8000字:\n"
                     "Phase A: 体験の深掘り（島原大知が実際に経験した具体的なシーン3つ。日時・場所・感情を含む）\n"
                     "Phase B: 構造分析（体験から抽出した「なぜそうなるのか」の原理。表面的でない深い考察）\n"
                     "Phase C: 実践フレームワーク（読者が今日から使える具体的なステップ3-5個。コスト・時間も明記）\n"
@@ -857,8 +984,8 @@ async def generate_publishable_content(
                     f"\n{persona_text}"
                 ),
                 system_prompt=(
-                    "島原大知のnote有料記事（500円）構成アシスタント。\n"
-                    "noteでは無料パートの魅力が売上を決める。購買心理を最大限に活用した構成を設計する。\n"
+                    "島原大知のnote記事構成アシスタント（6月まで全記事無料公開。有料販売の文言は入れない）。\n"
+                    "6月まで全記事無料公開。ペイウォール・有料パート・購入促進の文言は一切入れない。全文を無料で読める構成にする。\n"
                     f"{content_patterns[:2000]}\n"
                 ),
                 model_selection=model_sel_outline,
@@ -906,94 +1033,42 @@ async def generate_publishable_content(
                 final_publish=True,
             )
             result_draft = await call_llm(
-                max_tokens=8192,
+                max_tokens=16384,
                 prompt=(
-                    f"以下の構成案に基づき、{max(target_length, 10000)}字以上のnote有料記事の初稿を書いてください。\n"
-                    f"この記事は有料記事として販売する。読者が¥980払う価値がある内容にすること。\n"
-                    f"最低10000字。12000字以上を目指す。\n\n"
-                    "## 有料記事として絶対に守るべき品質基準:\n"
-                    "- 具体的な手順を番号付きで書く。抽象的な説明だけでは不可\n"
-                    "- 実際のツール名、設定値、コマンド、URLを含める\n"
-                    "- 「例えば」で始まる具体例を各セクションに最低1つ入れる\n"
-                    "- 読者が記事を読んだ後に実際に行動できるレベルの具体性を持たせる\n"
-                    "- 見出し構造: タイトルは#（H1）1つ、セクション見出しは##（H2）を7つ以上、小見出しは###（H3）。H2なしでH3だけにしない\n"
-                    "- 各##見出し下に800字以上書く\n\n"
-                    f"## テーマ\n{selected_theme}\n\n"
-                    f"## 構成案\n{outline}\n\n"
-                    "## noteの有料記事フォーマット（厳守）:\n\n"
-                    "### 【無料パート】冒頭〜「---ここから有料---」まで（1500-2000字）\n"
-                    "この部分で読者の購買意欲を最大化する。以下の要素を必ず含める:\n"
-                    "1. **衝撃的な冒頭3行**: 読者が「え？」と立ち止まる具体的な数字・事実・問い\n"
-                    "   例: 「3ヶ月で47回AIに裏切られた。」「月収0円のAI事業OSが、なぜ止まらないのか。」\n"
-                    "2. **読者の痛みに共感**: 「こんなことありませんか？」と読者の悩みを3つ具体的に列挙\n"
-                    "3. **SYUTAINβの資格証明**: このテーマについてSYUTAINβシステムが持つデータや実績（4台分散ノード、49件/日SNS自動投稿、ローカルLLM85%等の実数値）\n"
-                    "4. **記事の価値の明示**: 「この記事で得られること」を箇条書き3-5個\n"
-                    "5. **クリフハンガー**: 有料パートへの期待を最大化する引き\n"
-                    "   例: 「でも、本当に大事なのはここからだ。47回の失敗の中で、1つだけ見つけた法則がある。」\n\n"
-                    "### 本文中に必ず以下のマーカーを入れる:\n"
-                    "```\n---ここから有料---\n```\n"
-                    "（noteのペイウォール位置を示す。この行の後が有料パート）\n\n"
-                    "### 【有料パート】「---ここから有料---」以降（4500-8000字）\n"
-                    "1. **独自の体験・エピソード**: 島原大知の実体験を3つ以上（日時・場所・感情を含む）\n"
-                    "2. **具体的な数値・データ**: コスト（¥）、時間、回数など定量的な情報\n"
-                    "3. **実践フレームワーク**: 読者が今日から試せるステップを3-5個（時間・コスト付き）\n"
-                    "4. **失敗談と教訓**: 成功事例だけでなく、失敗から何を学んだかを正直に書く\n"
-                    "5. **深い構造分析**: 「なぜそうなるのか」の原理を解説（表面的解説は×）\n"
-                    "6. **見出し構成**: ## 見出しを7個以上。各セクションは800-1200字\n"
-                    "7. **核心の一文**: **太字**で読者の行動を変える一文\n"
-                    "8. **まとめ**: 記事の要点を3-5個の箇条書きで整理\n\n"
-                    "## 絶対禁止:\n"
-                    "- 架空のエピソード（「カフェで友人が〜」等の作り話）\n"
-                    "- AI定型句（「〜について考えてみました」「いかがでしょうか」「深掘り」）\n"
-                    "- 抽象的な一般論だけで具体性がない段落\n"
-                    "- 「誰でも簡単に」「絶対稼げる」等の煽り表現\n"
-                    "- 島原がやっていないこと（音楽の仕事、楽曲制作の案件、VTuber活動等）を事実として語ること\n"
-                    "- 島原がVTuber活動をしていたと語ること（業界支援であり活動者ではない）\n\n"
-                    f"{system_data_text}\n\n"
-                    "記事本文のみを出力。メタ情報や説明は不要。\n"
+                    f"テーマ「{selected_theme}」のnote記事を書いてください。\n\n"
+                    + (f"## 記事構成パターン: {_selected_pattern['name']}\n{_selected_pattern['prompt_fragment']}\n感情曲線: {_selected_pattern['emotion_curve']}\n\n" if _selected_pattern else "")
+                    + f"## 構成案\n{outline}\n\n"
+                    f"## SYUTAINβの実データ\n{system_data_text}\n\n"
+                    "## 執筆ルール（最重要、全て守ること）\n\n"
+                    "【構成】\n"
+                    "- 全文無料公開。ペイウォール・有料の文言は一切入れない\n"
+                    "- 冒頭3行で読者を掴む（具体的な数字か問い）\n"
+                    "- ## 見出しを7つ以上。各800字以上\n"
+                    "- 最後に「まとめ」セクションで要点3-5個。記事を完結させる\n"
+                    "- 8000字以上。途中で終わらない。必ず結論まで書ききる\n\n"
+                    "【品質】\n"
+                    "- 同じ主張を2回以上繰り返さない。書いたことは次へ進む\n"
+                    "- 各段落に具体的な事実（日付、数値、ツール名、エラー内容）を1つ以上含める\n"
+                    "- 抽象論だけの段落は禁止。「具体例→原理→教訓」の順で書く\n"
+                    "- 読者の感情を動かす文章にする。「で？」と思われたら負け\n\n"
+                    "【禁止】\n"
+                    "- 架空エピソード（会社名、クライアント、同僚、友人）\n"
+                    "- AI定型句（いかがでしょうか、深掘り、させていただきます）\n"
+                    "- 島原がやっていないこと（プログラミング、VTuber活動、音楽制作の案件）\n"
+                    "- 番号付きリストの乱用（本当に手順のときだけ使う）\n\n"
+                    "記事本文のみを出力。# タイトルから始めて、まとめで終わる。\n"
                     f"{few_shot_text}"
                 ),
                 system_prompt=(
-                    "あなたは島原大知として有料note記事を執筆する。\n"
-                    "一人称は「僕」。SYUTAINβは「僕が作ったシステム」として言及する。\n"
-                    "SYUTAINβの一人称（「自分」「私」）で書かない。島原大知の視点で書く。\n\n"
-                    "## 現在の方針（2026年4月2日決定）:\n"
-                    "- 6月1日まで全記事無料（リーチ拡大フェーズ）。有料販売の文言は入れない\n"
-                    "- テーマ: SYUTAINβで実際に何が起きたか（Build in Public）\n"
-                    "- 「ここでしか読めない情報」「実際のシステムデータに基づく内容」を含めること\n\n"
-                    "## 島原大知の事実（絶対厳守）:\n"
-                    "- 非エンジニア。コードは書けない。映像クリエイター\n"
-                    "- VTuber業界8年間支援（活動者ではない）\n"
-                    "- 年齢や誕生日に言及しない（捏造防止）\n\n"
-                    "## 文体ルール（島原大知らしさ）:\n"
-                    "- 一文は短く切る。60字以内。余計な修飾語を削る\n"
-                    "- 断定と疑問を混ぜる。「〜です。〜ます。」の連続禁止\n"
-                    "- 体言止めを使う。リズムを作る\n"
-                    "- 抽象論を語った直後に具体例。セットで書く\n"
-                    "- ダラダラ書かない。言いたいことを先に言う。理由は後\n"
-                    "- 「いかがでしょうか」「深掘り」「〜について考えてみました」は絶対禁止\n\n"
-                    "## 島原大知について（事実のみ使うこと）:\n"
-                    "- コードを一行も書けない非エンジニア\n"
-                    "- VTuber業界に8年間関わった（業界支援・映像制作。VTuber活動はしていない）\n"
-                    "- 本業は映像制作（VFX/動画編集/カラーグレーディング/撮影/ドローン）\n"
-                    "- SYUTAINβを開発（AIエージェントと共に）\n"
-                    "- 4台のPCで分散AIシステムを運用中\n\n"
-                    "## 島原大知の思考特性（文体と視点に反映すること）:\n"
-                    "- 物事の表面ではなく裏側の構造を見る人間。仕組み・権限・金の流れ・依存関係・ボトルネックを自然に読み取る\n"
-                    "- 壮大なビジョンに対してそのまま受け取らず「それを実現するには具体的に何が必要か」を問う。冷笑ではなく本気で考える側\n"
-                    "- 理想を持つことと現実の制約を直視することを両立させる。夢と現実の境界線を正確に引く\n"
-                    "- 技術の話をしても必ず「人」の話に帰着する。数字の向こうにある人間の営みを見落とさない\n"
-                    "- 自分の感情に正直。取り繕わずそのまま出す。それは諦めではなく現状認識の精度を上げるため\n"
-                    "- 「考えてしまう」ことを止められない。見えてしまった問題を放置できない。まだ起きていないことでも考え続ける\n"
-                    "- 不確実性への鋭敏な感覚と、それでも構造を組み火を灯し続ける意志\n\n"
-                    f"{_STRUCTURAL_QUALITY_CHECKLIST}\n\n"
-                    f"{_FACTUAL_VERIFICATION_RULES}\n\n"
-                    f"{_WRITING_STYLE_ENFORCEMENT}\n\n"
-                    f"{content_patterns[:3000]}\n\n"
-                    f"{writing_style[:2000]}\n\n"
-                    f"{anti_ai_writing[:2000]}\n\n"
-                    f"{persona_text}\n\n"
-                    "記事本文のみを出力。タイトルも含めてよい。"
+                    "あなたは島原大知。一人称「僕」。非エンジニアの映像クリエイター。\n"
+                    "コードは書けない。VTuber業界8年支援（活動者ではない）。SYUTAINβ開発者。\n"
+                    "年齢・誕生日には絶対に言及しない。\n\n"
+                    "文体: 短い文。断定。体言止め。具体→原理→教訓の順。\n"
+                    "裏側の構造を見る。夢と現実の境界線を引く。感情に正直。\n"
+                    "見えた問題を放置できない人間として書く。\n\n"
+                    f"{writing_style[:1500]}\n\n"
+                    f"{persona_text[:1500]}\n\n"
+                    "記事本文のみを出力。# タイトルから始める。"
                 ),
                 model_selection=model_sel_draft,
             )
@@ -1001,7 +1076,7 @@ async def generate_publishable_content(
             # メタ指示漏洩を除去
             first_draft = _sanitize_article_output(first_draft)
             if not first_draft or len(first_draft) < 6000:
-                raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、有料記事は最低6000字必要）")
+                raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低6000字必要）")
 
             # 事実検証チェック
             factual_issues = _verify_factual_claims(first_draft)
@@ -1047,7 +1122,7 @@ async def generate_publishable_content(
                 min_length = len(rewritten)
                 rewrite_instruction = (
                     "以下の記事を島原大知の声でリライトしてください。\n"
-                    "この記事は500円の有料note記事です。無料記事と明確に差別化される品質が必要です。\n\n"
+                    "この記事は無料公開のnote記事です。読者にとって具体的な価値がある品質を維持してください。\n\n"
                     f"【最重要】必ず元の文章と同等以上の長さを維持すること。元原稿は{min_length}字です。"
                     f"リライト結果は最低{min_length}字以上にしてください。"
                     "短縮・要約は絶対に行わないでください。情報量を減らさず、むしろ具体例や描写を追加して充実させること。\n\n"
@@ -1086,7 +1161,7 @@ async def generate_publishable_content(
                 if not rewrite_result_text or len(rewrite_result_text) < 4000:
                     rewrite_len = len(rewrite_result_text)
                     rewritten = first_draft
-                    raise ValueError(f"リライト結果が短すぎる（{rewrite_len}字、有料記事は4000字以上必要）")
+                    raise ValueError(f"リライト結果が短すぎる（{rewrite_len}字、記事は4000字以上必要）")
                 # リライト結果が元原稿の50%未満なら、短縮されたとみなし元原稿を維持
                 if len(rewrite_result_text) < len(first_draft) * 0.5:
                     logger.warning(
@@ -1192,7 +1267,7 @@ async def generate_publishable_content(
                 critique_result = await call_llm(
                     max_tokens=8192,
                     prompt=(
-                        "以下の有料note記事（980円）を批評し、改善してください。\n\n"
+                        "以下のnote記事を批評し、改善してください。\n\n"
                         "## 批評の手順:\n"
                         "1. この記事の弱い部分を3つ特定する\n"
                         "2. それぞれの弱い部分を具体的に改善して書き直す\n"
@@ -1207,14 +1282,14 @@ async def generate_publishable_content(
                         "- 冒頭3行のインパクトが弱い場合は書き直す\n\n"
                         "## 制約:\n"
                         f"- 元原稿は{len(rewritten)}字。改善後も同等以上の長さを維持\n"
-                        "- 記事の構造（見出し、ペイウォール位置）は維持\n"
+                        "- 記事の構造（見出し構造）は維持\n"
                         "- 島原大知の文体を維持（断定、短文、三点リーダー、逆接多用）\n"
                         "- 架空のエピソードを追加しない\n"
                         "- 改善した完全版の記事本文のみを出力\n\n"
                         f"## 記事本文\n{rewritten}"
                     ),
                     system_prompt=(
-                        "あなたは有料コンテンツの品質改善エディター。\n"
+                        "あなたはnote記事の品質改善エディター。\n"
                         "記事の弱い部分を特定し、具体性・データ・アクション可能性を向上させる。\n"
                         "批評だけでなく、必ず改善した完全版を出力する。\n"
                         "AI臭い表現（「特筆すべき」「画期的な」「注目すべき」「さらに」の多用）を排除する。\n"
@@ -1284,7 +1359,7 @@ async def generate_publishable_content(
                 "status": "passed",
             })
 
-        # === SYUTAINβ auto-generated ラベル（記事冒頭） ===
+        # SYUTAINβ auto-generated ラベル（記事冒頭）— システムデモとして自動生成を明示
         _auto_gen_label = (
             "> この記事はSYUTAINβ（自律型AI事業OS）が自動生成・公開しました。\n"
             "> 島原大知が開発したシステムが、人間の介入なしに執筆しています。\n\n"

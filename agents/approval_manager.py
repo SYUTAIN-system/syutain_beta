@@ -85,8 +85,8 @@ def classify_tier(request_type: str, request_data: dict = None) -> int:
         return 2
     if request_type in TIER_3_FULLY_AUTO:
         return 3
-    # 未分類はTier 2（自動承認+通知）
-    return 2
+    # 未分類はTier 1（人間承認必須、ノイズ防止）
+    return 1
 
 
 class ApprovalManager:
@@ -159,6 +159,85 @@ class ApprovalManager:
                 }
         except Exception as e:
             logger.error(f"HarnessLinterエラー（承認フロー続行）: {e}")
+
+        # === ポリシーゲート: 6月まで無料方針 + Build in Public方針 ===
+        # 価格>0、Booth言及、有料販売促進を構造的にブロック
+        from datetime import date as _date
+        _is_free_period = _date.today() < _date(2026, 6, 1)
+        _data_text = json.dumps(request_data, ensure_ascii=False) if request_data else ""
+        _title = request_data.get("title", "") if request_data else ""
+
+        # ゲート1: 価格>0 の承認申請を無料期間中はブロック
+        _price = request_data.get("price_jpy", 0) if request_data else 0
+        if _is_free_period and _price and _price > 0 and request_type in ("product_publish", "pricing"):
+            logger.warning(f"ポリシーゲート BLOCK: price_jpy={_price} > 0 (無料期間中)")
+            await self._notify_discord(
+                f"🛑 **ポリシーゲートBLOCK**: 6月まで無料方針違反\n"
+                f"リクエスト: {request_type}\n"
+                f"価格: ¥{_price}（無料期間中は¥0のみ許可）\n"
+                f"タイトル: {_title[:60]}",
+                tier=1,
+            )
+            return {
+                "status": "blocked",
+                "tier": 0,
+                "request_type": request_type,
+                "reason": "policy_gate_free_until_june_2026",
+                "price_jpy": _price,
+            }
+
+        # ゲート2: Booth/有料販売関連のキーワードを含む承認をブロック
+        _forbidden_keywords = ["Booth", "booth", "BOOTH", "有料販売", "課金", "価格設定", "paid_content"]
+        if _is_free_period and any(kw in _data_text for kw in _forbidden_keywords):
+            _hit = next((kw for kw in _forbidden_keywords if kw in _data_text), "")
+            logger.warning(f"ポリシーゲート BLOCK: Booth/有料販売言及検出 (hit={_hit})")
+            await self._notify_discord(
+                f"🛑 **ポリシーゲートBLOCK**: Build in Public方針違反\n"
+                f"リクエスト: {request_type}\n"
+                f"検出キーワード: {_hit}\n"
+                f"6月まで無料公開。Booth/有料販売の提案は全て却下されます。\n"
+                f"内容: {_data_text[:200]}",
+                tier=1,
+            )
+            return {
+                "status": "blocked",
+                "tier": 0,
+                "request_type": request_type,
+                "reason": f"policy_gate_build_in_public (kw={_hit})",
+            }
+
+        # ゲート3: タイトル異常検出（プロンプト漏洩、長すぎ）
+        if _title and request_type in ("product_publish",):
+            _title_bad_keywords = ["intel_items", "persona_memory", "trend_detector", "自由テーマ", "theme_hint"]
+            if len(_title) > 80:
+                logger.warning(f"ポリシーゲート BLOCK: title長すぎ ({len(_title)}字)")
+                await self._notify_discord(
+                    f"🛑 **ポリシーゲートBLOCK**: タイトル異常\n"
+                    f"タイトル長: {len(_title)}字（上限80字）\n"
+                    f"内容: {_title[:150]}",
+                    tier=1,
+                )
+                return {"status": "blocked", "tier": 0, "request_type": request_type, "reason": "title_too_long"}
+            if any(kw in _title for kw in _title_bad_keywords):
+                _hit = next((kw for kw in _title_bad_keywords if kw in _title), "")
+                logger.warning(f"ポリシーゲート BLOCK: title漏洩検出 ({_hit})")
+                await self._notify_discord(
+                    f"🛑 **ポリシーゲートBLOCK**: プロンプト漏洩タイトル\n"
+                    f"検出: {_hit}\n"
+                    f"タイトル: {_title[:150]}",
+                    tier=1,
+                )
+                return {"status": "blocked", "tier": 0, "request_type": request_type, "reason": f"title_leak ({_hit})"}
+
+        # ゲート4: approval_request メタタイプの自己ループ防止
+        if request_type == "approval_request":
+            logger.info("approval_request メタタイプ: 自己ループ防止のためブロック")
+            return {
+                "status": "blocked",
+                "tier": 0,
+                "request_type": request_type,
+                "reason": "meta_approval_request_blocked",
+            }
 
         tier = classify_tier(request_type, request_data)
         now = datetime.now(timezone.utc)

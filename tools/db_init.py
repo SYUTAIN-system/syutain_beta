@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS posting_queue (
     theme_category TEXT,
     post_url TEXT,
     affiliate_url TEXT,
+    engagement_data JSONB,
     error_message TEXT,
     posted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -478,6 +479,24 @@ CREATE TABLE IF NOT EXISTS posting_queue_engagement (
     impressions INTEGER DEFAULT 0,
     checked_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_posting_queue_engagement_posting_id ON posting_queue_engagement(posting_queue_id);
+CREATE INDEX IF NOT EXISTS idx_posting_queue_engagement_checked_at ON posting_queue_engagement(checked_at);
+
+-- Blueskyフォロー追跡（フォローバック率計測 + 非相互アンフォロー）
+CREATE TABLE IF NOT EXISTS bluesky_follow_tracking (
+    id SERIAL PRIMARY KEY,
+    did TEXT NOT NULL UNIQUE,
+    handle TEXT,
+    source TEXT,
+    followed_at TIMESTAMPTZ DEFAULT NOW(),
+    followback_checked_at TIMESTAMPTZ,
+    is_followback BOOLEAN DEFAULT FALSE,
+    unfollowed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_bluesky_follow_tracking_followed_at ON bluesky_follow_tracking(followed_at);
+CREATE INDEX IF NOT EXISTS idx_bluesky_follow_tracking_unfollowed_at ON bluesky_follow_tracking(unfollowed_at);
+CREATE INDEX IF NOT EXISTS idx_bluesky_follow_tracking_is_followback ON bluesky_follow_tracking(is_followback);
 
 -- コマース取引ログ（日次サマリー・executive_briefing用）
 CREATE TABLE IF NOT EXISTS commerce_transactions (
@@ -655,6 +674,7 @@ async def init_postgresql() -> bool:
                 "ALTER TABLE product_packages ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
                 # posting_queue: アフィリエイトURL追跡用
                 "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS affiliate_url TEXT",
+                "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS engagement_data JSONB",
                 # persona_memory: Claude Constitution優先度階層（1=absolute〜5=optional）
                 "ALTER TABLE persona_memory ADD COLUMN IF NOT EXISTS priority_tier INTEGER DEFAULT 3",
                 # semantic_cache: 旧スキーマからのマイグレーション（ベクトル検索対応）

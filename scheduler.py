@@ -13,12 +13,25 @@ import os
 import sys
 import asyncio
 import logging
+import fcntl
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# --- PIDロックによる重複起動防止 ---
+_PID_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", ".scheduler.lock")
+os.makedirs(os.path.dirname(_PID_LOCK_FILE), exist_ok=True)
+_lock_fp = open(_PID_LOCK_FILE, "w")
+try:
+    fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _lock_fp.write(str(os.getpid()))
+    _lock_fp.flush()
+except BlockingIOError:
+    print(f"[SCHEDULER] 別プロセスが既に稼働中です（lockfile: {_PID_LOCK_FILE}）。終了します。", file=sys.stderr)
+    sys.exit(1)
 
 # ログ設定（RotatingFileHandler: 10MB x 5世代）
 LOG_DIR = os.getenv("LOG_DIR", "logs")
@@ -138,7 +151,7 @@ class SyutainScheduler:
 
             self._scheduler.add_job(
                 self.daily_proposal,
-                CronTrigger(hour=7, minute=0),
+                CronTrigger(hour=7, minute=0, timezone="Asia/Tokyo"),
                 id="daily_proposal",
                 name="日次提案生成（毎日 07:00）",
                 replace_existing=True,
@@ -146,7 +159,7 @@ class SyutainScheduler:
 
             self._scheduler.add_job(
                 self.weekly_proposal,
-                CronTrigger(day_of_week="mon", hour=9, minute=0),
+                CronTrigger(day_of_week="mon", hour=9, minute=0, timezone="Asia/Tokyo"),
                 id="weekly_proposal",
                 name="週次提案生成（月曜 09:00）",
                 replace_existing=True,
@@ -162,7 +175,7 @@ class SyutainScheduler:
 
             self._scheduler.add_job(
                 self.weekly_learning_report,
-                CronTrigger(day_of_week="sun", hour=21, minute=0),
+                CronTrigger(day_of_week="sun", hour=21, minute=0, timezone="Asia/Tokyo"),
                 id="weekly_learning_report",
                 name="週次学習レポート（日曜 21:00）",
                 replace_existing=True,
@@ -233,6 +246,56 @@ class SyutainScheduler:
                 CronTrigger(hour=18, minute=0, timezone="Asia/Tokyo"),
                 id="daily_content_evening",
                 name="日次コンテンツ#3 自由テーマ（18:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
+            # === 新規追加6スロット（1日3本公開目標） ===
+            self._scheduler.add_job(
+                self.generate_daily_content_mid_morning,
+                CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
+                id="daily_content_mid_morning",
+                name="日次コンテンツ#4 実運用レポート（09:30）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            self._scheduler.add_job(
+                self.generate_daily_content_pre_lunch,
+                CronTrigger(hour=11, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_pre_lunch",
+                name="日次コンテンツ#5 AI×映像制作（11:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            self._scheduler.add_job(
+                self.generate_daily_content_afternoon,
+                CronTrigger(hour=14, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_afternoon",
+                name="日次コンテンツ#6 失敗談・教訓（14:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            self._scheduler.add_job(
+                self.generate_daily_content_mid_afternoon,
+                CronTrigger(hour=16, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_mid_afternoon",
+                name="日次コンテンツ#7 設計判断の記録（16:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            self._scheduler.add_job(
+                self.generate_daily_content_pre_night,
+                CronTrigger(hour=20, minute=0, timezone="Asia/Tokyo"),
+                id="daily_content_pre_night",
+                name="日次コンテンツ#8 コスト分析（20:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            self._scheduler.add_job(
+                self.generate_daily_content_night_prep,
+                CronTrigger(hour=21, minute=30, timezone="Asia/Tokyo"),
+                id="daily_content_night_prep",
+                name="日次コンテンツ#9 哲学・思考（21:30）",
                 replace_existing=True,
                 misfire_grace_time=60,
             )
@@ -655,6 +718,62 @@ class SyutainScheduler:
                 CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
                 id="update_github_readme",
                 name="GitHub README更新（毎日09:30）",
+                replace_existing=True,
+            )
+
+            # プラットフォーム別バズ検出（2時間間隔）— トレンド便乗投稿の素材収集
+            self._scheduler.add_job(
+                self.detect_platform_buzz,
+                IntervalTrigger(hours=2),
+                id="platform_buzz_detect",
+                name="プラットフォームバズ検出（2時間）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # エンゲージメント収集（4時間間隔）— 拡散指標の数値化に必須
+            self._scheduler.add_job(
+                self.collect_engagement,
+                IntervalTrigger(hours=4),
+                id="engagement_collector",
+                name="エンゲージメント収集（4時間間隔）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # Blueskyフォローバック確認（毎日10:00 JST）
+            self._scheduler.add_job(
+                self.bluesky_check_followbacks,
+                CronTrigger(hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="bluesky_followback_check",
+                name="Blueskyフォローバック確認（毎日10:00）",
+                replace_existing=True,
+            )
+
+            # Bluesky自動フォロー（毎日14:00 JST）— 拡散フェーズ: フォロワー獲得
+            self._scheduler.add_job(
+                self.bluesky_auto_follow,
+                CronTrigger(hour=14, minute=0, timezone="Asia/Tokyo"),
+                id="bluesky_follow",
+                name="Bluesky自動フォロー（毎日14:00）",
+                replace_existing=True,
+            )
+
+            # Bluesky非相互アンフォロー（毎週日曜15:00 JST）
+            self._scheduler.add_job(
+                self.bluesky_unfollow,
+                CronTrigger(day_of_week="sun", hour=15, minute=0, timezone="Asia/Tokyo"),
+                id="bluesky_unfollow",
+                name="Bluesky非相互アンフォロー（日曜15:00）",
+                replace_existing=True,
+            )
+
+            # 日次ヘルスチェック（毎日09:30 JST）— 拡散フェーズの機会損失を即座に検知
+            self._scheduler.add_job(
+                self.daily_health_check,
+                CronTrigger(hour=9, minute=30, timezone="Asia/Tokyo"),
+                id="daily_health_check",
+                name="日次ヘルスチェック（毎日09:30）",
                 replace_existing=True,
             )
 
@@ -2369,9 +2488,10 @@ class SyutainScheduler:
                             health["gpu_mem_total_mb"] = int(parts[3])
                             health["status"] = "alive"
                             config = get_power_config()
-                            if health["gpu_temp_c"] > config.get("gpu_temp_limit", 80):
+                            _gpu_limit = config.get("gpu_temp_limit", 80)
+                            if health["gpu_temp_c"] > _gpu_limit:
                                 health["gpu_throttled"] = True
-                                logger.warning(f"{node.upper()} GPU温度{health['gpu_temp_c']}℃ > 閾値{config['gpu_temp_limit']}℃")
+                                logger.warning(f"{node.upper()} GPU温度{health['gpu_temp_c']}℃ > 閾値{_gpu_limit}℃")
                     except Exception:
                         pass
 
@@ -2440,7 +2560,7 @@ class SyutainScheduler:
                         from tools.db_pool import get_connection
                         async with get_connection() as conn:
                             current = await conn.fetchval(
-                                "SELECT status FROM node_state WHERE node_name = $1", node
+                                "SELECT state FROM node_state WHERE node_name = $1", node
                             )
                             if current == "healthy":
                                 # healthy→downに更新
@@ -2458,7 +2578,7 @@ class SyutainScheduler:
                         from tools.db_pool import get_connection
                         async with get_connection() as conn:
                             current = await conn.fetchval(
-                                "SELECT status FROM node_state WHERE node_name = $1", node
+                                "SELECT state FROM node_state WHERE node_name = $1", node
                             )
                             if current == "down":
                                 await conn.execute(
@@ -3310,7 +3430,20 @@ class SyutainScheduler:
         """日次コンテンツ生成共通実装: 5段パイプラインでnote記事候補を1本生成"""
         try:
             from brain_alpha.content_pipeline import generate_publishable_content
-            kwargs = {"content_type": "note_article", "target_length": 6000, "theme": theme_hint}
+            # スロット別テーマカテゴリのマッピング（テーマ多様化）
+            _slot_theme_hints = {
+                "morning": "海外AIトレンド先取り（日本語記事が少ない海外の話題をSYUTAINβの視点で解説）",
+                "mid_morning": "SYUTAINβの実運用レポート（直近24時間の数値・エラー・気づき）",
+                "pre_lunch": "AI×映像制作（島原が映像クリエイターとしてAIツールを使った実体験）",
+                "midday": "SYUTAINβの実データを核にした分析記事",
+                "afternoon": "SYUTAINβで起きた失敗と教訓（具体的なバグ・誤判断・リカバリ）",
+                "mid_afternoon": "設計判断の記録（なぜこの選択をしたか、他の選択肢との比較）",
+                "evening": "自由テーマ（SYUTAINβで最近起きた最も面白い出来事）",
+                "pre_night": "コスト分析（月次/日次のLLMコスト、ローカル比率、削減工夫）",
+                "night_prep": "AIと人間の関係についての思索（実体験ベース）",
+            }
+            effective_theme = theme_hint if theme_hint else _slot_theme_hints.get(slot_name)
+            kwargs = {"content_type": "note_article", "target_length": 6000, "theme": effective_theme}
             if extra_kwargs:
                 kwargs.update(extra_kwargs)
             result = await generate_publishable_content(**kwargs)
@@ -3370,7 +3503,51 @@ class SyutainScheduler:
         """18:00 JST: SYUTAINβ自由テーマ"""
         await self._generate_daily_content_impl(
             slot_name="evening",
-            theme_hint=None,  # content_pipelineが実データからBIP方針でテーマ自動選定
+            theme_hint=None,
+        )
+
+    # === 新規追加スロット（1日3本公開目標のため増量） ===
+
+    async def generate_daily_content_mid_morning(self):
+        """09:30 JST: SYUTAINβ実運用レポート"""
+        await self._generate_daily_content_impl(
+            slot_name="mid_morning",
+            theme_hint=None,
+        )
+
+    async def generate_daily_content_pre_lunch(self):
+        """11:00 JST: AI×映像制作"""
+        await self._generate_daily_content_impl(
+            slot_name="pre_lunch",
+            theme_hint=None,
+        )
+
+    async def generate_daily_content_afternoon(self):
+        """14:00 JST: 失敗談・教訓"""
+        await self._generate_daily_content_impl(
+            slot_name="afternoon",
+            theme_hint=None,
+        )
+
+    async def generate_daily_content_mid_afternoon(self):
+        """16:00 JST: 設計判断の記録"""
+        await self._generate_daily_content_impl(
+            slot_name="mid_afternoon",
+            theme_hint=None,
+        )
+
+    async def generate_daily_content_pre_night(self):
+        """20:00 JST: コスト分析"""
+        await self._generate_daily_content_impl(
+            slot_name="pre_night",
+            theme_hint=None,
+        )
+
+    async def generate_daily_content_night_prep(self):
+        """21:30 JST: 哲学・思考"""
+        await self._generate_daily_content_impl(
+            slot_name="night_prep",
+            theme_hint=None,
         )
 
     async def generate_daily_content(self):
@@ -3480,8 +3657,42 @@ class SyutainScheduler:
                                     "retry": (retry_count or 0) + 1, "error": result.get("reason", "")[:100],
                                 }, severity="warning")
                     except Exception as e:
-                        logger.error(f"posting_queue#{post_id} 投稿エラー: {e}")
-                        await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+                        # 一時エラー（ネットワーク/タイムアウト/5xx）はpendingに戻してリトライ機会を残す
+                        _err_str = str(e).lower()
+                        _is_transient = any(k in _err_str for k in ["timeout", "timed out", "connection", "read", "5xx", "502", "503", "504", "rate"])
+                        if _is_transient:
+                            # リトライ回数をevent_logから集計（過去24h内）
+                            _retry_count_row = await conn.fetchrow(
+                                """SELECT COUNT(*) AS cnt FROM event_log
+                                WHERE event_type = 'sns.post_retry'
+                                AND payload::jsonb->>'posting_queue_id' = $1
+                                AND created_at > NOW() - INTERVAL '24 hours'""",
+                                str(post_id),
+                            )
+                            _current_retries = int(_retry_count_row["cnt"] or 0) if _retry_count_row else 0
+                            if _current_retries >= 3:
+                                # 3回リトライ済み → failed確定
+                                logger.error(f"posting_queue#{post_id} 一時エラー3回超過 → failed確定: {e}")
+                                await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
+                            else:
+                                logger.warning(f"posting_queue#{post_id} 一時エラー(retry {_current_retries+1}/3): {e}")
+                                await conn.execute(
+                                    "UPDATE posting_queue SET status='pending', scheduled_at = NOW() + INTERVAL '5 minutes' WHERE id=$1",
+                                    post_id,
+                                )
+                                # リトライをevent_logに記録（無限ループ防止のための集計源）
+                                try:
+                                    from tools.event_logger import log_event
+                                    await log_event("sns.post_retry", "sns", {
+                                        "posting_queue_id": str(post_id), "platform": platform,
+                                        "retry": _current_retries + 1, "error": str(e)[:100],
+                                        "transient": True,
+                                    }, severity="warning")
+                                except Exception:
+                                    pass
+                        else:
+                            logger.error(f"posting_queue#{post_id} 永続エラー（failed扱い）: {e}")
+                            await conn.execute("UPDATE posting_queue SET status='failed' WHERE id=$1", post_id)
         except Exception as e:
             logger.error(f"posting_queue処理エラー: {e}")
 
@@ -4616,6 +4827,7 @@ class SyutainScheduler:
     async def daily_syutain_report(self):
         """毎日12:00 JST: SYUTAINβ日報（note無料連載用）をローカルLLMで自動生成"""
         try:
+            import json
             from tools.db_pool import get_connection
             from tools.llm_router import choose_best_model_v6, call_llm
             from tools.event_logger import log_event
@@ -4714,21 +4926,218 @@ class SyutainScheduler:
                     except Exception:
                         pass
 
-                    # note自動公開パイプラインに乗せる（無料記事として）
+                    # note公開パイプラインに乗せる（品質チェックを経由、承認バイパスしない）
+                    # 注: status='ready' で投入 → note_quality_checker → product_packager → approval → publish
                     try:
                         title_line = report_text.split("\n", 1)[0].lstrip("#").strip()
                         await conn.execute("""
                             INSERT INTO product_packages
                                 (platform, title, body_preview, body_full, price_jpy, status, tags, category)
-                            VALUES ('note', $1, $2, '', 0, 'approved', '["SYUTAINβ","日報","AI","BuildInPublic"]', 'daily_report')
+                            VALUES ('note', $1, $2, '', 0, 'ready', '["SYUTAINβ","日報","AI","BuildInPublic"]', 'daily_report')
                         """, title_line[:100], report_text)
-                        logger.info(f"daily_syutain_report: note公開パイプラインに追加")
+                        logger.info(f"daily_syutain_report: note公開パイプラインに追加（status=ready、品質チェック経由）")
                     except Exception as pkg_err:
                         logger.warning(f"daily_syutain_report: note公開パイプライン追加失敗: {pkg_err}")
 
                     logger.info(f"daily_syutain_report: {len(report_text)}字 saved to {filepath}")
         except Exception as e:
             logger.error(f"daily_syutain_reportエラー: {e}")
+
+    async def bluesky_auto_follow(self):
+        """毎日14:00: Bluesky関連ユーザーをフォロー（最大30人/日）"""
+        try:
+            from tools.bluesky_growth import scheduled_follow
+            await scheduled_follow()
+        except Exception as e:
+            logger.error(f"Bluesky自動フォローエラー: {e}")
+
+    async def bluesky_check_followbacks(self):
+        """毎日10:00: フォローバック状況を確認"""
+        try:
+            from tools.bluesky_growth import scheduled_check_followbacks
+            await scheduled_check_followbacks()
+        except Exception as e:
+            logger.error(f"Blueskyフォローバック確認エラー: {e}")
+
+    async def bluesky_unfollow(self):
+        """毎週日曜15:00: 7日間フォローバックなしのユーザーをアンフォロー"""
+        try:
+            from tools.bluesky_growth import scheduled_unfollow
+            await scheduled_unfollow()
+        except Exception as e:
+            logger.error(f"Blueskyアンフォローエラー: {e}")
+
+    async def detect_platform_buzz(self):
+        """2時間間隔: 各プラットフォームのトレンド・バズを検出してDB保存"""
+        try:
+            from tools.platform_buzz_detector import run_buzz_detection_job
+            result = await run_buzz_detection_job()
+            logger.info(f"バズ検出: {result}")
+        except Exception as e:
+            logger.error(f"バズ検出エラー: {e}")
+
+    async def collect_engagement(self):
+        """4時間間隔: 直近48hのSNS投稿のエンゲージメントデータを収集"""
+        try:
+            from tools.engagement_collector import collect_engagement
+            stats = await collect_engagement(hours=48)
+            logger.info(
+                f"エンゲージメント収集完了: "
+                f"対象={stats['total']} 成功={stats['success']} 失敗={stats['failed']}"
+            )
+        except Exception as e:
+            logger.error(f"エンゲージメント収集エラー: {e}")
+
+    async def daily_health_check(self):
+        """毎日09:30 JST: 日次ヘルスチェック。fail項目のみDiscordに報告。
+        拡散フェーズの機会損失を即座に検知し、拡散に影響するfailは最優先で修正着手。"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.discord_notify import notify_discord
+            import httpx
+
+            fails = []
+            passes = 0
+
+            async with get_connection() as conn:
+                # === インフラ ===
+                # 1. ノード死活
+                for node_name, ip in REMOTE_NODES.items():
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            resp = await client.get(f"http://{ip}:11434/api/tags")
+                            if resp.status_code == 200:
+                                passes += 1
+                            else:
+                                fails.append(f"インフラ: {node_name.upper()} Ollama応答異常 (status={resp.status_code})")
+                    except Exception:
+                        fails.append(f"インフラ: {node_name.upper()} 無応答")
+
+                # 2. スケジューラジョブが直近24hで正常完了したか
+                try:
+                    job_count = await conn.fetchval(
+                        """SELECT COUNT(DISTINCT event_type) FROM event_log
+                        WHERE event_type LIKE 'scheduler.%' AND created_at > NOW() - INTERVAL '24 hours'"""
+                    )
+                    if job_count and int(job_count) >= 5:
+                        passes += 1
+                    else:
+                        fails.append(f"インフラ: schedulerジョブ実行数が少ない (直近24h: {job_count}種類)")
+                except Exception as e:
+                    fails.append(f"インフラ: ジョブ実行確認失敗 ({e})")
+
+                # 3. API残高・月次予算消化率
+                try:
+                    import os as _os
+                    monthly_budget = float(_os.getenv("MONTHLY_BUDGET_JPY", "2000"))
+                    monthly_spent = await conn.fetchval(
+                        "SELECT COALESCE(SUM(amount_jpy), 0) FROM llm_cost_log WHERE recorded_at >= date_trunc('month', NOW())"
+                    )
+                    ratio = float(monthly_spent) / monthly_budget if monthly_budget > 0 else 0
+                    if ratio < 0.8:
+                        passes += 1
+                    else:
+                        fails.append(f"インフラ: 月次予算{ratio*100:.0f}%消化 (¥{float(monthly_spent):.0f}/¥{monthly_budget:.0f})")
+                except Exception as e:
+                    fails.append(f"インフラ: 予算確認失敗 ({e})")
+
+                # === コンテンツ公開状態 ===
+                # 4. 公開済みnote記事URLに未認証アクセス
+                try:
+                    published_urls = await conn.fetch(
+                        "SELECT id, publish_url FROM product_packages WHERE status = 'published' AND publish_url LIKE 'https://note.com/%'"
+                    )
+                    if not published_urls:
+                        fails.append("コンテンツ: 公開済みnote記事が0件")
+                    else:
+                        note_ok = 0
+                        for row in published_urls:
+                            try:
+                                async with httpx.AsyncClient(timeout=10.0) as client:
+                                    resp = await client.get(row["publish_url"], follow_redirects=True)
+                                    if resp.status_code == 200 and len(resp.text) > 1000:
+                                        note_ok += 1
+                            except Exception:
+                                pass
+                        if note_ok == len(published_urls):
+                            passes += 1
+                        else:
+                            fails.append(f"コンテンツ: note記事 {note_ok}/{len(published_urls)}件のみアクセス可")
+                except Exception as e:
+                    fails.append(f"コンテンツ: note確認失敗 ({e})")
+
+                # 5. SNS投稿が実際に表示されているか（post_urlの存在確認）
+                try:
+                    recent_posted = await conn.fetchval(
+                        """SELECT COUNT(*) FROM posting_queue
+                        WHERE status = 'posted' AND post_url IS NOT NULL AND post_url != ''
+                        AND posted_at > NOW() - INTERVAL '24 hours'"""
+                    )
+                    if recent_posted and int(recent_posted) > 0:
+                        passes += 1
+                    else:
+                        fails.append(f"コンテンツ: 直近24hのSNS投稿が0件（post_urlあり）")
+                except Exception as e:
+                    fails.append(f"コンテンツ: SNS投稿確認失敗 ({e})")
+
+                # === 拡散指標 ===
+                # 6. 反応データがDBに記録されているか
+                try:
+                    engagement_count = await conn.fetchval(
+                        """SELECT COUNT(*) FROM posting_queue_engagement
+                        WHERE checked_at > NOW() - INTERVAL '24 hours'"""
+                    )
+                    if engagement_count and int(engagement_count) > 0:
+                        passes += 1
+                    else:
+                        fails.append("拡散指標: 直近24hのエンゲージメントデータが0件")
+                except Exception as e:
+                    # テーブルが存在しない場合も含む
+                    fails.append(f"拡散指標: エンゲージメントデータ取得失敗 ({e})")
+
+                # === SNS投稿品質 ===
+                # 7. 直近投稿をサンプリングしてLLMで品質判定
+                try:
+                    samples = await conn.fetch(
+                        """SELECT platform, content FROM posting_queue
+                        WHERE status IN ('posted', 'pending')
+                        AND created_at > NOW() - INTERVAL '24 hours'
+                        ORDER BY created_at DESC LIMIT 9"""
+                    )
+                    if samples:
+                        from brain_alpha.sns_batch import _score_multi_axis
+                        low_quality = []
+                        for s in samples:
+                            score = _score_multi_axis(s["content"])
+                            if score < 0.40:
+                                low_quality.append(f'{s["platform"]}: {s["content"][:40]}... (score={score:.2f})')
+                        if low_quality:
+                            fails.append(f"SNS品質: 低品質投稿{len(low_quality)}件\n" + "\n".join(low_quality[:3]))
+                        else:
+                            passes += 1
+                    else:
+                        fails.append("SNS品質: 直近24hの投稿が0件")
+                except Exception as e:
+                    fails.append(f"SNS品質: 品質チェック失敗 ({e})")
+
+            # === 結果出力 ===
+            if not fails:
+                await notify_discord(f"✅ 日次ヘルスチェック: 全{passes}項目pass")
+            else:
+                report = f"⚠️ 日次ヘルスチェック: {len(fails)}件fail / {passes}件pass\n\n"
+                for f in fails:
+                    report += f"❌ {f}\n"
+                await notify_discord(report)
+
+            logger.info(f"日次ヘルスチェック完了: {len(fails)}fail / {passes}pass")
+
+        except Exception as e:
+            logger.error(f"日次ヘルスチェックエラー: {e}")
+            try:
+                from tools.discord_notify import notify_discord
+                await notify_discord(f"⚠️ 日次ヘルスチェック実行失敗: {e}")
+            except Exception:
+                pass
 
     async def weekly_x_thread(self):
         """月木 10:00 JST: Xスレッド用コンテンツ（4-6ツイート）をローカルLLMで生成"""

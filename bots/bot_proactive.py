@@ -190,12 +190,12 @@ async def check_proactive_triggers(channel) -> str | None:
                     if ratio >= 0.9:
                         key = "budget_proactive_90"
                         if proactive.can_emergency_alert(key, cooldown_minutes=1440):
-                            parts.append(f"\U0001f534 **予算超過** 日次予算の{ratio*100:.0f}%消費 (\\{float(daily_spent):.0f}/\\{daily_budget:.0f})")
+                            parts.append(f"\U0001f534 **予算超過** 日次予算の{ratio*100:.0f}%消費 (¥{float(daily_spent):.0f}/¥{daily_budget:.0f})")
                             proactive.record_emergency_alert(key)
                     elif ratio >= 0.8:
                         key = "budget_proactive_80"
                         if proactive.can_emergency_alert(key, cooldown_minutes=1440):
-                            parts.append(f"\U0001f7e1 **予算警告** 日次予算の{ratio*100:.0f}%消費 (\\{float(daily_spent):.0f}/\\{daily_budget:.0f})")
+                            parts.append(f"\U0001f7e1 **予算警告** 日次予算の{ratio*100:.0f}%消費 (¥{float(daily_spent):.0f}/¥{daily_budget:.0f})")
                             proactive.record_emergency_alert(key)
             except Exception as e:
                 logger.debug(f"予算チェック失敗: {e}")
@@ -436,7 +436,7 @@ async def check_emergency_alerts() -> str | None:
                             severity = "緊急" if ratio >= 1.0 else "警告"
                             alerts.append(
                                 f"\U0001f6a8 **{severity}: 予算{'超過' if ratio >= 1.0 else '警告'}** "
-                                f"日次予算{ratio*100:.0f}%消費 (\\{float(daily_spent):.0f}/\\{daily_budget:.0f}円)"
+                                f"日次予算{ratio*100:.0f}%消費 (¥{float(daily_spent):.0f}/¥{daily_budget:.0f})"
                             )
                             proactive.record_emergency_alert(key)
             except Exception as e:

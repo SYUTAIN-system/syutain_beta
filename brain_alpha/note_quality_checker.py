@@ -214,11 +214,19 @@ def mechanical_quality_check(content: str) -> dict:
         else:
             issues.append("コンテンツが空")
 
-        # === 7. 有料境界チェック ===
+        # === 7. 有料境界チェック（6月まで無料公開のため、マーカーなしでもpass）===
+        from datetime import date as _date
+        _is_free = _date.today() < _date(2026, 6, 1)
         if "---ここから有料---" in content:
-            score_points += 1.0
+            if _is_free:
+                issues.append("無料公開期間中にペイウォールマーカーが含まれている（除去推奨）")
+            else:
+                score_points += 1.0
         else:
-            issues.append("有料境界マーカー「---ここから有料---」が見つからない")
+            if _is_free:
+                score_points += 1.0  # 無料期間はマーカーなしが正しい
+            else:
+                issues.append("有料境界マーカー「---ここから有料---」が見つからない")
 
         # === 8. 見出し数チェック ===
         headings = re.findall(r'^#{2,3}\s+.+', content, re.MULTILINE)
@@ -236,18 +244,22 @@ def mechanical_quality_check(content: str) -> dict:
         else:
             issues.append(f"番号付き手順なし: {len(numbered_lists)}個（実践的な番号付きリスト3項目以上必要）")
 
-        # === 10. 有料パート実質性チェック ===
+        # === 10. 有料パート実質性チェック（6月まで無料のためスキップ可）===
         paywall_marker = "---ここから有料---"
-        paid_content_length = 0
+        paid_content_length = 0  # 初期化（無料期間中・マーカーなしでも後続で参照される）
         if paywall_marker in content:
-            paid_part = content.split(paywall_marker, 1)[1]
-            paid_content_length = len(paid_part.strip())
-            if paid_content_length >= 3000:
-                score_points += 1.0
+            if _is_free:
+                score_points += 1.0  # 無料期間中はペイウォール評価をスキップ
             else:
-                issues.append(f"有料パートが薄い: {paid_content_length}字（ペイウォール後3000字以上必要）")
+                paid_part = content.split(paywall_marker, 1)[1]
+                paid_content_length = len(paid_part.strip())
+                if paid_content_length >= 3000:
+                    score_points += 1.0
+                else:
+                    issues.append(f"有料パートが薄い: {paid_content_length}字（ペイウォール後3000字以上必要）")
         else:
-            issues.append("有料パートの実質性を評価できない（ペイウォールマーカーなし）")
+            paid_content_length = char_count  # マーカーなし=全文が本文
+            score_points += 1.0  # マーカーなしは無料記事として正常
 
         # === 11. 情報密度チェック（固有名詞・専門用語の密度） ===
         # カタカナ語（3文字以上）、英単語（2文字以上）、数値付き表現をカウント
@@ -259,6 +271,38 @@ def mechanical_quality_check(content: str) -> dict:
             score_points += 1.0
         else:
             issues.append(f"情報密度が低い: {info_density:.1f}語/1000字（8.0以上推奨、ユニーク固有名詞{unique_proper_nouns}個）")
+
+        # === 12. 繰り返し検出（同じ主張を複数回していないか）===
+        paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 50]
+        if len(paragraphs) >= 4:
+            seen_starts = {}
+            repetitions = 0
+            for p in paragraphs:
+                # 段落の先頭30文字で類似をチェック
+                key = p[:30]
+                for seen_key in seen_starts:
+                    # 共通文字数が多ければ繰り返し
+                    common = sum(1 for a, b in zip(key, seen_key) if a == b)
+                    if common > 15:
+                        repetitions += 1
+                        break
+                seen_starts[key] = True
+            if repetitions <= 1:
+                score_points += 1.0
+            else:
+                issues.append(f"同じ内容の繰り返し: {repetitions}箇所で類似段落を検出")
+
+        # === 13. 記事の完結性チェック（途中で終わっていないか）===
+        last_200 = content[-200:].strip()
+        has_conclusion = any(kw in last_200 for kw in [
+            "まとめ", "おわりに", "最後に", "結論", "終わり",
+            "だから僕は", "これからも", "その過程を", "記録し続ける",
+        ])
+        ends_with_sentence = last_200.rstrip().endswith(("。", "！", "？", "…", "）", "」", "ます。", "です。", "った。", "ない。"))
+        if has_conclusion or ends_with_sentence:
+            score_points += 1.0
+        else:
+            issues.append("記事が途中で終わっている可能性（結論・まとめセクションがない、文が途中で切れている）")
 
         # === 12. メタ指示漏洩チェック ===
         meta_leaked = False
@@ -837,29 +881,111 @@ class NoteQualityChecker:
         import openai
 
         system_prompt = (
-            "あなたは記事の事実検証専門家です。必ずJSON形式のみで回答してください。"
+            "あなたは記事の事実検証専門家です。嘘・捏造・ハルシネーションを絶対に見逃さない。"
+            "1つでも致命的問題があればpassedをfalseにする。必ずJSON形式のみで回答してください。"
         )
 
-        user_prompt = f"""この記事の事実検証を行ってください。以下の観点でチェック:
+        user_prompt = f"""この記事の事実検証を行ってください。以下の全項目を厳密にチェック:
 
-1. 年号の整合性: AIツールの利用時期が実際のリリース日と矛盾していないか
-   - ChatGPT: 2022年11月公開
-   - Claude: 2023年3月公開
-   - GPT-4: 2023年3月公開
-   - SYUTAINβ: 2025年後半開発開始、2026年3月本格稼働
-   - Midjourney/Stable Diffusion: 2022年公開
-   - DeepSeek: 2024年公開
-   - Claude Code: 2025年公開
-2. 島原大知の経歴との整合性: VTuber業界支援（活動ではない）、映像制作、非エンジニア、SYUTAINβ開発者
-3. 数値の信頼性: 根拠なく具体的な統計（「72%が〜」等）を使っていないか
-4. 架空エピソード: 「ある会社で」「友人が」等の匿名で具体的すぎるエピソードは捏造の可能性
-5. SYUTAINβの実データ引用: 実際のシステムデータと矛盾していないか
+## A. 時系列の整合性（最重要）
 
-JSON形式で回答:
-{{"passed": true, "critical_issues": [], "warnings": [], "fabrication_risk_score": 0.0}}
+### 島原大知のタイムライン（確定事実）
+- 2026年2月28日: プロジェクト開始。Claude Codeを初めて使用。AIエージェント11体をOpenClawで構築
+- 2026年3月4日: 第1世代システム全壊。無限ミーティングループ、自己発見能力欠如
+- 2026年3月6日: OpenClawアンインストール。全て白紙に
+- 2026年3月4日〜13日: 設計書を25回書き直し（v3→V25、2,865行）。コードゼロ行
+- 2026年3月17日: SYUTAINβ再構築開始（Claude Code一撃実装）
+- 2026年3月18日 05:39 JST: 最初のLLM呼び出し（DeepSeek V3.2、¥0.01）
+- 2026年3月19日: 初回クリーンスタート。エラー0件
+- 2026年3月25日: セマンティックループ検知器15回発動。最悪の日
+- 2026年4月3日: AI記事捏造事件（Claude 4.0虚偽記事、DeepSeek V4偽提案12件）
+- 2026年4月5日現在: Python 55,458行、LLM呼び出し11,085回、コスト¥1,104.93
 
-fabrication_risk_score は 0.0（問題なし）〜 1.0（完全に捏造）のスコア。
-critical_issues は公開不可レベルの問題、warnings は軽微な懸念。
+**検出すべき矛盾:**
+- 「2023年」「2024年」「昨年」等にAI利用体験を置くのは捏造。島原がAIを使い始めたのは2026年2月28日
+- 「1年前」「半年前」等の相対表現で2026年2月以前を示すのも捏造
+- 「Claude 3.5 Sonnet」「GPT-4」等の旧モデルを「最近リリースされた」と書くのは時系列矛盾
+
+### AIツールのリリース日（参照用）
+- ChatGPT: 2022年11月 / GPT-4: 2023年3月 / GPT-4o: 2024年5月 / GPT-5.4: 2026年3月
+- Claude: 2023年3月 / Claude 3.5 Sonnet: 2024年6月 / Claude Opus 4.6: 2026年2月
+- Claude Code: 2025年 / DeepSeek V3: 2024年12月 / Qwen3.5: 2026年2月
+- Midjourney: 2022年 / Stable Diffusion: 2022年
+
+## B. 島原大知の人物像（確定事実）
+
+**正しい情報:**
+- コードを一行も書けない非エンジニア（変数が何か分からないレベル）
+- 本業は映像制作: VFX、動画編集、カラーグレーディング、撮影、ドローン
+- VTuber業界に8年間関わった（業界支援・裏方。VTuber活動はしていない）
+- SYUTAINβをClaude Codeで開発（2026年2月28日〜）
+- 4台のPC（ALPHA/BRAVO/CHARLIE/DELTA）で分散システムを運用
+
+**検出すべき捏造:**
+- 年齢・誕生日への言及 → critical_issue
+- プログラミング経験がある風の記述 → critical_issue
+- VTuberとして活動した風の記述 → critical_issue
+- 架空の会社名・クライアント名 → critical_issue
+- 架空のプレゼン・会議・打ち合わせエピソード → critical_issue
+- 「同僚に聞いた」「友人が」等の匿名具体エピソード → critical_issue（島原はフリーランス）
+- 大学・学校・資格への言及（裏付けなし）→ warning
+- **ハーネスエンジニアリングを「命名」「考案」「誕生」「提唱」「発明」したという記述 → critical_issue**（島原はこの方法論の考案者ではなく、既存の方法論を適用しているだけ。「実践している」「適用している」「使っている」が正しい表現）
+- **「私は…と呼ぶ」「僕が…と命名した」「これを…と名付けた」系の自己命名パターン全般 → critical_issue**（ハーネスエンジニアリングを含め、既存概念を自分が作ったと偽装することの再発防止）
+- **SYUTAINβは島原大知の個人開発プロジェクトで、運用チーム・開発メンバー・同僚・離職者は存在しない**。「運用チーム」「開発チーム」「メンバーが会社を去った」「離職率」「ある担当者は」「開発メンバーの1人」等の記述 → critical_issue
+- **実在しないツールを「使っている」と書くのは捏造**。Grafana/Prometheus/Restic/Datadog/NewRelic/Sentry/Splunk等を「現在使用中」と書く場合、事実確認が必要。SYUTAINβの実運用は: PostgreSQL + NATS + Tailscale + Ollama + FastAPI + Next.js のみ
+- **出典不明の外部事例捏造**: 「BBC/NYTimes/WSJ等の海外メディアが〇〇を試験導入」「〇〇社が滞在時間2.1倍」「ある調査会社のデータ」→ critical_issue（裏付けがない場合）
+
+## B'. SYUTAINβ 組織体制（確定事実、違反はcritical_issue）
+- SYUTAINβは**島原大知の個人開発プロジェクト**。運用チーム・開発メンバー・同僚・エンジニア仲間・離職者は**存在しない**
+- 「チーム」「メンバー」「担当者」「離職率」「会社を去った」「部署」等は全て捏造
+- 技術スタック（これ以外を「使っている」と書いたら捏造）:
+  - DB: PostgreSQL
+  - メッセージング: NATS JetStream
+  - ネットワーク: Tailscale
+  - LLM: Ollama (qwen3.5-4b/9b/27b, nemotron-jp) + OpenRouter (Qwen 3.6 Plus, Nemotron-3-Nano-30B) + API (Claude/Gemini/DeepSeek/GPT)
+  - Web: FastAPI + Next.js
+  - ブラウザ自動化: Playwright
+  - Discord Bot: discord.py
+  - Grafana/Prometheus/Restic/Datadog/NewRelic/Sentry/Splunk等は**使っていない**
+
+## C. 数値の検証
+
+**信頼できるSYUTAINβ実データ（DB直接取得、2026年4月5日時点）:**
+- Python: 55,458行 / 135ファイル
+- LLM呼び出し: 11,085回
+- 累計LLMコスト: ¥1,104.93
+- SNS投稿: 519件posted
+- 情報収集: 1,547件
+- ペルソナ記憶: 551件
+- LoopGuard発動: 54回
+- スケジューラ: 93ジョブ / 5,164行
+- エージェント: 20体
+- 設計書: V25+V30統合 3,421行
+
+**検出すべき問題:**
+- 上記データと大きく矛盾する数値 → critical_issue
+- 出典不明の統計データ（「〇〇%の企業が」「調査によると」等）→ warning（出典を確認すべき）
+- 月収・収益の言及（現在¥0）→ 架空の収益を示唆していればcritical_issue
+
+## D. コンテンツポリシー
+
+- 2026年6月1日まで全記事無料方針。「有料」「購入してください」「ここから先は有料」等の販売文言 → warning
+- 「---ここから有料---」のペイウォールマーカー → warning（無料期間中は不要）
+- 外部AIニュース解説がメインテーマ（「GPTの使い方」「Claude活用ガイド」等）→ warning（Build in Public方針違反）
+- 他人の著作物の無断引用・盗用 → critical_issue
+
+## E. 文章品質
+
+- LLMの応答アーティファクト（「はい。」「了解しました」「以下が記事です」）→ critical_issue
+- system_prompt/theme_hintの漏洩（「自由テーマ」「intel_items」「persona_memory」等の内部用語）→ critical_issue
+- AI定型句（「いかがでしょうか」「深掘り」「させていただきます」「注目すべき」）→ warning
+
+## 回答形式
+
+JSON形式で回答。critical_issuesが1件でもあればpassed=false:
+{{"passed": true/false, "critical_issues": ["問題の具体的な記述と該当箇所"], "warnings": ["軽微な懸念"], "fabrication_risk_score": 0.0-1.0}}
+
+fabrication_risk_score: 0.0（問題なし）〜 0.3（軽微）〜 0.6（要修正）〜 1.0（完全捏造）
 
 ## 記事本文
 {content}"""

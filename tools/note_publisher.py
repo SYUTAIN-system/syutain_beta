@@ -657,13 +657,29 @@ async def note_auto_publish_check() -> dict:
             logger.warning(f"feature_flags読み込み失敗（安全のためスキップ）: {e}")
             return results
 
-        # 承認済みパッケージを取得
+        # 日次公開上限チェック（note.comスパム判定回避）
+        # JST基準で判定（サーバTZ非依存）
+        DAILY_PUBLISH_LIMIT = 5
         async with get_connection() as conn:
+            today_published = await conn.fetchval(
+                """SELECT COUNT(*) FROM product_packages
+                   WHERE status = 'published' AND platform = 'note'
+                   AND (published_at AT TIME ZONE 'Asia/Tokyo')::date = (NOW() AT TIME ZONE 'Asia/Tokyo')::date"""
+            )
+            today_published = int(today_published or 0)
+            if today_published >= DAILY_PUBLISH_LIMIT:
+                logger.info(f"note自動公開: 日次上限達成 ({today_published}/{DAILY_PUBLISH_LIMIT}) — スキップ")
+                results["skipped"] = today_published
+                return results
+            remaining_today = DAILY_PUBLISH_LIMIT - today_published
+
+            # 承認済みパッケージを取得（残り公開可能数まで）
             packages = await conn.fetch(
                 """SELECT id, title FROM product_packages
                    WHERE status = 'approved' AND platform = 'note'
                    ORDER BY approved_at ASC
-                   LIMIT 3"""
+                   LIMIT $1""",
+                remaining_today,
             )
 
         if not packages:

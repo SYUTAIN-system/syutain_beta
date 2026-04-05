@@ -14,7 +14,7 @@
 10. 戦略ファイル（strategy/）を参照してからコンテンツを生成する
 11. SNS投稿・商品公開・価格設定・暗号通貨取引はApprovalManagerを通じて承認を得てから実行する
 12. 重要な判断はDiscord Webhook + Web UIで通知する
-13. ローカルLLM配置を正確に守る：ALPHAにLLMなし（オーケストレーター専任）, BRAVO=Qwen3.5-9B+27B+Nemotron-JP, CHARLIE=Qwen3.5-9B+Nemotron-JP, DELTA=Qwen3.5-4B。ローカル推論はBRAVO/CHARLIEの最大2台で実行。27Bはquality="highest_local"時のみBRAVOで使用
+13. LLM配置: ローカル=ALPHAにLLMなし（オーケストレーター専任）, BRAVO=Qwen3.5-9B+27B+Nemotron-JP, CHARLIE=Qwen3.5-9B+Nemotron-JP, DELTA=Qwen3.5-4B。ローカル推論はBRAVO/CHARLIEの最大2台。27Bはquality="highest_local"時のみBRAVO。API=OpenRouter Qwen3.6-Plus(無料、proposal/strategy/content_final等の深い思考タスク)。速度重要タスク(chat等)にはQwen3.6を使わない
 14. macOS (ALPHA) では declare -A を使わない (bash 3.2 非対応)
 15. タスクをPostgreSQLに記録してからLoopGuard 9層で監視する
 16. ループ防止のEmergency Kill条件（50ステップ/日次予算90%/同一エラー5回/2時間超過/セマンティックループ/Cross-Goal干渉）を厳守する

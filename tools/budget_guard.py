@@ -49,7 +49,6 @@ class BudgetGuard:
         """起動時にDB（llm_cost_log）から当日/当月の支出を復元"""
         if self._initialized_from_db:
             return
-        self._initialized_from_db = True
         try:
             from tools.db_pool import get_connection
             async with get_connection() as conn:
@@ -77,9 +76,11 @@ class BudgetGuard:
                 )
                 if row:
                     self._chat_spend_jpy = float(row["total"])
+                # 成功時のみフラグを立てる（失敗時は次回リトライする）
+                self._initialized_from_db = True
                 logger.info(f"DB復元: 日次¥{self._daily_spend_jpy:.1f}, 月次¥{self._monthly_spend_jpy:.1f}, 情報¥{self._info_spend_jpy:.1f}, チャット¥{self._chat_spend_jpy:.1f}")
         except Exception as e:
-            logger.warning(f"DB復元失敗（インメモリで継続）: {e}")
+            logger.warning(f"DB復元失敗（次回呼び出し時にリトライ）: {e}")
 
     async def _reset_if_new_day(self):
         """日付が変わったら日次集計をリセット"""
@@ -137,13 +138,21 @@ class BudgetGuard:
         max_ratio = max(daily_ratio, monthly_ratio)
 
         if max_ratio >= ALERT_THRESHOLD_STOP:
-            msg = f"予算90%超過 - 即時停止: 日次{projected_daily:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{projected_monthly:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
-            logger.critical(msg)
+            msg = f"予算90%超過（警告のみ、停止しない）: 日次{projected_daily:.0f}/{DAILY_BUDGET_JPY:.0f}円, 月次{projected_monthly:.0f}/{MONTHLY_BUDGET_JPY:.0f}円"
+            # 同一日に1回だけログ出力（連続出力防止）
+            if not self._warn_logged_today:
+                logger.warning(msg)
+                self._warn_logged_today = True
+            # allowed=True: 予算超過でも処理は停止しない（アラート通知のみ）
+            self._daily_spend_jpy += amount_jpy
+            self._monthly_spend_jpy += amount_jpy
+            if is_info_collection:
+                self._info_spend_jpy += amount_jpy
             return {
-                "allowed": False,
+                "allowed": True,
                 "daily_remaining_jpy": max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy),
                 "monthly_remaining_jpy": max(0, MONTHLY_BUDGET_JPY - self._monthly_spend_jpy),
-                "alert_level": "stop",
+                "alert_level": "warn_budget_exceeded",
                 "message": msg,
             }
 

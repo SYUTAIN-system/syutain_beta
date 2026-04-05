@@ -83,7 +83,7 @@ async def build_agent_context(agent_name: str) -> str:
             try:
                 learnings = await conn.fetch(
                     """SELECT content FROM persona_memory
-                       WHERE reasoning LIKE '%Discord%' OR reasoning LIKE '%対話%'
+                       WHERE (reasoning LIKE '%Discord%' OR reasoning LIKE '%対話%')
                        AND created_at > NOW() - INTERVAL '48 hours'
                        ORDER BY created_at DESC LIMIT 5"""
                 )

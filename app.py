@@ -2795,10 +2795,27 @@ async def respond_to_approval(
 
 @app.websocket("/api/chat/ws")
 async def websocket_chat(ws: WebSocket):
-    """WebSocketチャットエンドポイント"""
+    """WebSocketチャットエンドポイント（JWT認証必須）"""
+    # === セキュリティ: JWT認証 ===
+    token = ws.query_params.get("token", "")
+    if not token:
+        await ws.close(code=1008, reason="Authentication required")
+        logger.warning("WebSocket接続拒否: トークンなし")
+        return
+    try:
+        payload = jwt.decode(token, APP_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        await ws.close(code=1008, reason="Token expired")
+        logger.warning("WebSocket接続拒否: トークン期限切れ")
+        return
+    except jwt.InvalidTokenError:
+        await ws.close(code=1008, reason="Invalid token")
+        logger.warning("WebSocket接続拒否: 無効なトークン")
+        return
+
     await ws.accept()
-    session_id = "default"
-    logger.info(f"WebSocket接続: session={session_id}")
+    session_id = payload.get("sub", "default")
+    logger.info(f"WebSocket接続: session={session_id} (認証済み)")
 
     try:
         while True:

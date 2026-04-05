@@ -86,15 +86,27 @@ def _extract_category(text: str) -> str:
 
 
 def _split_content(body: str) -> tuple[str, str]:
-    """記事を無料プレビュー部分と有料部分に分割"""
-    # content_pipelineが既に「---ここから有料---」マーカーを含んでいる場合、そこで分割
+    """記事を無料プレビュー部分と有料部分に分割。
+    6月まで無料公開のため、ペイウォールマーカーを除去して全文をpreviewとして返す。"""
+    from datetime import date as _date
+    _is_free = _date.today() < _date(2026, 6, 1)
+
+    if _is_free:
+        # 無料期間中: ペイウォールマーカーを除去して全文を返す
+        clean_body = body
+        paywall_markers = ["---ここから有料---", "ここから有料---", "---ここから有料",
+                          "**ここから先は有料です。**", "ここから先は有料です。全文を読むには購入してください。"]
+        for marker in paywall_markers:
+            clean_body = clean_body.replace(marker, "")
+        return clean_body.strip(), ""
+
+    # 有料期間（6月以降）
     paywall_markers = ["---ここから有料---", "ここから有料---", "---ここから有料"]
     for marker in paywall_markers:
         if marker in body:
             pos = body.index(marker)
             preview = body[:pos].rstrip()
             full = body[pos + len(marker):].lstrip()
-            # プレビュー末尾に有料誘導（まだなければ追加）
             if "ここから先は有料です" not in preview:
                 preview += "\n\n---\n\n**ここから先は有料です。** 全文を読むには購入してください。"
             return preview, full
@@ -102,7 +114,6 @@ def _split_content(body: str) -> tuple[str, str]:
     if len(body) <= FREE_PREVIEW_LENGTH:
         return body, ""
 
-    # マーカーなし: 文の区切りで分割（500文字付近）
     split_pos = FREE_PREVIEW_LENGTH
     for sep in ["。\n", "。", "\n\n", "\n"]:
         pos = body.rfind(sep, 0, FREE_PREVIEW_LENGTH + 100)
@@ -112,7 +123,6 @@ def _split_content(body: str) -> tuple[str, str]:
 
     preview = body[:split_pos].rstrip()
     full = body[split_pos:].lstrip()
-
     preview += "\n\n---\n\n**ここから先は有料です。** 全文を読むには購入してください。"
 
     return preview, full
@@ -232,12 +242,13 @@ async def package_publish_ready_articles() -> dict:
                         async with _gc() as _conn:
                             s1 = await _conn.fetchval(
                                 "SELECT stage1_score FROM note_quality_reviews WHERE id = $1",
-                                review_id
+                                review["id"],
                             )
-                            if s1 and float(s1) >= 0.65:
+                            # 閾値0.60（2026-04-05: 拡散フェーズのため0.65→0.60に緩和、量と質のバランス）
+                            if s1 and float(s1) >= 0.60:
                                 auto_approve = True
-                    except Exception:
-                        pass
+                    except Exception as _auto_err:
+                        logger.warning(f"auto_approve判定失敗（手動承認ルート維持）: {_auto_err}")
 
                     if auto_approve:
                         # 自動承認: 直接approvedに + Discord通知
@@ -250,7 +261,7 @@ async def package_publish_ready_articles() -> dict:
                                 f"✅ 記事自動承認・自動公開予定\n"
                                 f"タイトル: 『{title}』\n"
                                 f"価格: ¥{price}\n"
-                                f"品質スコア: {float(s1):.2f} (閾値0.65)\n"
+                                f"品質スコア: {float(s1):.2f} (閾値0.60)\n"
                                 f"30分以内にnote.comへ自動公開されます。"
                             )
                             logger.info(f"記事自動承認: {title} (s1={float(s1):.2f})")

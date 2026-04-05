@@ -179,9 +179,34 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
             break
 
     # 繰り返しポエムパターン検出（スコア上限0.30）
-    _overused_poems = ["風が止み", "画面は真っ暗", "息を殺し", "カットは続いて",
-                       "光の粒子", "静かにつなぎ", "指先を伸ばす", "紡ぎ出す"]
-    _poem_hits = sum(1 for p in _overused_poems if p in text)
+    # 部分一致で検出（「風が止み」「風はもう止んだ」「風は止んだ」等のバリエーション全て捕捉）
+    import re as _re
+    _overused_poem_patterns = [
+        _re.compile(r"風[がはも]*[とう]*[に]*(止[みんまっ]|やん)"),  # 風が止み, 風はもう止んだ, etc
+        _re.compile(r"画面[はが]*真っ[暗黒]"),  # 画面は真っ暗, 画面は真っ黒
+        _re.compile(r"息を[殺ひ]"),  # 息を殺し, 息をひそめ
+        _re.compile(r"カット[はがも]*[続まつ]"),  # カットは続いて, カットが続く
+        _re.compile(r"光の粒子"),
+        _re.compile(r"指先[をにで]"),  # 指先を伸ばす, 指先に光
+        _re.compile(r"紡[ぎぐ]"),  # 紡ぎ出す, 紡ぐ
+        _re.compile(r"肩を[落お]"),  # 肩を落とし
+        _re.compile(r"カラーグレーディング"),
+        _re.compile(r"シャッター[をに]"),
+        _re.compile(r"夕暮れ.{0,5}デスク"),
+        _re.compile(r"湯気.{0,10}(コーヒー|カップ|冷め)"),
+        _re.compile(r"静かに.{0,5}(光|息|待|点滅|降り)"),
+        _re.compile(r"未完成の.{0,5}(シナリオ|映像|カット)"),
+        # 2026-04-05追加: ドローン/赤文字/緊急停止系のポエム
+        _re.compile(r"ドローン.{0,15}(プロペラ|地面|止ま|動かな|着陸|降り|静か)"),
+        _re.compile(r"赤[いくでで]*文字"),
+        _re.compile(r"\d+回[目も]?.{0,10}(強制|緊急|シャットダウン|停止|再起動)"),
+        _re.compile(r"空[はが].{0,10}(真っ[暗黒]|紺|暗|夜|静か)"),
+        _re.compile(r"誰もいな[いく]"),
+        _re.compile(r"バッテリー.{0,5}(切れ|落ち|消え)"),
+        _re.compile(r"プロペラ.{0,10}(止|動かな)"),
+        _re.compile(r"画面[にはが].{0,10}(エラー|ログ|流れ)"),
+    ]
+    _poem_hits = sum(1 for p in _overused_poem_patterns if p.search(text))
     if _poem_hits >= 2:
         hard_fail = True
 
@@ -307,12 +332,12 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     first_line = text.split("\n")[0] if "\n" in text else text[:80]
     last_line = text.strip().split("\n")[-1] if "\n" in text else text[-80:]
 
-    # Phase A: 具体的な場面・体験から入るパターン（高評価）
+    # Phase A: 具体的な事実・体験から入るパターン（高評価）
+    # 注意: 情景語（朝/夜/画面/モニター/椅子/机/カフェ/編集室）は削除 — ポエム誘発語のため
     concrete_openers = [
-        "朝", "夜", "昨日", "さっき", "今日", "先日", "この前", "あの時",
+        "昨日", "さっき", "今日", "先日", "この前",
         "僕は", "私は", "自分", "正直", "ふと", "実は", "気づいた",
         "やらかした", "失敗", "壊れ", "止まっ", "動かな",
-        "編集室", "画面", "モニター", "椅子", "机", "カフェ",
     ]
     if any(m in first_line for m in concrete_openers):
         structure_score += 0.25
@@ -352,18 +377,63 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     structure_score = max(0.0, min(1.0, structure_score))
 
     # --- 加重合計 ---
+    # === 軸8: 事実密度 (0-1, w=0.20) — ポエム化の構造的防止 ===
+    # 具体的な数字・固有名詞・SYUTAINβ実イベント用語の含有を評価
+    import re as _re_fd
+    # 数字（半角・全角）
+    numbers = _re_fd.findall(r'\d+', text)
+    numbers_fullwidth = _re_fd.findall(r'[0-9]+', text)
+    number_count = len(numbers) + len(numbers_fullwidth)
+    # 固有名詞（英数字3文字以上、カタカナ3文字以上、システム用語）
+    english_entities = set(_re_fd.findall(r'[A-Za-z][A-Za-z0-9_.\-]{2,}', text))
+    system_terms = [
+        "SYUTAINβ", "SYUTAIN", "Claude", "GPT", "Qwen", "DeepSeek", "Ollama",
+        "CORTEX", "FANG", "NERVE", "FORGE", "MEDULLA", "SCOUT",
+        "ALPHA", "BRAVO", "CHARLIE", "DELTA",
+        "LoopGuard", "Discord", "Bluesky", "Threads", "note",
+        "PostgreSQL", "NATS", "Tailscale", "Playwright", "Python",
+        "intel_items", "posting_queue", "persona_memory",
+    ]
+    system_term_count = sum(1 for t in system_terms if t in text)
+    # 円/¥/円マーク付き金額
+    money_count = len(_re_fd.findall(r'[¥￥]\s*\d+|\d+\s*円', text))
+
+    fact_density_score = 0.1  # ベースライン（最低）
+    if number_count >= 3: fact_density_score += 0.35
+    elif number_count >= 2: fact_density_score += 0.25
+    elif number_count >= 1: fact_density_score += 0.15
+    if system_term_count >= 3: fact_density_score += 0.30
+    elif system_term_count >= 2: fact_density_score += 0.20
+    elif system_term_count >= 1: fact_density_score += 0.10
+    if money_count >= 1: fact_density_score += 0.15
+    fact_density_score = min(1.0, fact_density_score)
+
+    # === 軸9: 情景密度ペナルティ — 情景語の過剰使用を検出 ===
+    scene_words = [
+        "光", "影", "闇", "静か", "紺", "深夜", "空", "風", "雲",
+        "プロペラ", "ドローン", "カメラ", "画面", "モニター",
+        "デスク", "椅子", "机", "カフェ", "窓", "扉",
+    ]
+    scene_hits = sum(text.count(w) for w in scene_words)
+    scene_density = scene_hits / max(1, len(text) / 30)  # 30字あたりの情景語数
+    # 情景密度が高く、事実密度が低い → ポエム確定
+    if scene_density > 0.5 and fact_density_score < 0.3:
+        hard_fail = True
+
+    # 重み配分: fact_density最大(0.20)、structure/human/persona各0.14、completeness 0.14、engagement/ai各0.10、readability 0.04
     score = (
-        human_score * 0.17 +
-        persona_score * 0.17 +
-        completeness * 0.16 +
-        engagement * 0.13 +
-        ai_score * 0.13 +
-        readability * 0.08 +
-        structure_score * 0.16
+        fact_density_score * 0.20 +
+        structure_score * 0.14 +
+        human_score * 0.14 +
+        persona_score * 0.14 +
+        completeness * 0.14 +
+        engagement * 0.10 +
+        ai_score * 0.10 +
+        readability * 0.04
     )
     score = round(max(0.0, min(1.0, score)), 3)
 
-    # ハードフェイル: 中国語混入・名前誤読・AI自己開示 → 上限0.30
+    # ハードフェイル: 中国語混入・名前誤読・AI自己開示・情景過剰 → 上限0.30
     if hard_fail:
         score = min(score, 0.30)
 
@@ -569,26 +639,55 @@ def _load_writing_style() -> str:
 
 def _build_prompt(platform: str, account: str, theme: str, time_str: str,
                   writing_style: str, few_shot: list[str], recent_posts: list[str],
-                  persona_hint: str = "") -> tuple[str, str]:
+                  persona_hint: str = "", factbook_prompt: str = "",
+                  picked_facts: list = None, buzz_prompt: str = "") -> tuple[str, str]:
     """platform+accountに応じたプロンプトを構築。(system_prompt, user_prompt)を返す"""
 
     period = _get_time_period(time_str)
     avoid = "\n".join(f"- {p[:60]}" for p in recent_posts[:5]) if recent_posts else "（なし）"
 
+    # ファクトブック注入 — ポエム化防止の核心
+    # LLMに「具体的な事実・数字・固有名詞」を材料として強制的に渡す
+    fact_injection = ""
+    if factbook_prompt:
+        fact_injection = (
+            f"\n\n## 【材料】以下の事実を核にせよ\n"
+            f"{factbook_prompt}\n"
+            f"**上記の事実から最低1つを核にする。数字・固有名詞を本文に必ず含めよ。**\n"
+            f"**ただし羅列ではなく、下のボイスガイドに従って味付けすること。**\n"
+        )
+
+    # プラットフォーム別ボイスガイド注入（事実を各SNSの性質に合わせて料理する）
+    voice_injection = ""
+    try:
+        from strategy.sns_platform_voices import build_voice_prompt
+        voice_injection = "\n\n" + build_voice_prompt(platform, account)
+    except Exception:
+        pass
+
+    # バズ・トレンド注入（参考素材、関連あれば取り入れる）
+    buzz_injection = ""
+    if buzz_prompt:
+        buzz_injection = f"\n\n{buzz_prompt}"
+
     # daichi_content_patterns構造ガイド + NG語（全プラットフォーム共通）
     content_structure_guide = (
         "\n【投稿の構造ルール（daichi_content_patterns準拠）】\n"
         "- 冒頭は毎回異なるパターンで入れ（同じ導入は禁止）。以下からランダムに選べ:\n"
-        "  A) 具体的な数字から入る（例:「52,438行。全部AIが書いた」「月987円。それが全コスト」）\n"
-        "  B) 問いかけから入る（例:「AIが嘘をついたらどう気づく？」「54回暴走を止めた仕組みの話」）\n"
-        "  C) 短い事実の断言（例:「3日間、誰も気づかなかった」「設計書を25回書き直した」）\n"
-        "  D) 日常の一瞬から入る（例:「さっきコード壊した」「朝5時、アラートが鳴った」）\n"
-        "- 「風が止み」「画面は真っ暗」「息を殺し」��カットは続く」系のポエム表現は禁止。繰り返し使われすぎている。\n"
+        "  A) 具体的な数字から入る（例:「54,155行。全部AIが書いた。僕はゼロ行」「月987円のサーバー4台で20体のAIが動いてる」「1日20回デプロイした。壊れたの3回」）\n"
+        "  B) 実際に起きたトラブルから入る（例:「schedulerが2重起動してた。3日間誰も気づかなかった」「deepseekのreasoningパラメータが間違ってて全botが沈黙した」「Discord botが朝9時に全員落ちた。原因はタイムゾーン」）\n"
+        "  C) 自分の体験を断言（例:「設計書25回書き直した。まだ直す」「さっきClaude Codeがコード壊した。直すのもClaude Code」「コード読めないのにコードレビューしてる矛盾」）\n"
+        "  D) 運用の生々しい瞬間（例:「朝5時、Slackにアラート6件」「CORTEXのheartbeatが10分止まった。MEDULLAが代理CEOになった」「Ollamaのメモリが溢れてqwen3.5が応答しなくなった」）\n"
+        "- **絶対禁止フレーズ（含むと自動リジェクト）**: 「風+止」「画面は真っ暗/黒」「息を殺」「光の粒子」「指先を伸ばす」「肩を落とし」「紡ぐ」「夕暮れ+デスク」「湯気+コーヒー/カップ」「静かに+光/息」「未完成の+シナリオ/映像」「ドローンのプロペラ」「赤文字/赤い文字」「N回目の緊急シャットダウン/強制停止」「空は真っ暗/紺」「誰もいない」「バッテリーが切れ」「画面にエラーログが流れ」。\n"
+        "- **絶対禁止**: 映像制作メタファーの抽象ポエム全般。「デスクで光が〜」「画面が静かに〜」系は全てリジェクト。\n"
+        "- **絶対禁止**: 情景描写・雰囲気描写で始まる投稿。「朝の光が〜」「夜の静寂の中〜」「モニターの明かりだけが〜」は全てリジェクト。\n"
+        "- **必須**: 具体的な事実・数字・体験だけを書け。SYUTAINβの実際のイベント（エラー、修正、数値変化、bot名、ツール名）を使え。\n"
         "- 「AIは〜」「近年〜」のような抽象的な書き出しも禁止。\n"
-        "- 例: 「深夜3時、画面が止まった」「正直、怖かった」「さっきコード壊した」\n"
-        "- 自己開示を恐れるな。弱さ・恐怖・葛藤・失敗を隠さない。\n"
-        "- 核心は短い一文で断言。「設計なき実装の末路だった」のように切れ味良く。\n"
-        "- 締めは行動宣言。「だから僕はこうする」「次はこれをやる」。評論家的な締め禁止。\n"
+        "- 良い例: 「FANGのKPIレポートが毎晩21時に届く。CSO気取りのbot」「note記事の品質ゲート4段階ある。機械チェック15項目→外部検索→Haiku→GPT。それでも漏れる」「非エンジニアがAIに全コード書かせてGitHub公開した。怖い」\n"
+        "- 悪い例: 「深夜3時、画面が止まった」「正直、怖かった」「光が差した」←情景ポエムは禁止\n"
+        "- 自己開示を恐れるな。弱さ・恐怖・葛藤・失敗を隠さない。ただしポエムではなく事実で語れ。\n"
+        "- 核心は短い一文で断言。「原因はタイムゾーンだった」「設計書が間違ってた」のように具体的に。\n"
+        "- 締めは行動宣言か具体的な次のアクション。「だからLoopGuard 9層にした」「次はNATS導入する」。評論家的な締め禁止。\n"
         "- 「ではないでしょうか」「が大切です」「が重要です」で終わるな。\n"
         "\n【使用禁止表現（生成に含めるな）】\n"
         "- 「誰でも簡単に」「絶対稼げる」「完全自動で放置」「AIに任せればOK」\n"
@@ -596,6 +695,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 「〜について考えてみました」「いかがでしょうか」「深掘り」「させていただきます」\n"
         "- 「特筆すべき」「画期的な」「注目すべきは」\n"
         "- 絵文字3個以上禁止。ハッシュタグ3個以上禁止。箇条書き連打禁止。\n"
+        "- 情景描写ポエム全般: 「〜が光る」「〜が静まる」「〜の向こうに」「〜が揺れる」\n"
     )
 
     # 事実誤認防止 + 人物像ルール（全プラットフォーム共通）
@@ -612,6 +712,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 「僕の音楽」「曲を作る」「メロディーを紡ぐ」→ 音楽は趣味\n"
         "- 「深夜、コードが〜」で始まるポエム → ワンパターン禁止\n"
         "- 意味のない抽象的ポエム → 具体的な情報や体験を含めること\n"
+        "- 情景描写（夕暮れ、コーヒー、光、静寂、風）→ 事実・数字・固有名詞で語れ\n"
         "\n## 島原大知の思考特性（投稿のトーンに反映）:\n"
         "- 物事の裏側の構造を見る。仕組み・依存関係・ボトルネックを読み取る視点\n"
         "- 壮大なビジョンに「それを実現するには具体的に何が必要か」を問う\n"
@@ -633,13 +734,17 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 存在しない機能・サービス・実績を捏造するな。\n"
         "- 架空の数値（○%向上、○倍改善など）を捏造するな。\n"
         "- 実際にやっていないことを「やっている」「開始した」と語るな。\n"
+        "- **ハーネスエンジニアリングは島原大知が命名・考案した方法論ではない。既存の方法論を適用しているだけ。「命名した」「考え出した」「誕生させた」「提唱した」は禁止。「実践している」「適用している」が正しい。**\n"
+        "- **「私は…と呼ぶ」「僕が…と命名した」「これを…と名付けた」系の自己命名パターン全般は禁止**（既存概念を自分が作ったと偽装しない）\n"
+        "- **SYUTAINβは個人開発。運用チーム・開発メンバー・同僚・離職者は存在しない**。「チーム」「メンバー」「担当者」「離職率」等の捏造は禁止\n"
+        "- **使っていないツールを「使っている」と書かない**。Grafana/Prometheus/Restic/Datadog/Sentry等は使用していない。実運用はPostgreSQL/NATS/Tailscale/Ollama/FastAPI/Next.js/Playwright/Discord.pyのみ\n"
         "\n【島原大知の人物像（投稿に反映すべきこと）】\n"
         "- 島原は自分を全肯定しない人間。弱さ・迷い・自嘲を含めて島原大知。完璧な人間として描くな。\n"
         "- ユーモアや自虐は熱量制御。本気の温度が高すぎるため逃がしている。\n"
         "- 傷を負うと構造を見る人間。「どこが壊れたのか」から再設計に向かう。\n"
         "- 橋渡し役に徹する。スターになることを求めない。\n"
         "- 島原を「完璧なAIエンジニア」「成功した起業家」として描くな。泥臭い日常の中の閃きを書け。\n"
-        "- 答えではなく問いかけ。断定より余韻。大きな野望より目の前の1人に届ける言葉。\n"
+        "- 答えではなく問いかけ。大きな野望より目の前の1人に届ける言葉。ただし余韻＝ポエムではない。具体的な事実で問いかけろ。\n"
         "- 島原は「成立の人」。場の不足を自分で埋める。専門家ぶるな。\n"
         "- 一度信じた光景が壊れる条件まで知った上で、それでも作る側へ戻る人として描け。\n"
         "- 矛盾を恐れるな: 目立ちたくないのに中心になる、熱を信じつつ壊れると知っている。それが島原。\n"
@@ -687,6 +792,9 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- {ellipsis_hint}\n"
             f"{'- ' + bracket_hint if bracket_hint else ''}\n"
             f"{'- ' + oneword_hint if oneword_hint else ''}\n"
+            f"{fact_injection}"
+            f"{voice_injection}"
+            f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"{few_shot_text}\n"
             f"投稿テキストのみを出力。"
@@ -708,6 +816,9 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 日本語150字以内（厳守。150字を超えると文が途中で切れるため必ず150字以内で完結させる）。テーマ: 【{theme}】\n"
             f"- 時間帯: {time_str}。長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{fact_injection}"
+            f"{voice_injection}"
+            f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
@@ -728,6 +839,9 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 300字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{fact_injection}"
+            f"{voice_injection}"
+            f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
@@ -748,6 +862,9 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 500字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{fact_injection}"
+            f"{voice_injection}"
+            f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
@@ -818,11 +935,34 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
         )
         recent_themes = [r["theme_category"] for r in recent_themes_rows if r["theme_category"]]
 
-        # 直近5投稿の内容取得（重複回避用）
+        # 直近20投稿の内容取得（重複回避用 — bigramチェックに十分な文字数を保持）
         recent_posts_rows = await conn.fetch(
-            "SELECT content FROM posting_queue ORDER BY created_at DESC LIMIT 5"
+            "SELECT content FROM posting_queue WHERE status IN ('posted', 'pending') ORDER BY created_at DESC LIMIT 20"
         )
-        recent_posts = [r["content"][:60] for r in recent_posts_rows]
+        recent_posts = [r["content"][:150] for r in recent_posts_rows]
+
+        # === ファクトブック取得 — ポエム化防止の最重要データ ===
+        # SYUTAINβの実データ（数字・固有名詞・イベント）をLLMに強制注入
+        factbook_facts = []
+        factbook_prompt = ""
+        try:
+            from tools.syutain_factbook import build_daily_factbook, factbook_to_prompt
+            factbook_facts = await build_daily_factbook(hours=24, limit=25)
+            factbook_prompt = factbook_to_prompt(factbook_facts, max_chars=1200)
+            logger.info(f"ファクトブック取得: {len(factbook_facts)}件")
+        except Exception as e:
+            logger.warning(f"ファクトブック取得失敗（フォールバック）: {e}")
+
+        # === プラットフォームバズ取得 — トレンド便乗投稿の素材 ===
+        buzz_prompt = ""
+        try:
+            from tools.platform_buzz_detector import get_recent_buzz_for_prompt, buzz_to_prompt
+            buzz_items = await get_recent_buzz_for_prompt(hours=6, max_items=12)
+            if buzz_items:
+                buzz_prompt = buzz_to_prompt(buzz_items, max_chars=800)
+                logger.info(f"バズ素材取得: {len(buzz_items)}件")
+        except Exception as e:
+            logger.debug(f"バズ素材取得失敗（スキップ）: {e}")
 
         # daichi_writing_style読み込み
         writing_style = _load_writing_style()
@@ -966,10 +1106,19 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             # few-shot（X島原のみ）
             few_shot = random.sample(few_shot_pool, min(3, len(few_shot_pool))) if platform == "x" and account == "shimahara" else []
 
-            # プロンプト構築
+            # プロンプト構築（factbookでポエム化を構造的に防止）
+            _picked_facts = []
+            try:
+                from tools.syutain_factbook import pick_facts_for_post
+                _picked_facts = pick_facts_for_post(factbook_facts, n=3, theme=theme)
+            except Exception:
+                pass
             system_prompt, user_prompt = _build_prompt(
                 platform, account, theme, time_str, writing_style, few_shot, recent_posts,
                 persona_hint=persona_hint,
+                factbook_prompt=factbook_prompt,
+                picked_facts=_picked_facts,
+                buzz_prompt=buzz_prompt,
             )
 
             # === モデル選択（固着時はCloud APIにフォールバック）===
@@ -1239,27 +1388,39 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # === セマンティック重複チェック（直近投稿と類似していたらreject）===
             try:
-                # 直近15投稿の内容と比較
+                import re as _re2
                 _is_duplicate = False
-                draft_words = set(draft[:100])
+                # bigramベースのJaccard類似度（文字単位より精度高い）
+                def _bigrams(t):
+                    t = _re2.sub(r'\s+', '', t[:150])
+                    return set(t[i:i+2] for i in range(len(t)-1)) if len(t) > 1 else set()
+                draft_bg = _bigrams(draft)
                 for rp in recent_posts:
                     if not rp:
                         continue
-                    rp_words = set(rp[:100])
-                    # Jaccard類似度（文字レベル）
-                    intersection = len(draft_words & rp_words)
-                    union = len(draft_words | rp_words)
-                    if union > 0 and intersection / union > 0.6:
+                    rp_bg = _bigrams(rp)
+                    intersection = len(draft_bg & rp_bg)
+                    union = len(draft_bg | rp_bg)
+                    similarity = intersection / union if union > 0 else 0
+                    if similarity > 0.35:  # bigram Jaccard 0.35は非常に類似
                         _is_duplicate = True
+                        logger.info(f"セマンティック重複(bigram={similarity:.2f}): {draft[:40]}...")
                         break
-                # さらに、キーフレーズの完全一致チェック
-                _key_phrases = ["風が止み", "画面は真っ暗", "息を殺し", "カットは続いて"]
-                _phrase_matches = sum(1 for kp in _key_phrases if kp in draft)
+                # さらに、ポエムパターン正規表現でもチェック
+                _dup_patterns = [
+                    _re2.compile(r"風[がはも]*[とう]*[に]*(止[みんまっ]|やん)"),
+                    _re2.compile(r"画面[はが]*真っ[暗黒]"),
+                    _re2.compile(r"息を[殺ひ]"),
+                    _re2.compile(r"光の粒子"),
+                    _re2.compile(r"指先[をにで]"),
+                    _re2.compile(r"肩を[落お]"),
+                ]
+                _phrase_matches = sum(1 for kp in _dup_patterns if kp.search(draft))
                 if _phrase_matches >= 2:
                     _is_duplicate = True
+                    logger.info(f"ポエムフレーズ重複reject({_phrase_matches}hit): {draft[:40]}...")
                 if _is_duplicate:
                     results["rejected"] += 1
-                    logger.info(f"セマンティック重複reject: {platform}/{account} — {draft[:40]}...")
                     continue
             except Exception:
                 pass
