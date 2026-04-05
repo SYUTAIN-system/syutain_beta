@@ -202,9 +202,10 @@ async def persist_and_alert(result: dict[str, Any]) -> None:
     """結果を event_log に記録。アラートがあれば Discord 通知"""
     try:
         async with get_connection() as conn:
+            # event_log スキーマ: event_type, category (NOT NULL), severity, source_node, payload, created_at
             await conn.execute(
-                """INSERT INTO event_log (event_type, severity, source_node, payload, created_at)
-                   VALUES ('brain_beta_audit', $1, 'alpha', $2::jsonb, NOW())""",
+                """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                   VALUES ('brain_beta_audit', 'audit', $1, 'alpha', $2::jsonb, NOW())""",
                 "warning" if result["alerts"] else "info",
                 json.dumps(result, ensure_ascii=False, default=str),
             )

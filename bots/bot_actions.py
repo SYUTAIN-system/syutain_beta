@@ -10,9 +10,10 @@ async def _log_action_error(action_name: str, exc: BaseException) -> None:
     """ACTIONハンドラの例外を event_log に記録（Brain-α auto_fix パイプライン用）"""
     try:
         async with get_connection() as conn:
+            # event_log の category NOT NULL 制約対応（2026-04-06 修正）
             await conn.execute(
-                """INSERT INTO event_log (event_type, severity, source_node, payload, created_at)
-                   VALUES ($1, 'error', 'alpha', $2::jsonb, NOW())""",
+                """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                   VALUES ($1, 'bot_action', 'error', 'alpha', $2::jsonb, NOW())""",
                 f"bot_action_error:{action_name}",
                 json.dumps({
                     "action": action_name,
