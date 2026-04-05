@@ -298,8 +298,13 @@ async def package_publish_ready_articles() -> dict:
                     results["errors"].append(str(e))
 
     except Exception as e:
-        logger.error(f"product_packager全体エラー: {e}")
-        results["errors"].append(str(e))
+        # 例外メッセージが空でも型と traceback を残す（空エラー事故 2026-04-05 08:05 対処）
+        import traceback as _tb
+        logger.error(
+            f"product_packager全体エラー: type={type(e).__name__} msg={str(e)!r} "
+            f"trace={_tb.format_exc()[-500:]}"
+        )
+        results["errors"].append(f"{type(e).__name__}: {str(e) or '(empty)'}")
 
     # イベント記録
     if results["packaged"] > 0:

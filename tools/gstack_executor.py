@@ -19,13 +19,13 @@ CODEX_PATH = "/opt/homebrew/bin/codex"
 
 # gstackコマンドの実行時間上限（秒）
 TIMEOUT_MAP = {
-    "review": 180,        # コードレビュー: 3分
-    "cso": 180,           # セキュリティ監査: 3分
-    "retro": 120,         # 振り返り: 2分
+    "review": 420,        # コードレビュー: 7分（180sだと2日連続でTIMEOUT発生のため延長）
+    "cso": 600,           # セキュリティ監査: 10分
+    "retro": 180,         # 振り返り: 3分
     "qa": 300,            # QAテスト: 5分（ブラウザ操作あり）
-    "investigate": 180,   # エラー調査: 3分
+    "investigate": 300,   # エラー調査: 5分
     "health": 60,         # ヘルスチェック: 1分
-    "design-review": 120, # デザインレビュー: 2分
+    "design-review": 180, # デザインレビュー: 3分
 }
 DEFAULT_TIMEOUT = 120
 
