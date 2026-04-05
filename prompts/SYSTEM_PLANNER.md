@@ -16,7 +16,7 @@
 - 2段階精錬（ローカルLLM → API）を標準パイプラインとして使用する
 - 計画生成時はstrategy/の戦略ファイルを参照する
 - タスクグラフはPostgreSQLに記録する
-- ノード配置を考慮する：ALPHA=Qwen3.5-9B(MLX), BRAVO=Qwen3.5-9B, CHARLIE=Qwen3.5-9B, DELTA=Qwen3.5-4B
+- ノード配置を考慮する：ALPHA=LLMなし（オーケストレーター専任）, BRAVO=Qwen3.5-9B + Qwen3.5-27B(highest_local) + Nemotron-Nano-9B-Japanese, CHARLIE=Qwen3.5-9B + Nemotron-Nano-9B-Japanese, DELTA=Qwen3.5-4B。推論が必要なタスクは必ず BRAVO/CHARLIE/DELTA または API に割り当てる
 - 同じ処理を3回以上繰り返す場合は停止してエスカレーションを発動する
 
 ## 期待される振る舞い

@@ -1,6 +1,7 @@
 # SYUTAINβ V25 - システム完全マップ
 
-> 生成日: 2026-03-28 | 対象: SYUTAINβ Phase 1 稼働中システム
+> 生成日: 2026-03-28 / **最終更新: 2026-04-06（ALPHA LLM撤去、BRAVO 27B追加、Nemotron-JP統合、Codex再インストール等を反映）**
+> 対象: SYUTAINβ Phase 1 稼働中システム
 
 ---
 
@@ -9,18 +10,21 @@
 ```
 ┌─── ALPHA (Mac mini M4 Pro 16GB) ──────────────────────────────┐
 │ OS_Kernel / ProposalEngine / ApprovalManager / ChatAgent      │
-│ FastAPI Backend / Next.js Web UI / PostgreSQL / NATS Server   │
-│ LLM: Qwen3.5-9B (MLX, オンデマンド起動)                       │
+│ FastAPI Backend / Next.js Web UI / PostgreSQL + pgvector /    │
+│ NATS Server / Discord Brain-β / Scheduler(66+jobs)            │
+│ Codex (codex-cli 0.118.0, gpt-5.3-codex) — gstack jobs用      │
+│ LLM: なし（オーケストレーター専任、推論はリモートに委譲）     │
 └───────────────────────────────────────────────────────────────┘
               ↕ NATS JetStream (6ストリーム)
     ┌─────────┼──────────┬──────────┐
     ↓         ↓          ↓          ↓
 ┌─BRAVO─┐ ┌─CHARLIE─┐ ┌─DELTA──┐  [外部API]
-│RTX5070│ │RTX 3080 │ │GTX980Ti│  GPT-5.4 / Claude
-│Browser│ │推論ワーカ│ │監視    │  Gemini / DeepSeek
+│RTX5070│ │RTX 3080 │ │GTX980Ti│  OpenRouter Qwen3.6 Plus(無料)
+│Browser│ │推論ワーカ│ │監視    │  Anthropic / OpenAI / Gemini
 │Comp.  │ │コンテンツ│ │情報収集│  Tavily / Jina
 │Use    │ │生成     │ │        │
-│9B     │ │9B       │ │4B      │
+│9B+27B │ │9B       │ │4B      │
+│+nemot │ │+nemot   │ │        │
 └───────┘ └─────────┘ └────────┘
 ```
 
@@ -28,10 +32,10 @@
 
 | ノード | ハードウェア | 役割 | ローカルLLM |
 |--------|------------|------|------------|
-| **ALPHA** | Mac mini M4 Pro 16GB | 司令塔・API・DB・NATS | Qwen3.5-9B (MLX, オンデマンド) |
-| **BRAVO** | Ryzen + RTX 5070 12GB | ブラウザ操作・Computer Use | Qwen3.5-9B (Ollama) |
-| **CHARLIE** | Ryzen 9 + RTX 3080 10GB | 推論・コンテンツ生成 | Qwen3.5-9B (Ollama) |
-| **DELTA** | Xeon E5 + GTX 980Ti 6GB | 監視・情報収集・軽量推論 | Qwen3.5-4B (Ollama) |
+| **ALPHA** | Mac mini M4 Pro 16GB | 司令塔・API・DB・NATS・Discord・Scheduler | なし（2026-03-06 Ollama撤去以降、オーケストレーター専任） |
+| **BRAVO** | Ryzen + RTX 5070 12GB | ブラウザ操作・Computer Use・高品質推論・27Bレビュー | Qwen3.5-9B + Qwen3.5-27B (highest_local, 5 tok/s) + Nemotron-Nano-9B-Japanese (Ollama, KEEP_ALIVE=-1, KV Cache Q8) |
+| **CHARLIE** | Ryzen 9 + RTX 3080 10GB | 推論・コンテンツ生成 | Qwen3.5-9B + Nemotron-Nano-9B-Japanese (Ollama, KEEP_ALIVE=-1, KV Cache Q8) |
+| **DELTA** | Xeon E5 + GTX 980Ti 6GB | 監視・情報収集・軽量推論・突然変異エンジン | Qwen3.5-4B (Ollama, KEEP_ALIVE=-1, KV Cache Q8) |
 
 ### 通信
 
@@ -76,7 +80,8 @@
 | **StopDecider** | stop_decider.py | 継続/停止判断。LoopGuard 9層チェック | ALPHA |
 | **ProposalEngine** | proposal_engine.py | 3層提案生成（提案→反論→代替案）、収益スコアリング | ALPHA |
 | **ApprovalManager** | approval_manager.py | 承認ワークフロー（Tier 1/2/3）管理 | ALPHA |
-| **ChatAgent** | chat_agent.py | 双方向チャット。意図分類（6種）→ルーティング | ALPHA |
+| **ChatAgent** | chat_agent.py | 双方向チャット（Web UI 側）。意図分類→ルーティング | ALPHA |
+| **Brain-β** | bots/discord_bot.py + bot_conversation.py + bot_actions.py | Discord 対話エージェント。bot_intent.py で7カテゴリ軽量分類 (greeting/status/statement/query/consult/philosophy/command)、破壊的ACTIONは正規表現直接ルート、persona_memory.working_fact 自動 ingest | ALPHA |
 | **BrowserAgent** | browser_agent.py | 4層ブラウザ自動化（下記参照） | BRAVO |
 | **ComputerUseAgent** | computer_use_agent.py | GPT-5.4 Computer Use（視覚ベースGUI操作） | BRAVO |
 | **MonitorAgent** | monitor_agent.py | ノード死活監視（30秒間隔ハートビート） | DELTA |

@@ -19,7 +19,7 @@
 |------|-----|
 | Python | 57,668行 / 139ファイル |
 | TypeScript/TSX | 57,681行（Next.js Web UI） |
-| PostgreSQL | 45テーブル / 35,468イベント |
+| PostgreSQL + pgvector | 49テーブル / 38,715イベント（2026-04-06 更新） |
 | ゴール処理 | 98件（完了53 / キャンセル35 / エスカレーション8） |
 | タスク実行 | 2,092件 |
 | 承認処理 | 166件 |
@@ -64,7 +64,7 @@ V25はV20〜V24の全設計を**再構成・統合・進化**させた、SYUTAIN
 12. **BRAVO 27Bモデル追加**：BRAVO上にqwen3.5:27b（17GB、GPU+CPUオフロード、5 tok/s）を追加。quality="highest_local" Tier L+として記事批評・ファクトチェックに使用
 13. **KV Cache Q8全ノード有効化**：BRAVO/CHARLIE/DELTA全てで`OLLAMA_FLASH_ATTENTION=1`、`OLLAMA_KV_CACHE_TYPE=q8_0`を設定。KV CacheのVRAM消費約50%削減、perplexity +0.004（無視可能）。Gemmaモデルには非対応
 14. **Build in Public方針**：note記事テーマを「SYUTAINβで何が起きたか」に統一。外部AIニュース記事をメインテーマにすることを禁止。2026年6月1日まで無料公開
-15. **note品質6層防御**：15項目の機械チェック（V25の13項目に#14タイトル健全性、#15重複チェックを追加）、Stage 1.7外部検索ファクト検証（Tavily/Jina）、API障害時は安全側拒否、公開URL検証、Playwrightリトライロジック、コスト制限（記事¥15、日次¥120、月次¥1,000）
+15. **note品質6層防御**：15項目の機械チェック（V25の13項目に#14タイトル健全性、#15重複チェックを追加）、Stage 1.7外部検索ファクト検証（Tavily/Jina）、API障害時は安全側拒否、公開URL検証、Playwrightリトライロジック、コスト制限（記事¥15、日次¥120、月次¥2,000）
 16. **SNS拡散力強化**：Bluesky Rich Text Facets（URLクリッカブル、OGPリンクカード）、テーマ別ハッシュタグ（X:2、Threads:3）、note記事リンク自動挿入（投稿の20%）、intelコンテキスト注入
 17. **英語記事取り込みパイプライン**：fetch_and_summarize_english_article()、enrich_overseas_trends()、15英語キーワードでトレンド検知、Jina全文取得→ローカルLLM日本語要約→intel_items DB保存
 18. **GitHub公開セキュリティ**：13ファイルのIP外部化、SSHユーザー名のenv変数化、orphanブランチクリーンコミット、.gitignore（config/node_*.yaml、nats-server.conf、data/artifacts/、strategy/daichi_*、logs/、SYSTEM_STATE.md等）、個人プロファイルはGitHub除外（ローカルのみ）
@@ -77,7 +77,7 @@ V25はV20〜V24の全設計を**再構成・統合・進化**させた、SYUTAIN
 25. **SNS品質改善強化**（2026年4月4日）：正規表現ベースのポエムパターン検出（14パターン）、bigramベースJaccard重複チェック（閾値0.35、比較対象20件/150文字）
 26. **scheduler PIDロック**（2026年4月4日）：fcntl.flockによる重複起動防止。LaunchAgent+手動起動の競合を構造的に排除
 27. **Discord完結ワークフロー**：!承認一覧、!承認 N、!却下 N、!予算設定、!収益記録、!charlie、!レビュー、!提案生成。自然言語コマンド対応
-28. **CLAUDE.md 29条化**：Rule 27（実機確認必須）、Rule 28（scheduler+bot同時再起動）、Rule 29（自発的作業終了禁止）追加
+28. **CLAUDE.md 32条化**：Rule 27（実機確認必須）、Rule 28（scheduler+bot同時再起動）、Rule 29（自発的作業終了禁止）追加。さらに rev.3 で Rule 30（破壊的ACTION直接ルート必須、LLM自由文完了報告禁止）、Rule 31（生Python例外ユーザー露出禁止）、Rule 32（working_fact protocol）を追加
 29. **SNSエンゲージメント収集**（2026年4月5日）：X(OAuth 1.0a)/Bluesky(AT Protocol)/Threads(Meta Graph API)から反応データ(impressions/likes/reposts/replies)を自動収集。4時間間隔でposting_queue_engagementに蓄積。拡散戦略のデータドリブン改善基盤
 30. **日次ヘルスチェック**（2026年4月5日、毎朝09:30 JST）：インフラ死活/ジョブ実行/予算/note公開状態/SNS投稿/エンゲージメントデータ/投稿品質の7項目を検査。fail項目のみDiscord報告。拡散に影響するfailは最優先修正
 31. **拡散フェーズ最優先方針**（2026年4月5日）：6月までの全判断基準を「拡散指標の改善に直結するか」に統一。エンゲージメントデータに基づくPDCAサイクル確立
@@ -613,7 +613,7 @@ def choose_best_model_v6(
 
 **V30統合版：月額API予算**
 - `.env`: `MONTHLY_API_BUDGET_JPY=2000`（V25の¥1,500から引き上げ）
-- note記事コスト制限：1記事¥15、日次¥120、月次¥1,000
+- note記事品質ゲートのコスト制限：1記事¥15、日次¥120、月次予算は全体で ¥2,000
 
 ## 3.5 廃止スケジュール（要監視）
 

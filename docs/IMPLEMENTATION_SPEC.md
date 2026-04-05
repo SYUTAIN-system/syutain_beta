@@ -8,6 +8,33 @@
 
 ---
 
+> ## ⚠️ **本文書は 2026-03-18 時点のスナップショット**
+>
+> 以降の変更は `docs/SYUTAINβ_完全設計書_V25_V30統合.md` (rev.3, 2026-04-06) を参照してください。
+>
+> **2026-04-06 時点で本文書の記述と現状が乖離している主要項目:**
+>
+> | 項目 | 本文書 (2026-03-18) | 現状 (2026-04-06) |
+> |---|---|---|
+> | Python バージョン | 3.12 系前提 | **Python 3.14.3** |
+> | PostgreSQL テーブル数 | 17 | **49** + pgvector |
+> | ALPHA のローカルLLM | Qwen3.5-9B (MLX, オンデマンド) | **なし**（2026-03-06 撤去、オーケストレーター専任） |
+> | CHARLIE の OS | Ubuntu + Win11 dual-boot | **Ubuntu 単独**（2026-03 後半に移行） |
+> | BRAVO の Ollama モデル | Qwen3.5-9B のみ | 9B + **27B (highest_local)** + **Nemotron-Nano-9B-Japanese** + Nemotron-Mini |
+> | CHARLIE の Ollama モデル | Qwen3.5-9B のみ | 9B + **Nemotron-Nano-9B-Japanese** |
+> | 日次API予算 | ¥500 | **¥120** |
+> | 月次API予算 | ¥5,000 | **¥2,000** |
+> | 承認タイムアウト | 24時間 | **72時間** (APPROVAL_TIMEOUT_HOURS) |
+> | CLAUDE.md ルール数 | （本文書時点では未整備） | **32条** (rev.3) |
+> | Codex (ALPHA) | 未記載 | `codex-cli 0.118.0`, ChatGPT Plus認証, gstack jobsで使用 |
+> | Brain-β (Discord) | 未記載 | 20+個の新規コマンド、破壊的ACTION直接ルート、7カテゴリ intent分類、working_fact ingest (2026-04-05 以降) |
+> | SNS承認フロー | 全て Tier 1 | **Tier 2 (品質0.75以上で自動承認)** |
+> | Ollama 常駐化 | 未設定 | `KEEP_ALIVE=-1` + `KV Cache Q8` 全ノード有効 |
+>
+> 上記以外にも多数の差分があります。新規開発・運用判断時は V25_V30 統合版 rev.3 を優先してください。
+
+---
+
 ## 目次
 
 1. [概要](#第1章-概要)

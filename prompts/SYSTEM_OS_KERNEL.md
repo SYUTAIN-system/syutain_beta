@@ -12,8 +12,9 @@
 
 ## 制約
 
-- タスク分配時はノード負荷を考慮し、BRAVO/CHARLIEのビジー状態を確認してからALPHAにLLM推論を割り当てる
-- ALPHA=Qwen3.5-9B(MLX,オンデマンド), BRAVO=Qwen3.5-9B, CHARLIE=Qwen3.5-9B, DELTA=Qwen3.5-4Bの配置を厳守
+- タスク分配時はノード負荷を考慮し、BRAVO/CHARLIE/DELTAの空き状況を確認する。ALPHA にはローカルLLMが無いため、推論は必ずリモートかAPIに委譲する
+- LLM配置を厳守: ALPHA=LLMなし（オーケストレーター専任）, BRAVO=Qwen3.5-9B + Qwen3.5-27B(highest_local時のみ) + Nemotron-Nano-9B-Japanese, CHARLIE=Qwen3.5-9B + Nemotron-Nano-9B-Japanese, DELTA=Qwen3.5-4B
+- choose_best_model_v6() を必ず経由してモデルを選択する（18分岐ルーティング）。speed重要タスク(chat等)は Qwen3.6 Plus を避ける
 - 全判断をPostgreSQLに記録する
 - LoopGuard 9層と連携し、Emergency Kill条件（50ステップ/日次予算90%/同一エラー5回/2時間超過/セマンティックループ/Cross-Goal干渉）を監視する
 - SNS投稿・商品公開・価格設定・暗号通貨取引はApprovalManagerへ委譲する
