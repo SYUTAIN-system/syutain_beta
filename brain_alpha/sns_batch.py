@@ -1012,7 +1012,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             intel_rows = await conn.fetch(
                 """SELECT source, title, summary, metadata FROM intel_items
                 WHERE created_at > NOW() - INTERVAL '3 days'
-                AND source IN ('overseas_trend', 'english_article', 'fact_verification', 'trend_detector')
+                AND source IN ('overseas_trend', 'english_article', 'fact_verification', 'trend_detector', 'grok_x_research')
                 AND (review_flag = 'actionable' OR importance_score >= 0.7)
                 ORDER BY importance_score DESC, created_at DESC LIMIT 8"""
             )
@@ -1032,6 +1032,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         'english_article': '英語記事',
                         'fact_verification': '外部検証',
                         'trend_detector': 'トレンド検出',
+                        'grok_x_research': 'Xリアルタイム',
                     }.get(ir['source'], ir['source'])
                     intel_lines.append(f"- [{source_label}] {ir['title']}: {summary} {kp_str}")
                 intel_context = (

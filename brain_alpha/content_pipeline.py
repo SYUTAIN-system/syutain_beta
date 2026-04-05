@@ -713,6 +713,32 @@ async def _load_intel_themes(conn) -> list[str]:
                 summary = (r['summary'] or '')[:200]
                 results.append(f"[海外トレンド先取り] {r['title']}: {summary}")
 
+        # X リアルタイム (Grok): 直近24時間の話題性・バズを最優先
+        grok_items = await conn.fetch(
+            """SELECT title, summary, url, metadata FROM intel_items
+            WHERE source = 'grok_x_research'
+            AND created_at > NOW() - INTERVAL '36 hours'
+            ORDER BY importance_score DESC, created_at DESC LIMIT 4"""
+        )
+        for r in grok_items:
+            if r["title"]:
+                summary = (r['summary'] or '')[:200]
+                meta = {}
+                try:
+                    meta = json.loads(r['metadata']) if isinstance(r['metadata'], str) else (r['metadata'] or {})
+                except Exception:
+                    pass
+                note_angle = meta.get('note_angle', '') or ''
+                why_viral = meta.get('why_viral', []) or []
+                why_str = " / ".join(why_viral[:2]) if why_viral else ""
+                url = r['url'] or ''
+                results.append(
+                    f"[Xリアルタイム] {r['title']}: {summary}"
+                    + (f" 【note ネタ案】{note_angle}" if note_angle else "")
+                    + (f" 【バズ理由】{why_str}" if why_str else "")
+                    + (f" ({url})" if url else "")
+                )
+
         # 英語記事の日本語要約（enriched済みの海外ソース）
         en_items = await conn.fetch(
             """SELECT title, summary, metadata FROM intel_items

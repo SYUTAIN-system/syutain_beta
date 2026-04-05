@@ -38,8 +38,12 @@ logger = logging.getLogger("syutain.grok")
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_BASE_URL = "https://api.x.ai/v1"
 
-# xAI Grok 価格目安 (2026-04 時点、x_search 使用時は追加コストあり)
-# 実測: grok-4-fast-reasoning で x_search 2-3 回 + 1000 tokens 出力 ~$0.10-0.30
+# xAI は usage.cost_in_usd_ticks に **実コスト** を返してくれる。
+# 検証: "Hi" 1語送信 → 1005000 ticks → ~$0.0001 → ~¥0.015 (cached_tokens 156/157 割引込み)。
+# 変換: 1 USD = 10^10 ticks (tick = 10^-10 USD)。
+TICKS_PER_USD = 1e10
+
+# フォールバック用の token 単価表 (cost_in_usd_ticks が欠落時のみ使用)
 MODEL_COSTS = {
     "grok-4-fast-reasoning": {"input_per_1m": 0.20, "output_per_1m": 0.50},
     "grok-4-fast-non-reasoning": {"input_per_1m": 0.20, "output_per_1m": 0.50},
@@ -51,7 +55,6 @@ MODEL_COSTS = {
 }
 DEFAULT_MODEL = "grok-4-fast-reasoning"
 USD_TO_JPY = 152.0
-TOOL_CALL_COST_USD = 0.025  # x_search 1回あたり目安
 
 
 def _is_available() -> bool:
@@ -178,18 +181,23 @@ async def call_grok_responses(
     except Exception as e:
         logger.warning(f"Grok response parse failed: {e}")
 
-    # コスト計算
+    # コスト計算: xAI が返す cost_in_usd_ticks を優先 (ツール実行コスト含む、cache割引反映済み)
     usage = data.get("usage", {}) or {}
     input_tokens = usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0)
     output_tokens = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
-    cost_info = MODEL_COSTS.get(model, MODEL_COSTS[DEFAULT_MODEL])
-    token_cost_usd = (
-        (input_tokens / 1_000_000) * cost_info["input_per_1m"]
-        + (output_tokens / 1_000_000) * cost_info["output_per_1m"]
-    )
-    # ツール呼び出しコスト (x_search, web_search 各 ~$0.025 目安)
-    tool_cost_usd = len(tool_calls) * TOOL_CALL_COST_USD
-    cost_jpy = (token_cost_usd + tool_cost_usd) * USD_TO_JPY
+    cost_ticks = usage.get("cost_in_usd_ticks", 0) or 0
+
+    if cost_ticks > 0:
+        cost_usd = cost_ticks / TICKS_PER_USD
+        cost_jpy = cost_usd * USD_TO_JPY
+    else:
+        # フォールバック: トークン単価での推定 (ツールコスト無視、誤差あり)
+        cost_info = MODEL_COSTS.get(model, MODEL_COSTS[DEFAULT_MODEL])
+        token_cost_usd = (
+            (input_tokens / 1_000_000) * cost_info["input_per_1m"]
+            + (output_tokens / 1_000_000) * cost_info["output_per_1m"]
+        )
+        cost_jpy = token_cost_usd * USD_TO_JPY
 
     # 予算ガード記録
     try:

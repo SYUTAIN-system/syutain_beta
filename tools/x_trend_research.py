@@ -272,7 +272,7 @@ async def research_x_trends(
                                (source, keyword, title, summary, url, importance_score,
                                 category, review_flag, metadata, created_at)
                                VALUES ('grok_x_research', $1, $2, $3, $4, $5,
-                                       'x_trend', 'pending_review', $6::jsonb, NOW())""",
+                                       'x_trend', 'actionable', $6::jsonb, NOW())""",
                             topic[:200], title, summary, url, importance,
                             json.dumps({
                                 "author": author,
