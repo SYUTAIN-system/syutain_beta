@@ -15,25 +15,28 @@
 
 ## システム統計（2026年4月5日、本番DB直接取得）
 
-| 項目 | 値 |
+| 項目 | 値（2026-04-06 現在） |
 |------|-----|
-| Python | 57,668行 / 139ファイル |
+| Python | 55,966行 / 141ファイル |
 | TypeScript/TSX | 57,681行（Next.js Web UI） |
-| PostgreSQL + pgvector | 49テーブル / 38,715イベント（2026-04-06 更新） |
-| ゴール処理 | 98件（完了53 / キャンセル35 / エスカレーション8） |
-| タスク実行 | 2,092件 |
-| 承認処理 | 166件 |
-| ペルソナ記憶 | 551件（11カテゴリ） |
-| 情報収集 | 1,547件 |
-| SNS自動投稿 | 519件posted（Bluesky 274 / Threads 147 / X 97） |
-| LLM呼び出し | 11,085回 |
-| 累計LLMコスト | ¥1,104.93 |
-| LoopGuard発動 | 54回 |
-| スケジューラジョブ | 100件以上（5,302行、1日3本note公開目標の10スロット含む） |
+| PostgreSQL + pgvector | 49テーブル / 38,870イベント |
+| ゴール処理 | 103件 |
+| タスク実行 | 1,141件 |
+| 承認処理 | 398件 |
+| ペルソナ記憶 | 580件（working_fact protocol 含む11カテゴリ） |
+| daichi_dialogue_log | 53件（判断基準・哲学の記録） |
+| brain_alpha_session | 177セッション（継承式） |
+| 情報収集 | 1,555件（うち grok_x_research 3件、Xリアルタイム） |
+| Discord対話履歴 | 274件 |
+| SNS自動投稿 | 552件posted |
+| LLM呼び出し | 11,695回 |
+| 累計LLMコスト | ¥1,236 |
+| スケジューラジョブ | 68件（5,600+行、1日3本note公開目標の10スロット + Grok Xリサーチ2回 含む） |
 | APIエンドポイント | 64本 |
-| エンゲージメント収集 | 96件（X/Bluesky/Threads 3プラットフォーム） |
-| Blueskyフォロー追跡 | 開始（フォロワー4人、自動フォロー30人/日稼働中） |
-| 主要タスク¥0化 | chat/proposal/strategy/content_final全て無料APIモデルで運用 |
+| **xAI Grok 統合** | 2026-04-06 新規。Responses API + Agent Tools API (x_search/web_search) でリアルタイムX検索、intel_itemsへ自動蓄積、sns_batch/content_pipelineが自動参照 |
+| **Brain-β 対話層** | 7カテゴリ intent分類、破壊的ACTION直接ルート、working_fact protocol、毎時 health_audit（2026-04-05 徹底改善） |
+| **CLAUDE.md** | **32条**（V25の26条 → V25統合版 rev.3 で32条に拡張） |
+| 主要タスク¥0化 | chat/proposal/strategy/content_final全て無料APIモデル（Qwen 3.6 Plus / Nemotron-3-Nano-30B）で運用 |
 
 ---
 
@@ -3422,9 +3425,10 @@ node_modules/
 | V25（V30統合版） | 2026-04-04 | 島原大知 × Claude Opus 4.6 | ALPHA LLM撤去、BRAVO 27B追加、KV Cache Q8全ノード、Build in Public方針、6層品質防御、SNS拡散力強化、英語記事取り込み、GitHub公開セキュリティ、夜間モード拡張（23:00-09:00）、月額予算¥2,000、note_draft_generation統合、提案エンジン改修、統計更新 |
 | V25（V30統合版 rev.2） | 2026-04-04 | 島原大知 × Claude Opus 4.6 | **4/4午前〜午後の追加変更**: Ollama常駐化(KEEP_ALIVE=-1)、intel活用4施策(X速報/週次ダイジェスト/システム改善提案/経営日報注目トレンド)、SYUTAINβ日報(12:00毎日)、Xスレッド(月木10:00)、Bluesky intel投稿(日2本)、GitHub README自動更新(09:30)、高エンゲージメントリポスト(火金14:00)、note日報自動公開、SNSセマンティック重複チェック+ポエム禁止、Threadsハッシュタグ5個化、content/analysis/researchのローカルLLM移行、note記事一人称「僕」統一+年齢捏造防止+2重出力防止+ペイウォール結合修正、theme_hint漏洩防止、アラートファイル永続化、Discord完結型ワークフロー(!承認一覧/!予算設定/!収益記録/!charlie/!レビュー/!提案生成)、自然言語コマンドガイド、note公開マイページ検証、暗号通貨19通貨+変動リサーチ、Jinaコスト¥3修正、AutoAgent方式SNS品質自動改善ループ、ファイル役割マップ追加 |
 | V25（V30統合版 rev.3） | 2026-04-05 | 島原大知 × Claude Opus 4.6 | **Brain-β チャット体験徹底改善（過去254件会話ログ分析起点）**: (1) **P0 幻覚確認劇撲滅** — LLMが[ACTION:approve:N]タグを発行せず「承認しました」と自由文で出力しDB更新なしのまま完了報告する事故を発見。承認/却下/記事執筆依頼を `on_message` 冒頭の正規表現マッチで直接ハンドラに流す構造に変更（LLM経由禁止）。(2) **P0 datetime NameError露出** — !承認一覧で `from datetime import timezone, timedelta` のみで`datetime`本体が未importによりユーザーに生Python例外が14回/日露出していたのを修正。(3) **P0 生例外サニタイザ** — ACTION例外を `_sanitize_error_for_user` で穏便メッセージ化 + event_log自動記録（Brain-α auto_fix連携）。(4) **P0 破壊的ACTION承認ゲート** — 23種類の副作用ACTIONをconsent語（承認/やって/書いて等）検出でブロック。(5) **P0 空メッセージガード**。(6) **P1 定型接頭辞病撲滅** — `generate_followup` の `"取得したデータを報告します"` プロンプトが主因と特定、会話voiceを `generate_response` と統一。3/25-3/26の自然体トーンへ回帰。(7) **P1 bot_intent.py 新設** — 254件を7カテゴリ(greeting/status/statement/query/consult/philosophy/command)にキーワード分類、15/16正答。`discord_chat_history.intent` が全件NULL問題を解決。(8) **P1 persona_memory working_fact 自動ingest** — ユーザー発言の事実宣言（「エラー解消した」「CHARLIE復帰済み」等）を即DB記録し、`generate_response` で working_facts_section として DB状態より優先注入。発言無視問題を構造的に解決。24h後にtier降格、72h後に削除（`sunset_working_facts` 1h毎）。(9) **P1 capability_manifest.py** — 「何ができる？」に対して`"公式ドキュメントへ"`と答える事故を防ぐ静的自己説明。(10) **P1 未知質問フォールバック** — 「わからない」前に必ず browse/intel_search を試すプロンプト追加。(11) **P2 commission_article ACTION 新設** — Discord完結の記事執筆依頼ワークフロー: `"noteで〜について書いて"` 正規表現検出→`article_commission_queue`投入→scheduler 3分ポーリング→content_pipeline 執筆→note_drafts保存→会話トーンで active push。新規ACTIONハンドラ + !依頼 コマンド + scheduler `process_article_commissions` メソッド。(12) **新!コマンド追加**: !状態 / !予算(read-only照会) / !記事 / !依頼。(13) **CLAUDE.md Rule 30-32 追加** — 破壊的ACTION扱い、生例外露出禁止、working_fact protocol。(14) **新規ファイル**: `bots/bot_intent.py`, `bots/bot_memory_ingest.py`, `bots/capability_manifest.py`、新規テーブル `article_commission_queue`。変更ファイル: `bot_actions.py` / `bot_conversation.py` / `discord_bot.py` / `scheduler.py` / `CLAUDE.md`。全P0〜P3計15件、実機デプロイ + 統合スモークテスト全通過。 |
+| V25（V30統合版 rev.4） | 2026-04-06 | 島原大知 × Claude Opus 4.6 | **xAI Grok 統合による X リアルタイム検索の全システム展開**: (1) **低レベル: `tools/grok_client.py` 新設** — xAI Responses API (`/v1/responses`) と Agent Tools API (x_search + web_search 組込) を使う Grok クライアント。実装中に旧 Live Search API (`/v1/chat/completions` + `search_parameters`) がサーバ側で 2026-04-06 に deprecated 化していることを発見、Agent Tools API へ即移行。(2) **高レベル: `tools/x_trend_research.py` 新設** — 参考記事 (HayattiQ/x-research-skills) のプロンプト設計を SYUTAINβ 向けに再構築。想定読者を「投資家+エンジニア」→「非エンジニア起業家・クリエイター（映像/VTuber/ドローン/写真/広告/マーケ/メディア/映画/経営/文化/起業）+ AIと道を引く技術者」に変更。モード: balanced/tech/creator/business。出力は clusters/today_conclusions/materials (note_angle + sns_angle + hooks + caveat 付き) の JSON スキーマ。intel_items テーブルに source='grok_x_research', review_flag='actionable', category='x_trend' で自動保存。(3) **コスト精度修正** — 初版の手動トークン単価計算がキャッシュ割引(93%!)を無視 + 架空のツール呼出コスト $0.025/call を加算していて、実測 ¥0.02 に対して ¥50.21 と **2500倍の過大評価**をしていた。xAI の `usage.cost_in_usd_ticks` (TICKS_PER_USD = 1e10) を実コストとしてそのまま使うように修正。(4) **下流パイプライン統合** — `brain_alpha/sns_batch.py` の intel source whitelist に `grok_x_research` を追加しラベル「Xリアルタイム」で persona_hint 注入。`brain_alpha/content_pipeline.py _load_intel_themes` に grok_x_research 専用ブロックを最優先位置に追加し、note_angle と why_viral を theme candidate に組み込み。これで**「今話題性があること」が自動的に SNS 投稿と note 記事に反映される**。(5) **Discord 統合** — `bots/bot_actions.py` に `x_research` ACTION ハンドラ追加（_DESTRUCTIVE_ACTIONS 登録）、`bots/discord_bot.py` に「Xで〜を調べて」「Grokで〜」「xトレンド 〜」の正規表現直接ルート追加、`!xリサーチ <topic>|<mode>` スラッシュコマンド追加。(6) **scheduler 定期ジョブ 2本追加** — `grok_x_research_morning`（毎日 08:30 JST、tech+creator モードで合計 10 素材 intel 蓄積）、`grok_x_research_evening`（毎日 19:30 JST、business+balanced モードで合計 10 素材）。1日約 20 件の X/Web 実時間素材が intel_items に流入。(7) **Claude Code Skill 追加** — `.claude/skills/x-research/SKILL.md` + `scripts/cli.py`（`.claude/skills/` は gitignore 対象、ローカルのみ）。(8) **実機検証** — Claude Code Skills topic で 48h 検索、3 materials intel 保存、37 citations、4 clusters、cost ¥50.21（修正前）→ ¥0.02（修正後 実測一致）。intel_items の実URL確認済み。(9) **API キー管理** — `XAI_API_KEY` を `.env` 専用、permission 0600 維持、gitignore 対象、コード/ログ/memory/git に一切露出しない。`codex.md` に event_log category NOT NULL ルールと併せて記載。 |
 
 ---
 
-最終更新：2026年4月5日
+最終更新：2026年4月6日
 設計者：島原大知 × Claude Opus 4.6
-バージョン：V25（V30統合版 rev.3）
+バージョン：V25（V30統合版 rev.4）

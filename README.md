@@ -22,6 +22,7 @@ AIが提案→承認→実行→検証のサイクルを自動で回し、コン
 - **エンゲージメント収集**: 投稿後のいいね/リポスト/返信を48時間ウィンドウで収集・分析
 
 ### 情報収集・インテル
+- **xAI Grok リアルタイム X 検索** (2026-04-06 新設): Responses API + Agent Tools API (x_search/web_search) で X (Twitter) の空気感をリアルタイム抽出。島原関連分野（映像/VTuber/ドローン/広告/メディア/映画/経営/文化/起業 + AI/テック）に最適化した4モード（balanced/tech/creator/business）。朝08:30 と 夕19:30 の定期ジョブで 1日約20素材を intel_items に自動蓄積、sns_batch と content_pipeline が自動参照して「今話題性があること」を投稿・記事に反映。Discord から `!xリサーチ <topic>` / 「Xで〜を調べて」で即実行可能。コスト ~¥0.02-0.5/call（xAI `cost_in_usd_ticks` で実測）
 - **24 ソース横断バズ検出**: HackerNews / Reddit 16サブレディット / GitHub Trending / Zenn / Yahoo!Realtime 代替 / Togetter / はてなブックマーク 8 カテゴリ / Bluesky Popular 等
 - **Web 検索**: Tavily Search API（日本語対応）
 - **URL → テキスト**: Jina Reader API
@@ -172,8 +173,13 @@ syutain_beta/
 
 | Metric | Value |
 |--------|-------|
-| LLM Calls | 11,692 |
-| Total Cost | ¥1,186 |
-| Events Logged | 38,715 |
+| LLM Calls | 11,695 |
+| Total Cost | ¥1,236 |
+| Events Logged | 38,870 |
 | SNS Posts | 552 |
-| Last Updated | 2026-04-06 02:00 JST |
+| intel_items | 1,555（うち grok_x_research 3件） |
+| Goals | 103 |
+| Tasks | 1,141 |
+| Python Lines | 55,966 / 141 files |
+| PostgreSQL Tables | 49 + pgvector |
+| Last Updated | 2026-04-06 03:10 JST |
