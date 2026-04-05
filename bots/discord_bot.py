@@ -101,11 +101,74 @@ async def on_message(message):
     from bots.bot_learning import detect_immediate_instruction, save_learnings_to_persona_memory
 
     channel_id = str(message.channel.id)
-    user_msg = message.content
+    user_msg = (message.content or "").strip()
 
-    # 島原のメッセージを記録
+    # 空メッセージ（添付のみ/ステッカーのみ/空白のみ）は LLM 呼ばない
+    if not user_msg and not message.attachments:
+        return
+
+    # 意図分類（軽量パターン、LLM呼ばない）
+    from bots.bot_intent import classify_intent
+    user_intent = classify_intent(user_msg)
+
+    # 島原のメッセージを記録（intent 付き）
     proactive.on_daichi_message()
-    await save_message(channel_id, "daichi", user_msg)
+    await save_message(channel_id, "daichi", user_msg, intent=user_intent)
+
+    # statement 検出 → persona_memory に working fact として記録
+    # 「エラー解消した」「CHARLIE復帰済み」等、ユーザーが宣言した事実を忘れない
+    if user_intent == "statement":
+        try:
+            from bots.bot_memory_ingest import ingest_user_statement
+            asyncio.ensure_future(ingest_user_statement(user_msg))
+        except Exception as _e:
+            logger.debug(f"statement ingest スキップ: {_e}")
+
+    # ★ 直接実行ルート：承認/却下コマンドは LLM を通さず即実行
+    # LLMが [ACTION:approve:N] を発行せず「承認しました」と幻覚出力する事故を防ぐ
+    import re as _re
+    _approve_m = _re.match(r'^(?:承認|approve)\s+(\d+)(?:\s+(.+))?$', user_msg, _re.IGNORECASE)
+    _reject_m  = _re.match(r'^(?:却下|reject)\s+(\d+)(?:\s+(.+))?$', user_msg, _re.IGNORECASE)
+    if _approve_m or _reject_m:
+        from bots.bot_actions import approve_item, reject_item
+        try:
+            if _approve_m:
+                _id = int(_approve_m.group(1))
+                result = await approve_item(_id)
+            else:
+                _id = int(_reject_m.group(1))
+                _reason = _reject_m.group(2) or None
+                result = await reject_item(_id, _reason)
+        except Exception as e:
+            logger.warning(f"直接承認/却下失敗: {e}")
+            result = f"処理失敗: {e}"
+        await message.reply(result, mention_author=False)
+        await save_message(channel_id, "syutain_beta", result)
+        return
+
+    # ★ 記事執筆依頼の直接ルート（P2）
+    # パターン: "noteで〜について書いて" / "〜というタイトルで記事" / "記事書いて：〜"
+    _article_m = _re.match(
+        r'^(?:noteで|記事を?|note記事を?)\s*(.+?)(?:について|という|を|の件で)?\s*'
+        r'(?:書いて|執筆して|作って|お願い)(?:\s*[。.])?\s*$',
+        user_msg,
+    )
+    if not _article_m:
+        _article_m2 = _re.match(r'^(?:記事|note).*書いて(?:[：:]\s*|\s+)(.+)$', user_msg)
+        if _article_m2:
+            _article_m = _article_m2
+    if _article_m:
+        _topic = _article_m.group(1).strip()
+        if len(_topic) >= 3:
+            from bots.bot_actions import commission_article
+            try:
+                result = await commission_article(_topic)
+            except Exception as e:
+                logger.warning(f"記事執筆依頼失敗: {e}")
+                result = f"依頼受付失敗: {e}"
+            await message.reply(result, mention_author=False)
+            await save_message(channel_id, "syutain_beta", result)
+            return
 
     # セッションコンテキスト取得
     ctx = session_manager.get_or_create(channel_id)
@@ -169,8 +232,8 @@ async def on_message(message):
     async with message.channel.typing():
         response = await generate_response(user_msg, history, extra_context)
 
-    # ACTION処理
-    action_result = await process_actions(response)
+    # ACTION処理（破壊的ACTIONはuser_msgの同意表現で制御）
+    action_result = await process_actions(response, user_message=user_msg)
 
     if action_result["actions"]:
         # ACTIONの結果をコンテキストに保存
@@ -271,6 +334,69 @@ async def pending_list_cmd(ctx):
     # 2000文字制限対応
     if len(result) > 1900:
         result = result[:1900] + "\n...(続きはWeb UIで確認)"
+    await ctx.reply(result)
+
+@bot.command(name="状態")
+async def status_cmd(ctx):
+    """ノード・SNS・LLM・コスト・承認待ち・エラーの稼働サマリ"""
+    from bots.bot_conversation import _get_system_status
+    try:
+        s = await _get_system_status()
+        text = f"📊 **SYUTAINβ 現在の状態**\n```\n{s}\n```"
+        if len(text) > 1900:
+            text = text[:1900] + "\n...(省略)"
+        await ctx.reply(text)
+    except Exception as e:
+        await ctx.reply(f"状態取得失敗: {e}")
+
+@bot.command(name="予算")
+async def budget_status_cmd(ctx):
+    """当日コスト・予算使用率の照会（read-only）。変更は !予算設定"""
+    from bots.bot_actions import get_cost_summary
+    try:
+        r = await get_cost_summary()
+        await ctx.reply(
+            f"💰 **予算状況**\n"
+            f"本日: ¥{r.get('today_jpy', 0):.0f}\n"
+            f"週次: ¥{r.get('week_jpy', 0):.0f}\n"
+            f"ローカル比率(24h): {r.get('local_pct', 0):.1f}%"
+        )
+    except Exception as e:
+        await ctx.reply(f"予算取得失敗: {e}")
+
+@bot.command(name="記事")
+async def articles_cmd(ctx, limit: int = 5):
+    """直近生成された note 記事候補を表示"""
+    from tools.db_pool import get_connection
+    try:
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT id, status, LEFT(COALESCE(title, '無題'), 60) as title,
+                          quality_score, created_at
+                   FROM product_packages
+                   WHERE platform='note'
+                   ORDER BY created_at DESC LIMIT $1""",
+                limit,
+            )
+        if not rows:
+            await ctx.reply("📝 note 記事パッケージはまだありません")
+            return
+        lines = [f"📝 **直近の note 記事 ({len(rows)}件)**\n"]
+        for r in rows:
+            q = f"Q={r['quality_score']:.2f}" if r['quality_score'] else "Q=?"
+            lines.append(f"#{r['id']} [{r['status']}] {r['title']} ({q})")
+        await ctx.reply("\n".join(lines))
+    except Exception as e:
+        await ctx.reply(f"記事一覧取得失敗: {e}")
+
+@bot.command(name="依頼")
+async def commission_cmd(ctx, *, brief: str = ""):
+    """記事執筆依頼。例: !依頼 タイトル案|本文ブリーフ"""
+    if not brief.strip():
+        await ctx.reply("使い方: `!依頼 タイトル案|本文ブリーフ` または `!依頼 ブリーフだけ`")
+        return
+    from bots.bot_actions import commission_article
+    result = await commission_article(brief)
     await ctx.reply(result)
 
 @bot.command(name="予算設定")

@@ -1,9 +1,68 @@
 """ACTIONタグの実行 — Bot応答に必要なデータ取得・操作実行"""
-import re, json, logging, asyncio
-from datetime import timezone, timedelta
+import re, json, logging, asyncio, traceback
+from datetime import datetime, timezone, timedelta
 from tools.db_pool import get_connection
 
 logger = logging.getLogger("syutain.bot_actions")
+
+
+async def _log_action_error(action_name: str, exc: BaseException) -> None:
+    """ACTIONハンドラの例外を event_log に記録（Brain-α auto_fix パイプライン用）"""
+    try:
+        async with get_connection() as conn:
+            await conn.execute(
+                """INSERT INTO event_log (event_type, severity, source_node, payload, created_at)
+                   VALUES ($1, 'error', 'alpha', $2::jsonb, NOW())""",
+                f"bot_action_error:{action_name}",
+                json.dumps({
+                    "action": action_name,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc()[-800:],
+                }, ensure_ascii=False),
+            )
+    except Exception as log_exc:
+        logger.error(f"event_log への ACTION エラー記録失敗: {log_exc}")
+
+
+def _sanitize_error_for_user(action_name: str, exc: BaseException) -> dict:
+    """生の Python 例外をユーザー向けの穏便メッセージに変換。
+    raw な NameError/KeyError/AttributeError 等がチャットに露出しないよう保護する。"""
+    return {
+        "user_message": f"「{action_name}」の取得中に内部エラーが発生したよ。自動修復キューに積んだから、Brain-αが直す。",
+        "internal": True,  # followup 生成時に詳細を LLM に渡さない目印
+    }
+
+
+# === 破壊的ACTION承認ゲート（CLAUDE.md Rule 11 準拠） ===
+# LLMが自発的に発行すると副作用・不可逆変更を起こすACTION
+_DESTRUCTIVE_ACTIONS = {
+    "approve", "reject",                          # 承認キュー最終判断
+    "package_approve", "package_reject",          # パッケージ公開判断
+    "post_sns", "sns_edit", "sns_delete",         # SNS投稿操作
+    "set_budget", "record_revenue",               # 財務関連
+    "set_goal", "generate_proposal",              # ゴール/提案生成（LLMコスト）
+    "run_job", "trigger_review",                  # ジョブ強制起動
+    "charlie_mode",                                # ノードモード切替
+    "escalate_alpha",                              # Brain-αへ指示送信
+    "remind",                                      # リマインダー作成
+    "commission_article",                          # 記事執筆依頼（新規）
+}
+
+# ユーザーが明示的に同意を示したと判定するキーワード
+_CONSENT_PATTERNS = re.compile(
+    r"(承認|却下|やって|実行して|お願い|OK|ok|はい|yes|いいよ|"
+    r"行って|進めて|任せ|投稿して|書いて|生成して|作って|止めて|送って)",
+    re.IGNORECASE,
+)
+
+
+def _user_consented(user_message: str) -> bool:
+    """ユーザー発言に明示的な同意/指示が含まれるか判定"""
+    if not user_message:
+        return False
+    # !コマンドは別ルートで直接実行されるのでここは通らない
+    return bool(_CONSENT_PATTERNS.search(user_message))
 
 # JST変換ヘルパー
 _JST = timezone(timedelta(hours=9))
@@ -43,16 +102,31 @@ def _register(name):
     return decorator
 
 
-async def process_actions(response_text: str) -> dict:
-    """LLM応答からACTIONタグを抽出して実行。結果を返す"""
+async def process_actions(response_text: str, user_message: str = "") -> dict:
+    """LLM応答からACTIONタグを抽出して実行。結果を返す。
+    破壊的ACTIONはユーザーの明示的同意がない限り実行せず承認待ちに差し戻す（Rule 11）。"""
     actions = re.findall(r'\[ACTION:([^\]]+)\]', response_text)
     clean_text = re.sub(r'\[ACTION:[^\]]+\]', '', response_text).strip()
     results = {}
+
+    consent = _user_consented(user_message)
+    blocked_destructive: list[str] = []
 
     for action in actions:
         parts = action.split(":", 1)
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ""
+
+        # 破壊的ACTION承認ゲート
+        if cmd in _DESTRUCTIVE_ACTIONS and not consent:
+            logger.warning(f"破壊的ACTION {cmd} を同意なしで抑止: user_msg={user_message[:50]!r}")
+            blocked_destructive.append(f"{cmd}" + (f":{arg}" if arg else ""))
+            results[cmd] = {
+                "user_message": f"「{cmd}」は副作用があるから、本当にやる？って一度聞かせて。",
+                "internal": True,
+                "requires_consent": True,
+            }
+            continue
 
         handler = _ACTION_HANDLERS.get(cmd)
         if handler:
@@ -63,13 +137,29 @@ async def process_actions(response_text: str) -> dict:
                     results[cmd] = await handler()
             except Exception as e:
                 logger.warning(f"ACTION {cmd} 失敗: {e}")
-                results[cmd] = {"error": str(e)}
+                # event_log へ自動記録（Brain-α auto_fix パイプライン対象）
+                asyncio.ensure_future(_log_action_error(cmd, e))
+                # 生の例外は絶対にユーザーに見せない
+                results[cmd] = _sanitize_error_for_user(cmd, e)
         elif cmd == "set_goal" and arg:
-            results["goal_set"] = await _execute_goal(arg)
+            if not consent:
+                blocked_destructive.append(f"set_goal:{arg}")
+                results["goal_set"] = {
+                    "user_message": "新しいゴール作成は副作用があるから、本当にやる？",
+                    "internal": True,
+                    "requires_consent": True,
+                }
+            else:
+                results["goal_set"] = await _execute_goal(arg)
         else:
             logger.warning(f"未知のACTION: {cmd}")
 
-    return {"clean_text": clean_text, "actions": actions, "results": results}
+    return {
+        "clean_text": clean_text,
+        "actions": actions,
+        "results": results,
+        "blocked_destructive": blocked_destructive,
+    }
 
 
 # === データ取得関数 ===
@@ -1292,3 +1382,38 @@ async def trigger_proposal(channel: str = "note") -> str:
         return f"💡 提案生成: {title} (スコア: {score})"
     except Exception as e:
         return f"❌ 提案生成失敗: {e}"
+
+
+@_register("commission_article")
+async def commission_article(arg: str = "") -> str:
+    """島原大知からの記事執筆依頼を queue に投入する。
+    arg 形式: "title_hint|brief" または "brief" 単独。
+    Brain-α 側 scheduler ジョブが pending を拾って content_pipeline で生成する。"""
+    if not arg or not arg.strip():
+        return "❌ 依頼内容が空です。例: commission_article:タイトル案|本文のアウトライン"
+    parts = arg.split("|", 2)
+    if len(parts) >= 2:
+        title_hint = parts[0].strip()[:200]
+        brief = parts[1].strip()[:2000]
+        structure_hint = parts[2].strip()[:200] if len(parts) >= 3 else None
+    else:
+        title_hint = None
+        brief = parts[0].strip()[:2000]
+        structure_hint = None
+    if len(brief) < 5:
+        return "❌ ブリーフが短すぎます（5文字以上）"
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO article_commission_queue
+               (requested_by, title_hint, brief, structure_hint, status, requested_at)
+               VALUES ('daichi', $1, $2, $3, 'pending', NOW())
+               RETURNING id""",
+            title_hint, brief, structure_hint,
+        )
+    return (
+        f"📝 記事執筆依頼 #{row['id']} を受け付けた。\n"
+        f"  タイトル案: {title_hint or '(未指定・自動選定)'}\n"
+        f"  ブリーフ: {brief[:100]}{'...' if len(brief) > 100 else ''}\n"
+        f"  構成: {structure_hint or '(自動選定)'}\n"
+        f"Brain-α が次のサイクルで執筆開始する。完成したらこのチャットに通知する。"
+    )

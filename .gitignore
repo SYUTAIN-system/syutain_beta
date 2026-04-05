@@ -33,6 +33,9 @@ logs/
 !logs/.gitkeep
 !data/.gitkeep
 
+# ===== セキュリティ監査レポート（攻撃面の詳細を含むためローカルのみ） =====
+.gstack/
+
 # ===== 運用ファイル（IPを含む）=====
 SYSTEM_STATE.md
 docs/SESSION_HANDOFF_*

@@ -1,4 +1,4 @@
-# SYUTAINβ V25（V30統合版）- Claude Code 絶対ルール29条
+# SYUTAINβ V25（V30統合版）- Claude Code 絶対ルール32条
 
 このファイルはClaude Codeがこのプロジェクトで作業する際に必ず守るべきルールです。
 
@@ -31,3 +31,7 @@
 27. コード変更後は「出来てるはず」と推測せず、必ず実機で動作確認を行うこと。scheduler/Discord bot/全リモートノードへのデプロイ反映を確認し、構文チェック・行数一致・機能テストを実行すること
 28. scheduler再起動時はDiscord botも再起動が必要（別プロセス）。デプロイ時は両方の再起動と動作確認を行うこと
 29. 「もう十分」「明日でいい」と自分から作業を切り上げない。島原大知が「ここまで」と言うまで、次にやるべきことを自ら考えて提案し続けること
+30. 破壊的ACTION（approve/reject/post_sns/set_budget/record_revenue/set_goal/run_job/trigger_review/charlie_mode/escalate_alpha/remind/commission_article 等）は、必ず (a) !コマンドで直接ルート、または (b) process_actions の consent ゲートを通過した ACTION タグ経由でのみ実行する。LLMが自由文で「〇〇しました」と実行報告を作文するのは**絶対に禁止**（2026-04-05 の幻覚確認劇事故以降）。generate_response プロンプトにこの禁止事項を明記すること
+31. ACTIONハンドラの生Python例外（NameError/KeyError 等）を絶対にユーザーチャットに露出させない。bot_actions._sanitize_error_for_user + event_log 記録で穏便化する（2026-04-05 の datetime NameError 事故以降）
+32. ユーザー発言の事実宣言（「エラー解消した」「CHARLIE復帰済み」等）は bot_intent.classify_intent == 'statement' 検出で persona_memory.category='working_fact' に即時記録し、generate_response 時に working_facts_section として DB状態より優先して注入する。24h後に tier 降格、72h後に削除（scheduler.sunset_working_facts）
+

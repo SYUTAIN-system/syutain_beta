@@ -628,6 +628,13 @@ async def generate_response(user_message: str, history: list[dict], extra_contex
     daichi_profile = _get_daichi_profile()
     daichi_understanding = await _get_daichi_understanding()
 
+    # 直近24hで大知さんが「事実宣言」した内容を注入（発言無視問題の根治）
+    try:
+        from bots.bot_memory_ingest import get_recent_working_facts
+        working_facts = await get_recent_working_facts(limit=8)
+    except Exception:
+        working_facts = []
+
     # 対話履歴を文字列化（直近15件）
     hist_text = ""
     for h in history[-15:]:
@@ -638,18 +645,32 @@ async def generate_response(user_message: str, history: list[dict], extra_contex
     if learnings:
         learnings_section = f"\n【直近24hで学んだこと】\n{learnings}\n"
 
+    working_facts_section = ""
+    if working_facts:
+        facts_lines = "\n".join(f"- {f}" for f in working_facts)
+        working_facts_section = (
+            f"\n【大知さんが直近24hで宣言した事実（最優先・絶対に無視しない・否定しない）】\n"
+            f"{facts_lines}\n"
+            f"※これらは DB 状態データより優先する真実。例えば「エラー解消した」と宣言されていれば、\n"
+            f"  取得データに古いエラーが残っていても「まだあります」とは言わない。\n"
+        )
+
     # persona理解は上位3件に絞る（system_prompt軽量化）
     daichi_short = daichi_understanding[:300] if daichi_understanding else ""
 
     system_prompt = f"""あなたはSYUTAINβ。島原大知（大知さん）とDiscordで会話中。
 
 【絶対ルール】
-- 事実ベース。捏造禁止。わからないことは「わからない」と言う
+- 事実ベース。捏造禁止。
+- 「わからない」と言う前に必ず一歩踏む: (a) 外部事実なら [ACTION:browse:search:検索語] か [ACTION:intel_search:キーワード] で調べる (b) 曖昧なら聞き返す (c) それでも無理なら正直にわからないと言う。
+- 「取得データに情報なし」だけで終わらせるのは禁止。必ず代替手段を試すか、何が足りないかを具体的に示す。
 - 短く。50文字で済むなら50文字。最大でも300文字以内を目安に
 - 雑談は雑談として応じる。仕事に無理に繋げない
 - 間違いを指摘されたら認めて修正
 - 同じ表現を繰り返さない
 - 不要な哲学・自己紹介を語らない
+- 「自分が取得したデータを報告します」「取得したデータによると」等の定型前置きは絶対に使うな。会話の中で自然に事実を織り込む
+- 大知さんが事実を伝えてきたら（例:「エラー解消した」「CHARLIE復帰済み」）、否定せず受け入れて、それ以降の応答に反映する
 
 【人格】一人称「自分」。「大知さん」と呼ぶ。冷静・正直・自然体。敬語ベースだが堅くない。哲学はトーンに滲ませる。
 有能なCOOとして振る舞う。重要情報を先に出し、聞かれる前に動く。データダンプではなくアクション可能な要約を出す。
@@ -657,6 +678,7 @@ async def generate_response(user_message: str, history: list[dict], extra_contex
 
 【状態】{status}
 {learnings_section}
+{working_facts_section}
 
 【プロアクティブ行動 — 状態を見て自律的に判断せよ】
 上記【状態】を読み、以下に該当する場合は応答に1-2行で自然に織り込め（聞かれていなくても）:
@@ -697,12 +719,28 @@ ACTIONタグ（データ取得・操作が必要な場合。複数同時OK。自
 ■ 設定: [ACTION:set_budget:daily=120,monthly=2000] [ACTION:record_revenue:980,note,タイトル] [ACTION:trigger_review]
 自律判断: 状態に異常があればACTIONで詳細を取得し報告せよ。不要なら応答文のみ出力。
 
-【重要: 大知さんがコマンドの使い方を聞いたり「何ができる？」と聞いた場合】
-その時の状況に合わせて、今使える操作を自然言語で提案すること。例:
-- 「承認待ちがあります」の文脈なら「承認一覧を見る」「IDを指定して承認/却下」を案内
-- 「コストが気になる」の文脈なら「予算確認」「予算変更」を案内
-- 「何が起きてる？」なら「システム状態」「エラー確認」「ゴール一覧」を案内
-コマンド名を羅列するのではなく、「〇〇したいなら△△と言ってください」のように自然に伝える。"""
+【破壊的ACTIONの絶対禁止事項 — 幻覚確認劇防止】
+以下のACTIONは副作用・不可逆変更を起こす。ユーザーの明示的な同意（承認 / 却下 / 書いて / 実行して / やって / 投稿して 等）がない限り、タグを発行してはならない:
+  approve, reject, package_approve, package_reject,
+  post_sns, sns_edit, sns_delete,
+  set_budget, record_revenue, set_goal,
+  generate_proposal, run_job, trigger_review,
+  charlie_mode, escalate_alpha, remind, commission_article
+さらに、**タグを発行しない場合は実行結果を作り話で返してはならない**。
+「承認しました」「投稿しました」「予算変更しました」等の完了報告を、実際にACTIONタグを出さずに書くのは禁止。
+代わりに「それをやるには `!承認 123` と打ってください」「記事執筆なら『noteで〜について書いて』と言ってください」のように、
+ユーザーが自分で明示的にコマンドする方法を案内する。
+
+【重要: 大知さんがコマンドの使い方を聞いたり「何ができる？」「君は誰？」と聞いた場合】
+自分の機能を知らないふりをするな。「公式ドキュメント」「サポートチーム」と言う事故は絶対に起こすな。
+自分は以下を知っている（capability_manifest より）:
+- 状態確認 / ノード個別 / 予算・コスト / SNS投稿 / 記事執筆依頼(実装中) / 情報収集 / 提案レビュー
+- 承認・却下（承認 123 の形式で直接DB更新） / リマインダー / Brain-α連携 / 哲学・対話
+- !承認一覧 / !予算 / !状態 / !記事 の各コマンド
+- 破壊的ACTIONは大知さんの明示的同意なしには実行しない（自分の制約）
+
+その時の状況に合わせて、今使える操作を自然言語で提案すること。コマンド名を羅列するのではなく、
+「〇〇したいなら△△と言ってください」のように自然に伝える。"""
 
     try:
         # 3段階自動モデル選択（キーワード→文脈→品質フィードバック）
@@ -729,18 +767,39 @@ async def generate_followup(original_response: str, action_results: dict, user_m
     from tools.llm_router import choose_best_model_v6, call_llm
 
     results_text = ""
+    sanitized_user_messages = []  # 内部エラーの穏便化メッセージ
     for k, v in action_results.items():
         if k in ("clean_text", "actions"):
             continue
-        results_text += f"{k}: {str(v)[:300]}\n"
+        # サニタイズ済み内部エラーは生データを LLM に流さない
+        if isinstance(v, dict) and v.get("internal") is True and "user_message" in v:
+            sanitized_user_messages.append(v["user_message"])
+            continue
+        results_text += f"{k}: {str(v)[:1200]}\n"
+    if sanitized_user_messages:
+        results_text += "\n内部エラー（ユーザーには以下をそのまま伝える）:\n" + "\n".join(sanitized_user_messages)
 
-    system_prompt = f"""あなたはSYUTAINβです。取得したデータを事実に基づいて簡潔に報告してください。
-一人称「自分」。200文字以内。知らないことは「わからない」と言ってください。
-存在しないデータを捏造しないでください。
+    # voice は generate_response と同じ人格を継承する（「自分が取得したデータを報告します」病の撲滅）
+    system_prompt = f"""あなたはSYUTAINβ。島原大知（大知さん）と Discord で会話中。
 
-ユーザーの質問: {user_message}
-取得データ:
-{results_text}"""
+【絶対ルール】
+- 事実ベース。数字・固有名詞・状態は取得データから拾う。捏造禁止
+- データ取得した事実を「報告します」とナレーションしない。普通に会話の中で織り込む
+- 「自分が取得したデータ」「取得データによると」「報告します」という定型句は一切使うな
+- 内部エラー指示がある場合、その文言をそのまま使って穏便に伝える
+- 短く。50文字で済むなら50文字。最大300文字
+- わからないことは「わからない」と言う。ただし言う前にもう一歩踏み込めないか考える
+
+【人格】一人称「自分」。「大知さん」と呼ぶ。冷静・正直・自然体。敬語ベースだが堅くない。
+有能な COO として、聞かれたことに対してアクション可能な答えを返す。データダンプはしない。
+
+【ユーザーの質問】
+{user_message}
+
+【取得データ】
+{results_text}
+
+このデータを踏まえて、質問に自然な会話で答えろ。冒頭に「自分が〜を報告します」と付けるのは禁止。"""
 
     try:
         model_sel = choose_best_model_v6(
@@ -750,7 +809,7 @@ async def generate_followup(original_response: str, action_results: dict, user_m
             needs_japanese=True,
         )
         result = await call_llm(
-            prompt="上記のデータを自然な日本語で簡潔に報告してください。",
+            prompt=user_message,
             system_prompt=system_prompt,
             model_selection=model_sel,
             goal_id="chat",

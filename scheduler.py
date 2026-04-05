@@ -507,6 +507,27 @@ class SyutainScheduler:
                 misfire_grace_time=30,
             )
 
+            # 記事執筆依頼キュー処理（3分間隔）
+            self._scheduler.add_job(
+                self.process_article_commissions,
+                IntervalTrigger(minutes=3),
+                id="article_commissions",
+                name="記事執筆依頼キュー処理（3分）",
+                replace_existing=True,
+                misfire_grace_time=60,
+                max_instances=1,
+            )
+
+            # working_fact sunset（1時間毎、24h以上前を tier 降格 / 72h 以上前を削除）
+            self._scheduler.add_job(
+                self.sunset_working_facts,
+                IntervalTrigger(hours=1),
+                id="sunset_working_facts",
+                name="working_fact sunset（1h）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+
             # Brain-α相互評価（毎日06:00）
             self._scheduler.add_job(
                 self.brain_cross_evaluate,
@@ -3484,6 +3505,146 @@ class SyutainScheduler:
             )
         except Exception as e:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
+
+    async def sunset_working_facts(self):
+        """persona_memory の working_fact は寿命付き。
+        24h経過→tier 8→5 に降格、72h経過→削除。
+        「エラー解消した」を永遠に言い続けるのを防ぐ。"""
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                demoted = await conn.execute(
+                    """UPDATE persona_memory
+                       SET priority_tier = 5
+                       WHERE category = 'working_fact'
+                       AND priority_tier > 5
+                       AND created_at < NOW() - INTERVAL '24 hours'"""
+                )
+                deleted = await conn.execute(
+                    """DELETE FROM persona_memory
+                       WHERE category = 'working_fact'
+                       AND created_at < NOW() - INTERVAL '72 hours'"""
+                )
+            logger.debug(f"working_fact sunset: demoted={demoted}, deleted={deleted}")
+        except Exception as e:
+            logger.warning(f"working_fact sunset 失敗: {e}")
+
+    async def process_article_commissions(self):
+        """島原大知から Discord チャットで受けた記事執筆依頼を処理する。
+        article_commission_queue.status='pending' を拾い、content_pipeline で執筆、
+        完成したら Brain-β に通知する。"""
+        try:
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE article_commission_queue
+                       SET status='running', started_at=NOW()
+                       WHERE id = (
+                           SELECT id FROM article_commission_queue
+                           WHERE status='pending'
+                           ORDER BY requested_at ASC LIMIT 1
+                           FOR UPDATE SKIP LOCKED
+                       )
+                       RETURNING id, title_hint, brief, structure_hint"""
+                )
+            if not row:
+                return
+            commission_id = row["id"]
+            title_hint = row["title_hint"]
+            brief = row["brief"]
+            structure_hint = row["structure_hint"]
+            logger.info(f"記事執筆依頼処理開始: #{commission_id} title_hint={title_hint!r}")
+
+            # theme_hint を組み立て（title_hint + brief + structure_hint）
+            theme_parts = []
+            if title_hint:
+                theme_parts.append(f"タイトル案: {title_hint}")
+            theme_parts.append(f"ブリーフ: {brief}")
+            if structure_hint:
+                theme_parts.append(f"構成の指定: {structure_hint}")
+            theme_parts.append("※この記事は島原大知さんから Discord 経由で直接依頼されたもの。Build in Public 方針に沿って、SYUTAINβの実運用データと絡めて執筆すること。")
+            effective_theme = "\n".join(theme_parts)
+
+            try:
+                from brain_alpha.content_pipeline import generate_publishable_content
+                result = await generate_publishable_content(
+                    content_type="note_article",
+                    target_length=6000,
+                    theme=effective_theme,
+                )
+                content = result.get("content", "")
+                title = result.get("title", title_hint or "無題")
+                quality = result.get("quality_score", 0)
+
+                if not content or len(content) < 500:
+                    raise RuntimeError(f"生成コンテンツが短すぎる: {len(content)}文字")
+
+                # note_drafts に保存
+                import os as _os
+                drafts_dir = _os.path.join(
+                    _os.path.dirname(__file__), "data", "artifacts", "note_drafts"
+                )
+                _os.makedirs(drafts_dir, exist_ok=True)
+                safe_title = "".join(
+                    c for c in title[:30] if c.isalnum() or c in "ぁ-んァ-ヶ亜-熙_- "
+                ).strip() or "commissioned"
+                filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M')}_commission{commission_id}_{safe_title}.md"
+                filepath = _os.path.join(drafts_dir, filename)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(f"# {title}\n\n{content}")
+                logger.info(f"依頼記事をnote_draftsに保存: {filepath}")
+
+                async with get_connection() as conn:
+                    await conn.execute(
+                        """UPDATE article_commission_queue
+                           SET status='completed', completed_at=NOW(),
+                               metadata = metadata || jsonb_build_object(
+                                   'title', $2::text,
+                                   'quality', $3::float,
+                                   'filepath', $4::text
+                               )
+                           WHERE id=$1""",
+                        commission_id, title, float(quality), filepath,
+                    )
+
+                # Brain-β (Discord) へ会話トーンで active push
+                try:
+                    from tools.discord_notify import notify_discord
+                    q_comment = (
+                        "品質ゲート通過見込み、公開候補に進めて良さそう"
+                        if quality >= 0.70
+                        else "品質はまだ磨き余地あり、Brain-α が追加レビューで仕上げる"
+                    )
+                    msg = (
+                        f"大知さん、依頼 #{commission_id} の記事書けたよ。\n\n"
+                        f"**「{title}」**\n"
+                        f"品質スコア {quality:.2f}（{q_comment}）\n"
+                        f"ドラフト: `{filename}`\n\n"
+                        f"公開可否は品質ゲート通過後に改めて承認を求める。内容先に見たければ `!記事` で一覧出せる。"
+                    )
+                    await notify_discord(msg)
+                except Exception as e:
+                    logger.warning(f"commission通知失敗: {e}")
+            except Exception as e:
+                logger.error(f"記事執筆依頼#{commission_id}失敗: {e}")
+                async with get_connection() as conn:
+                    await conn.execute(
+                        """UPDATE article_commission_queue
+                           SET status='failed', completed_at=NOW(), error=$2
+                           WHERE id=$1""",
+                        commission_id, str(e)[:500],
+                    )
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"大知さん、ごめん。依頼 #{commission_id} の記事生成に失敗した。\n"
+                        f"エラー: {str(e)[:200]}\n"
+                        f"リトライするなら `!依頼 {(row['title_hint'] or '')[:30]}|{(row['brief'] or '')[:100]}` で再送して。"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"process_article_commissions 全体失敗: {e}")
 
     async def generate_daily_content_morning(self):
         """07:30 JST: SYUTAINβ運用レポート"""
