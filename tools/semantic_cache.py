@@ -323,13 +323,16 @@ class SemanticCache:
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
         async with get_connection() as conn:
+            # 注: DBスキーマに response (NOT NULL) と response_text (nullable) の
+            # 両カラムが存在する（スキーマドリフト）。両方に同じ値を書き込む必要がある
             await conn.execute(
                 """INSERT INTO semantic_cache
                     (prompt_hash, prompt_text, system_prompt_hash, model,
-                     response_text, embedding, hit_count, created_at, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6::vector, 0, NOW(),
+                     response, response_text, embedding, hit_count, created_at, expires_at)
+                VALUES ($1, $2, $3, $4, $5, $5, $6::vector, 0, NOW(),
                         NOW() + make_interval(secs => $7))
                 ON CONFLICT (prompt_hash) DO UPDATE SET
+                    response = EXCLUDED.response,
                     response_text = EXCLUDED.response_text,
                     model = EXCLUDED.model,
                     embedding = EXCLUDED.embedding,
@@ -424,10 +427,11 @@ async def store_cache(prompt: str, response: str, model: str = "", task_type: st
             await conn.execute(
                 """INSERT INTO semantic_cache
                     (prompt_hash, prompt_text, system_prompt_hash, model,
-                     response_text, hit_count, created_at, expires_at)
-                VALUES ($1, $2, '', $3, $4, 0, NOW(),
+                     response, response_text, hit_count, created_at, expires_at)
+                VALUES ($1, $2, '', $3, $4, $4, 0, NOW(),
                         NOW() + make_interval(secs => $5))
                 ON CONFLICT (prompt_hash) DO UPDATE SET
+                    response = EXCLUDED.response,
                     response_text = EXCLUDED.response_text,
                     model = EXCLUDED.model,
                     expires_at = NOW() + make_interval(secs => $5),

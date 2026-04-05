@@ -290,12 +290,12 @@ async def run_remote_health_tests() -> dict:
             results["failed"] += 1
             results["errors"].append({"test": f"{node}_ssh", "error": str(e)})
 
-        # D-2: systemctlでサービス稼働確認
+        # D-2: systemctlでサービス稼働確認（syutain-worker-* は system-level service）
         for svc in cfg["services"]:
             try:
                 proc = subprocess.run(
                     ["ssh", "-o", "ConnectTimeout=5", f"{user}@{ip}",
-                     f"export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus; systemctl --user is-active {svc}"],
+                     f"systemctl is-active {svc}"],
                     capture_output=True, text=True, timeout=10,
                 )
                 status = proc.stdout.strip()

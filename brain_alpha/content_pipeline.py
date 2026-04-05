@@ -126,20 +126,36 @@ def _verify_factual_claims(content: str) -> list[str]:
     issues = []
 
     # 1. 年号 + AIツール整合性チェック
+    # SYUTAINβ は特殊: 個人プロジェクトなので「SYUTAINβで〜した」等、
+    # リリース後の体験として直接結びついた年号のみチェックする（広い context だと
+    # 島原さんの過去経歴/他ツール言及で誤検知する）
     for tool_name, release_year in AI_TIMELINE.items():
         tool_positions = [m.start() for m in re.finditer(re.escape(tool_name), content)]
         for pos in tool_positions:
-            context_start = max(0, pos - 300)
-            context_end = min(len(content), pos + 300)
-            context = content[context_start:context_end]
-            context_years = re.findall(r'(\d{4})年', context)
-            for year_str in context_years:
-                year = int(year_str)
-                if year < release_year:
-                    issues.append(
-                        f"[タイムライン矛盾] {tool_name}は{release_year}年リリースだが、"
-                        f"{year}年のエピソードで言及されている"
-                    )
+            if tool_name == "SYUTAINβ":
+                # SYUTAINβ は直後 60 字以内のみチェック（「SYUTAINβで〜した」等の直接的文脈）
+                local_context = content[pos:min(len(content), pos + 60)]
+                m = re.search(r'(\d{4})年', local_context)
+                if m:
+                    year = int(m.group(1))
+                    if year < release_year:
+                        issues.append(
+                            f"[タイムライン矛盾] {tool_name}は{release_year}年リリースだが、"
+                            f"{year}年のエピソードで言及されている"
+                        )
+            else:
+                # 他のAIツール（GPT-4, Claude, DeepSeek等）は従来通り 300 字の広い context
+                context_start = max(0, pos - 300)
+                context_end = min(len(content), pos + 300)
+                context = content[context_start:context_end]
+                context_years = re.findall(r'(\d{4})年', context)
+                for year_str in context_years:
+                    year = int(year_str)
+                    if year < release_year:
+                        issues.append(
+                            f"[タイムライン矛盾] {tool_name}は{release_year}年リリースだが、"
+                            f"{year}年のエピソードで言及されている"
+                        )
 
     # 2. 島原の経歴矛盾チェック
     false_claims = [
