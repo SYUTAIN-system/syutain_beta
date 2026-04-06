@@ -21,7 +21,7 @@ CODEX_PATH = "/opt/homebrew/bin/codex"
 TIMEOUT_MAP = {
     "review": 420,        # コードレビュー: 7分（180sだと2日連続でTIMEOUT発生のため延長）
     "cso": 600,           # セキュリティ監査: 10分
-    "retro": 180,         # 振り返り: 3分
+    "retro": 420,         # 振り返り: 7分（180sで08:03 TIMEOUTしたため延長 2026-04-06）
     "qa": 300,            # QAテスト: 5分（ブラウザ操作あり）
     "investigate": 300,   # エラー調査: 5分
     "health": 60,         # ヘルスチェック: 1分

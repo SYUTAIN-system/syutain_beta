@@ -1200,6 +1200,27 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         candidate_draft = result.get("text", "").strip()
                         model_used = current_sel.get("model", "unknown")
 
+                        # メタデータ漏洩サニタイズ（LLMがプロンプトメタ情報を投稿に含める事故防止）
+                        # 例: "ペルソナ: SYUTAINβ開発者\nトーン: 深い洞察..." が冒頭に混入すると
+                        # Bluesky AT Protocol が 400 Bad Request で拒否する
+                        import re as _re_sns
+                        # 冒頭のメタ行を除去
+                        _meta_line_re = _re_sns.compile(
+                            r'^(?:ペルソナ|トーン|文字数|テーマ|Persona|Tone|Theme|Length|プラットフォーム|Platform'
+                            r'|ハッシュタグ|投稿内容|出力|draft|output)\s*[:：].+$',
+                            _re_sns.MULTILINE | _re_sns.IGNORECASE,
+                        )
+                        _cleaned = _meta_line_re.sub('', candidate_draft).strip()
+                        # 空行の連続を1行に
+                        _cleaned = _re_sns.sub(r'\n{3,}', '\n\n', _cleaned).strip()
+                        if _cleaned and len(_cleaned) >= 20:
+                            if candidate_draft != _cleaned:
+                                logger.warning(f"SNSメタ漏洩サニタイズ: {len(candidate_draft)}→{len(_cleaned)}文字 (platform={platform})")
+                            candidate_draft = _cleaned
+                        elif not _cleaned or len(_cleaned) < 20:
+                            # サニタイズ後に投稿として短すぎる → 元のdraftを使う（次のNGチェックで弾かれる）
+                            pass
+
                         # === Phase 2: 自律検証パイプライン ===
 
                         # 検証1: 空/短すぎ

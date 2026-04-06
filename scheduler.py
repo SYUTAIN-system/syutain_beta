@@ -11,6 +11,7 @@ APScheduler ベースのタスクスケジューリング
 
 import os
 import sys
+import json
 import asyncio
 import logging
 import fcntl
@@ -538,12 +539,13 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
-            # Grok X トレンドリサーチ (朝 08:30 / 夕方 19:30 JST、1日2回)
+            # Grok X トレンドリサーチ (朝 09:45 / 夕方 19:30 JST、1日2回)
+            # 08:30→09:45 に移動: gstack code review(09:00、3-4分) が終わった後に実行して朝の Grok 集中を回避
             self._scheduler.add_job(
                 self.grok_x_research_morning,
-                CronTrigger(hour=8, minute=30, timezone="Asia/Tokyo"),
+                CronTrigger(hour=9, minute=45, timezone="Asia/Tokyo"),
                 id="grok_x_research_morning",
-                name="Grok Xリサーチ 朝（08:30 tech+creator）",
+                name="Grok Xリサーチ 朝（09:45 tech+creator）",
                 replace_existing=True,
                 misfire_grace_time=300,
             )
@@ -566,12 +568,12 @@ class SyutainScheduler:
                 misfire_grace_time=300,
             )
 
-            # Grok 類似障害事例リサーチ (#7、毎日06:30 JST、直近24h error/critical を集約)
+            # Grok 類似障害事例リサーチ (#7、毎日06:20 JST — 06:30→06:20 に分散、grok_competitor_monitor と直列にならないよう)
             self._scheduler.add_job(
                 self.grok_incident_research,
-                CronTrigger(hour=6, minute=30, timezone="Asia/Tokyo"),
+                CronTrigger(hour=6, minute=20, timezone="Asia/Tokyo"),
                 id="grok_incident_research",
-                name="Grok 障害事例リサーチ（毎日06:30）",
+                name="Grok 障害事例リサーチ（毎日06:20）",
                 replace_existing=True,
                 misfire_grace_time=300,
             )

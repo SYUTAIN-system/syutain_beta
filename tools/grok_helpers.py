@@ -71,8 +71,37 @@ async def _call_grok_json(
                 parsed = json.loads(m.group(0))
             except Exception:
                 parsed = {"raw": text[:1500]}
+                # parse 失敗を event_log に記録 (silent failure 防止)
+                logger.warning(f"Grok JSON parse failed (goal={goal_id}): {text[:200]}")
+                try:
+                    from tools.db_pool import get_connection
+                    import asyncio
+                    async def _log():
+                        async with get_connection() as conn:
+                            await conn.execute(
+                                """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                                   VALUES ('grok.parse_fail', 'grok', 'warning', 'alpha', $1::jsonb, NOW())""",
+                                json.dumps({"goal_id": goal_id, "raw_text": text[:500]}, ensure_ascii=False),
+                            )
+                    asyncio.ensure_future(_log())
+                except Exception:
+                    pass
         else:
             parsed = {"raw": text[:1500]}
+            logger.warning(f"Grok no JSON found (goal={goal_id}): {text[:200]}")
+            try:
+                from tools.db_pool import get_connection
+                import asyncio
+                async def _log2():
+                    async with get_connection() as conn:
+                        await conn.execute(
+                            """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
+                               VALUES ('grok.parse_fail', 'grok', 'warning', 'alpha', $1::jsonb, NOW())""",
+                            json.dumps({"goal_id": goal_id, "raw_text": text[:500]}, ensure_ascii=False),
+                        )
+                asyncio.ensure_future(_log2())
+            except Exception:
+                pass
 
     return {
         "ok": True,

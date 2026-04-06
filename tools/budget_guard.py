@@ -195,6 +195,23 @@ class BudgetGuard:
             alert_level = "ok"
             msg = f"予算正常: 日次{self._daily_spend_jpy:.0f}/{DAILY_BUDGET_JPY:.0f}円"
 
+        # 月次 70% 早期警戒 (Grok 統合後のコスト spike 対策 2026-04-06 追加)
+        # daily 警告とは独立で発動する。1日1回のみ Discord 通知
+        if monthly_ratio >= 0.70 and not getattr(self, '_monthly_70pct_warned', False):
+            monthly_msg = (
+                f"⚠️ **月次予算 70% 到達**: ¥{self._monthly_spend_jpy:.0f} / ¥{MONTHLY_BUDGET_JPY:.0f} "
+                f"({monthly_ratio*100:.1f}%)\n"
+                f"残り ¥{max(0, MONTHLY_BUDGET_JPY - self._monthly_spend_jpy):.0f}。"
+                f"Grok ジョブの頻度を下げるか、月次予算を引き上げるか検討してください。"
+            )
+            logger.warning(monthly_msg)
+            self._monthly_70pct_warned = True
+            try:
+                from tools.discord_notify import notify_discord
+                asyncio.ensure_future(notify_discord(monthly_msg))
+            except Exception:
+                pass
+
         # コスト異常エスカレーション: 24hコスト > 7日平均 * 2
         try:
             if alert_level in ("warn", "stop"):
