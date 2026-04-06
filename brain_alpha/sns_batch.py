@@ -1115,14 +1115,35 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
         except Exception:
             pass
 
+        # 2026-04-07: テーマ多様化エンジンからプラットフォーム別の具体テーマプールを取得
+        _dynamic_theme_pool: list[dict] = []
+        _theme_pool_index = 0
+        try:
+            from strategy.sns_theme_engine import build_theme_pool, format_theme_for_prompt
+            _dynamic_theme_pool = await build_theme_pool(
+                platform=schedule[0][0] if schedule else "bluesky",
+                account=schedule[0][1] if schedule else "syutain",
+                conn=conn,
+                used_today=used_today,
+            )
+            logger.info(f"テーマエンジン: {len(_dynamic_theme_pool)}件のテーマ生成 (categories: {set(t['category'] for t in _dynamic_theme_pool)})")
+        except Exception as theme_err:
+            logger.warning(f"テーマエンジン失敗（旧方式にフォールバック）: {theme_err}")
+
         for platform, account, time_str in schedule:
             results["total"] += 1
 
-            # テーマ選択（品質フィードバック + エンゲージメント重み付き）
-            hist_q = historical_quality_cache.get(platform, {})
-            theme = _pick_theme(time_str, used_today, recent_themes,
-                                platform=platform, historical_quality=hist_q,
-                                engagement_weights=engagement_theme_weights)
+            # テーマ選択: 新テーマエンジン優先、なければ旧方式
+            _theme_detail: dict = {}
+            if _dynamic_theme_pool and _theme_pool_index < len(_dynamic_theme_pool):
+                _theme_detail = _dynamic_theme_pool[_theme_pool_index]
+                theme = _theme_detail.get("topic", "SYUTAINβ開発進捗")
+                _theme_pool_index += 1
+            else:
+                hist_q = historical_quality_cache.get(platform, {})
+                theme = _pick_theme(time_str, used_today, recent_themes,
+                                    platform=platform, historical_quality=hist_q,
+                                    engagement_weights=engagement_theme_weights)
             used_today.append(theme)
 
             # few-shot（X島原のみ）
@@ -1135,9 +1156,18 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 _picked_facts = pick_facts_for_post(factbook_facts, n=3, theme=theme)
             except Exception:
                 pass
+
+            # テーマエンジンの具体的な指示をプロンプトに注入（固着防止の核心）
+            _theme_injection = ""
+            if _theme_detail:
+                try:
+                    _theme_injection = format_theme_for_prompt(_theme_detail)
+                except Exception:
+                    pass
+
             system_prompt, user_prompt = _build_prompt(
                 platform, account, theme, time_str, writing_style, few_shot, recent_posts,
-                persona_hint=persona_hint,
+                persona_hint=persona_hint + ("\n\n" + _theme_injection if _theme_injection else ""),
                 factbook_prompt=factbook_prompt,
                 picked_facts=_picked_facts,
                 buzz_prompt=buzz_prompt,
