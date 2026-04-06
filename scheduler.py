@@ -580,6 +580,17 @@ class SyutainScheduler:
                 max_instances=1,
             )
 
+            # Codex コンテンツ最適化: エンゲージメントデータからプロンプト自律改善（水曜04:00 JST 週次）
+            self._scheduler.add_job(
+                self.codex_content_optimization,
+                CronTrigger(day_of_week="wed", hour=4, minute=0, timezone="Asia/Tokyo"),
+                id="codex_content_optimization",
+                name="Codex コンテンツ最適化（水曜04:00）",
+                replace_existing=True,
+                misfire_grace_time=600,
+                max_instances=1,
+            )
+
             # Grok 競合・自己言及モニタリング (#3、毎日06:00 JST 朝レポ前)
             self._scheduler.add_job(
                 self.grok_competitor_monitor,
@@ -3585,6 +3596,18 @@ class SyutainScheduler:
             )
         except Exception as e:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
+
+    async def codex_content_optimization(self):
+        """Codex コンテンツ最適化: エンゲージメントデータから SNS/記事プロンプトを自律改善 (水曜04:00)"""
+        try:
+            from tools.codex_content_optimizer import run_content_optimization
+            result = await run_content_optimization()
+            logger.info(
+                f"Codex コンテンツ最適化: analysis={result.get('analysis_done')} "
+                f"improvements={result.get('improvements_applied', 0)}"
+            )
+        except Exception as e:
+            logger.error(f"codex_content_optimization 失敗: {e}")
 
     async def codex_auto_fix_review(self):
         """Codex 自動修正: gstack review の指摘事項を Codex で自動修正 (毎日09:15)"""
