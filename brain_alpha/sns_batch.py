@@ -46,7 +46,7 @@ STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
 # X shimahara 5 / X syutain 5 / Bluesky 5 / Threads 5 / note 1(別パイプライン)
 # 最低2時間間隔で分散
 X_SHIMAHARA_TIMES = ["09:00", "12:00", "15:00", "18:00", "21:00"]
-X_SYUTAIN_TIMES = ["10:00", "13:00", "16:00", "19:00", "22:00"]
+X_SYUTAIN_TIMES = ["09:30", "11:00", "12:30", "14:30", "16:00", "18:00", "20:00", "22:00"]
 BLUESKY_TIMES = ["09:30", "11:00", "12:30", "14:00", "15:30", "17:00", "18:30", "21:30"]
 THREADS_TIMES = ["10:30", "13:30", "16:30", "19:30", "22:30"]
 
@@ -840,7 +840,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "最後に、島原さんの行動パターンについて persona_memory の分析結果を1つ淡々と述べろ（例：「承認キューを8時間放置していました」「先週の判断と今週の判断に矛盾があります」）。",
         ]
         _abnormal_injection = ""
-        if _rand_syutain.random() < 0.4:  # 40% の確率で異常一言を仕込む
+        if _rand_syutain.random() < 0.3:  # 30% の確率で異常一言を仕込む
             _abnormal_injection = f"\n\n【特別指示】{_rand_syutain.choice(_abnormal_triggers)}"
 
         system_prompt = (
