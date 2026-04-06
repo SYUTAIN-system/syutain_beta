@@ -20,8 +20,8 @@ load_dotenv()
 logger = logging.getLogger("syutain.budget_guard")
 
 # ===== 予算設定（.envから読み込み）=====
-DAILY_BUDGET_JPY = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "120")))
-MONTHLY_BUDGET_JPY = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "2000")))
+DAILY_BUDGET_JPY = float(os.getenv("DAILY_BUDGET_JPY", os.getenv("DAILY_API_BUDGET_JPY", "250")))
+MONTHLY_BUDGET_JPY = float(os.getenv("MONTHLY_BUDGET_JPY", os.getenv("MONTHLY_API_BUDGET_JPY", "5000")))
 MONTHLY_INFO_BUDGET_JPY = float(os.getenv("MONTHLY_INFO_BUDGET_JPY", "15000"))
 
 # アラート閾値
