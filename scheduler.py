@@ -580,12 +580,12 @@ class SyutainScheduler:
                 max_instances=1,
             )
 
-            # Codex コンテンツ最適化: エンゲージメントデータからプロンプト自律改善（水曜04:00 JST 週次）
+            # Codex コンテンツ品質管理: 毎日04:00 JST に前日の全成果物を精査・改善
             self._scheduler.add_job(
-                self.codex_content_optimization,
-                CronTrigger(day_of_week="wed", hour=4, minute=0, timezone="Asia/Tokyo"),
-                id="codex_content_optimization",
-                name="Codex コンテンツ最適化（水曜04:00）",
+                self.codex_daily_content_audit,
+                CronTrigger(hour=4, minute=0, timezone="Asia/Tokyo"),
+                id="codex_daily_content_audit",
+                name="Codex 日次コンテンツ品質管理（毎日04:00）",
                 replace_existing=True,
                 misfire_grace_time=600,
                 max_instances=1,
@@ -3597,17 +3597,18 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
 
-    async def codex_content_optimization(self):
-        """Codex コンテンツ最適化: エンゲージメントデータから SNS/記事プロンプトを自律改善 (水曜04:00)"""
+    async def codex_daily_content_audit(self):
+        """Codex 日次コンテンツ品質管理 (毎日04:00 JST)
+        前日の全成果物を精査し、問題があれば自律的に改善する。"""
         try:
-            from tools.codex_content_optimizer import run_content_optimization
-            result = await run_content_optimization()
+            from tools.codex_content_optimizer import run_daily_content_audit
+            result = await run_daily_content_audit()
             logger.info(
-                f"Codex コンテンツ最適化: analysis={result.get('analysis_done')} "
-                f"improvements={result.get('improvements_applied', 0)}"
+                f"Codex日次コンテンツ品質管理: checks={result.get('checks_performed', 0)} "
+                f"issues={result.get('issues_found', 0)} fixes={result.get('fixes_applied', 0)}"
             )
         except Exception as e:
-            logger.error(f"codex_content_optimization 失敗: {e}")
+            logger.error(f"codex_daily_content_audit 失敗: {e}")
 
     async def codex_auto_fix_review(self):
         """Codex 自動修正: gstack review の指摘事項を Codex で自動修正 (毎日09:15)"""

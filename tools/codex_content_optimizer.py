@@ -1,16 +1,19 @@
-"""Codex コンテンツ最適化 — エンゲージメントデータに基づくプロンプト自律改善
+"""Codex 日次コンテンツ品質管理 — 前日の全成果物を精査・問題特定・自律改善
 
-Codex (gpt-5.3-codex) がエンゲージメントデータと投稿内容を分析して、
-SNS投稿と記事生成のプロンプトを自動的に改善するトライアンドエラーループ。
+毎日 04:00 JST に Codex (gpt-5.3-codex) が以下を全て実施:
 
-サイクル:
-  1. 直近7日の投稿 + エンゲージメントデータを収集
-  2. 「何が受けたか」「何が受けなかったか」のパターンを Codex に分析させる
-  3. 分析結果に基づいて具体的なプロンプト改善案を生成
-  4. 改善案を strategy/ 配下のファイルに反映 (安全な範囲で)
-  5. 次回バッチで改善プロンプトが使われ、結果がまたデータになる
+1. 記事公開の確認: product_packages で ready のまま公開されてない記事はないか
+   → あれば原因調査して修正
+2. SNS 投稿文の品質精査: ハレーション・内容偏り・バリエーション不足の検出
+   → プロンプト改善を自動適用
+3. 記事の内容精査: 公開された記事に事実誤認・品質問題がないか
+   → 改善提案を event_log に記録
+4. 投稿頻度の確認: 各プラットフォームの posted/failed/rejected 比率
+   → 異常があれば根本原因を特定して修正
+5. エンゲージメント分析: 何が受けて何が受けなかったか
+   → strategy/ のプロンプトを自動改善
 
-スケジュール: 水曜 04:00 JST (週次、SNS品質自動改善の直後)
+スケジュール: 毎日 04:00 JST (日次)
 """
 
 import os
@@ -25,214 +28,265 @@ CODEX_PATH = "/opt/homebrew/bin/codex"
 PROJECT_DIR = os.path.expanduser("~/syutain_beta")
 
 
-async def analyze_engagement_patterns(conn) -> dict:
-    """直近7日の投稿とエンゲージメントを集計してパターンを返す"""
-    # 高エンゲージメント投稿 TOP 10
-    top_posts = await conn.fetch(
-        """SELECT platform, account, LEFT(content, 200) as content,
-                  quality_score, theme_category,
+async def _collect_daily_data(conn) -> dict:
+    """前日24hの全コンテンツ関連データを収集"""
+    data = {}
+
+    # 記事の公開状況
+    data["articles"] = [dict(r) for r in await conn.fetch(
+        """SELECT id, status, LEFT(title, 80) as title, created_at::text
+           FROM product_packages WHERE platform='note'
+           AND created_at > NOW() - INTERVAL '24 hours'
+           ORDER BY created_at DESC"""
+    )]
+
+    # ready のまま公開されてない記事
+    data["stuck_articles"] = [dict(r) for r in await conn.fetch(
+        """SELECT id, status, LEFT(title, 80) as title, created_at::text
+           FROM product_packages WHERE platform='note' AND status='ready'
+           AND created_at < NOW() - INTERVAL '2 hours'"""
+    )]
+
+    # SNS 投稿の全体状況
+    data["sns_summary"] = [dict(r) for r in await conn.fetch(
+        """SELECT platform, status, COUNT(*) as cnt
+           FROM posting_queue
+           WHERE created_at > NOW() - INTERVAL '24 hours'
+           GROUP BY platform, status ORDER BY platform, status"""
+    )]
+
+    # 投稿内容の冒頭（バリエーション確認）
+    data["posted_previews"] = [dict(r) for r in await conn.fetch(
+        """SELECT platform, account, LEFT(content, 100) as preview, quality_score
+           FROM posting_queue
+           WHERE status='posted' AND posted_at > NOW() - INTERVAL '24 hours'
+           ORDER BY posted_at DESC LIMIT 30"""
+    )]
+
+    # 失敗/拒否の詳細
+    data["failures"] = [dict(r) for r in await conn.fetch(
+        """SELECT platform, status, LEFT(content, 100) as preview,
+                  created_at::text
+           FROM posting_queue
+           WHERE status IN ('failed', 'rejected', 'rejected_poem')
+           AND created_at > NOW() - INTERVAL '24 hours'
+           ORDER BY created_at DESC LIMIT 15"""
+    )]
+
+    # エンゲージメントデータ
+    data["engagement_top"] = [dict(r) for r in await conn.fetch(
+        """SELECT platform, LEFT(content, 100) as preview,
                   engagement_data->>'like_count' as likes,
-                  engagement_data->>'repost_count' as reposts,
                   engagement_data->>'impression_count' as impressions
            FROM posting_queue
-           WHERE status = 'posted' AND engagement_data IS NOT NULL
-           AND posted_at > NOW() - INTERVAL '7 days'
+           WHERE status='posted' AND engagement_data IS NOT NULL
+           AND posted_at > NOW() - INTERVAL '48 hours'
            ORDER BY COALESCE((engagement_data->>'impression_count')::int, 0) DESC
            LIMIT 10"""
-    )
+    )]
 
-    # 低エンゲージメント投稿 (impressions はあるが likes 0)
-    low_posts = await conn.fetch(
-        """SELECT platform, account, LEFT(content, 200) as content,
-                  quality_score, theme_category,
-                  engagement_data->>'like_count' as likes,
-                  engagement_data->>'impression_count' as impressions
-           FROM posting_queue
-           WHERE status = 'posted' AND engagement_data IS NOT NULL
-           AND posted_at > NOW() - INTERVAL '7 days'
-           AND COALESCE((engagement_data->>'like_count')::int, 0) = 0
-           AND COALESCE((engagement_data->>'impression_count')::int, 0) > 0
-           ORDER BY posted_at DESC LIMIT 10"""
-    )
+    # content_pipeline の Stage 3 失敗
+    data["pipeline_errors"] = []
+    try:
+        import re
+        with open(os.path.join(PROJECT_DIR, "logs", "scheduler.log")) as f:
+            for line in f:
+                if "Stage 3 失敗" in line and datetime.now().strftime("%Y-%m-%d") in line:
+                    data["pipeline_errors"].append(line.strip()[-200:])
+    except Exception:
+        pass
 
-    # rejected 投稿のパターン
-    rejected = await conn.fetch(
-        """SELECT platform, LEFT(content, 200) as content, status
-           FROM posting_queue
-           WHERE status IN ('rejected_poem', 'rejected', 'failed')
-           AND created_at > NOW() - INTERVAL '7 days'
-           ORDER BY created_at DESC LIMIT 10"""
-    )
-
-    # 記事品質データ
-    articles = await conn.fetch(
-        """SELECT LEFT(title, 100) as title, status,
-                  LEFT(body_preview, 200) as preview
-           FROM product_packages
-           WHERE platform = 'note' AND created_at > NOW() - INTERVAL '7 days'
-           ORDER BY created_at DESC LIMIT 10"""
-    )
-
-    return {
-        "top_posts": [dict(r) for r in top_posts],
-        "low_posts": [dict(r) for r in low_posts],
-        "rejected": [dict(r) for r in rejected],
-        "articles": [dict(r) for r in articles],
-    }
+    return data
 
 
-async def run_content_optimization() -> dict:
-    """Codex にエンゲージメントデータを分析させ、プロンプト改善を自動適用する"""
-    from tools.db_pool import get_connection
-
-    results = {"analysis_done": False, "improvements_applied": 0, "details": []}
+async def _run_codex_audit(prompt: str, timeout: int = 420) -> dict:
+    """Codex を実行して結果を返す"""
+    output_file = f"/tmp/codex_audit_{datetime.now().strftime('%H%M%S')}.txt"
+    start = datetime.now()
 
     try:
-        async with get_connection() as conn:
-            data = await analyze_engagement_patterns(conn)
-
-        if not data["top_posts"] and not data["rejected"]:
-            logger.info("codex_content_optimizer: エンゲージメントデータ不足。スキップ")
-            return results
-
-        # Codex に分析 + 改善案生成を依頼
-        analysis_prompt = (
-            "SYUTAINβの SNS 投稿と記事生成のパフォーマンスを分析して、"
-            "具体的なプロンプト改善案を出してください。\n\n"
-            f"## 高エンゲージメント投稿 TOP 10\n"
-            f"{json.dumps(data['top_posts'], ensure_ascii=False, indent=2, default=str)[:3000]}\n\n"
-            f"## 低エンゲージメント投稿 (impressions あり、likes 0)\n"
-            f"{json.dumps(data['low_posts'], ensure_ascii=False, indent=2, default=str)[:2000]}\n\n"
-            f"## 拒否された投稿\n"
-            f"{json.dumps(data['rejected'], ensure_ascii=False, indent=2, default=str)[:1500]}\n\n"
-            f"## 記事の品質状況\n"
-            f"{json.dumps(data['articles'], ensure_ascii=False, indent=2, default=str)[:1500]}\n\n"
-            "## 出力形式\n"
-            "以下の 2 つのファイルに対する具体的な改善を実装してください:\n\n"
-            "1. `strategy/sns_platform_voices.py` の `PLATFORM_VOICES` dict 内の "
-            "`example_styles` と `voice_rules` を、高エンゲージメント投稿のパターンに"
-            "合わせて更新。低エンゲージメントのパターンは避ける例として `forbidden` に追加。\n\n"
-            "2. `strategy/sns_theme_engine.py` の静的フォールバックテーマ "
-            "(`_CREATOR_FALLBACK`, `_PHILOSOPHY_FALLBACK`, `_SHIMAHARA_FALLBACK`) を"
-            "エンゲージメントデータに基づいて更新。受けたテーマに近いものを追加、"
-            "受けなかったテーマを入れ替え。\n\n"
-            "ルール:\n"
-            "- Python の dict/list 構造を壊さない\n"
-            "- 既存の構造を維持して中身だけ変える\n"
-            "- 変更後に python3 -m py_compile で構文チェック\n"
-            "- CLAUDE.md の forbidden files は触らない\n"
-        )
-
-        output_file = f"/tmp/codex_content_opt_{datetime.now().strftime('%H%M%S')}.txt"
-        start = datetime.now()
-
         proc = await asyncio.create_subprocess_exec(
-            CODEX_PATH, "exec", analysis_prompt,
+            CODEX_PATH, "exec", prompt,
             "--output-last-message", output_file,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=PROJECT_DIR,
         )
-
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=420)
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            logger.warning("codex_content_optimizer: Timeout (420s)")
-            return results
+            return {"success": False, "output": f"Timeout {timeout}s", "duration_ms": timeout * 1000}
 
         duration_ms = int((datetime.now() - start).total_seconds() * 1000)
-
         output = ""
         if os.path.exists(output_file):
             with open(output_file) as f:
                 output = f.read()
             os.remove(output_file)
 
-        results["analysis_done"] = True
-
         # 変更されたファイルを検出
         diff_proc = await asyncio.create_subprocess_exec(
-            "git", "diff", "--name-only",
-            stdout=asyncio.subprocess.PIPE,
-            cwd=PROJECT_DIR,
+            "git", "diff", "--name-only", stdout=asyncio.subprocess.PIPE, cwd=PROJECT_DIR,
         )
         diff_out, _ = await diff_proc.communicate()
         files_changed = [f.strip() for f in diff_out.decode().strip().split("\n") if f.strip()]
 
-        # strategy/ 配下のみ許可、他は revert
-        allowed_changes = []
+        # strategy/ と brain_alpha/sns_batch.py と brain_alpha/content_pipeline.py のみ許可
+        allowed_prefixes = ("strategy/", "brain_alpha/sns_batch.py", "brain_alpha/content_pipeline.py")
+        allowed = []
         for f in files_changed:
-            if f.startswith("strategy/"):
-                allowed_changes.append(f)
+            if any(f.startswith(p) or f == p for p in allowed_prefixes):
+                # 構文チェック
+                check = await asyncio.create_subprocess_exec(
+                    "python3", "-m", "py_compile", f,
+                    stderr=asyncio.subprocess.PIPE, cwd=PROJECT_DIR,
+                )
+                _, err = await check.communicate()
+                if check.returncode == 0:
+                    allowed.append(f)
+                else:
+                    logger.warning(f"Codex audit: {f} 構文エラー→revert")
+                    await (await asyncio.create_subprocess_exec("git", "checkout", "--", f, cwd=PROJECT_DIR)).wait()
             else:
-                logger.warning(f"codex_content_optimizer: 許可外のファイル変更を revert: {f}")
-                await (await asyncio.create_subprocess_exec(
-                    "git", "checkout", "--", f, cwd=PROJECT_DIR,
-                )).wait()
+                logger.warning(f"Codex audit: {f} は許可外→revert")
+                await (await asyncio.create_subprocess_exec("git", "checkout", "--", f, cwd=PROJECT_DIR)).wait()
 
-        # 構文チェック
-        for f in allowed_changes:
-            check = await asyncio.create_subprocess_exec(
-                "python3", "-m", "py_compile", f,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=PROJECT_DIR,
-            )
-            _, check_err = await check.communicate()
-            if check.returncode != 0:
-                logger.error(f"codex_content_optimizer: {f} 構文エラー。revert")
-                await (await asyncio.create_subprocess_exec(
-                    "git", "checkout", "--", f, cwd=PROJECT_DIR,
-                )).wait()
-                allowed_changes.remove(f)
-
-        results["improvements_applied"] = len(allowed_changes)
-        results["details"] = [{
-            "files_changed": allowed_changes,
+        return {
+            "success": True,
+            "output": output[:3000],
             "duration_ms": duration_ms,
-            "output_preview": output[:500],
-        }]
+            "files_changed": allowed,
+        }
 
-        # 結果を event_log に記録
+    except Exception as e:
+        return {"success": False, "output": str(e)[:500], "duration_ms": 0}
+
+
+async def run_daily_content_audit() -> dict:
+    """日次コンテンツ品質管理の全工程を実行"""
+    from tools.db_pool import get_connection
+
+    results = {"checks_performed": 0, "issues_found": 0, "fixes_applied": 0, "details": []}
+
+    try:
+        async with get_connection() as conn:
+            data = await _collect_daily_data(conn)
+
+        # データサマリを作成
+        posted_count = sum(r["cnt"] for r in data["sns_summary"] if r["status"] == "posted")
+        failed_count = sum(r["cnt"] for r in data["sns_summary"] if r["status"] in ("failed", "rejected", "rejected_poem"))
+        article_count = len(data["articles"])
+        stuck_count = len(data["stuck_articles"])
+        pipeline_errors = len(data["pipeline_errors"])
+
+        # 投稿内容の偏り検出（冒頭40字が似てるものをグルーピング）
+        previews = [r.get("preview", "")[:40] for r in data["posted_previews"]]
+        from collections import Counter
+        common = Counter(previews).most_common(3)
+        variety_issue = any(c >= 3 for _, c in common)
+
+        issues = []
+        if stuck_count > 0:
+            issues.append(f"記事{stuck_count}本がready状態で公開されていない")
+        if pipeline_errors > 0:
+            issues.append(f"content_pipeline Stage3が{pipeline_errors}回失敗")
+        if variety_issue:
+            issues.append(f"投稿内容に偏り: 上位パターン {common}")
+        if failed_count > posted_count * 0.3 and posted_count > 0:
+            issues.append(f"失敗率{failed_count}/{posted_count+failed_count}が高い")
+
+        results["checks_performed"] = 5  # articles, stuck, sns, variety, failures
+        results["issues_found"] = len(issues)
+
+        if not issues:
+            logger.info("codex_daily_audit: 問題なし。プロンプト改善のみ実施")
+
+        # Codex に包括的な分析 + 修正を依頼
+        audit_prompt = (
+            "SYUTAINβの日次コンテンツ品質管理を実施してください。\n\n"
+            f"## 前日24hのデータ\n"
+            f"- SNS投稿: posted {posted_count}件, failed/rejected {failed_count}件\n"
+            f"- 記事: {article_count}件生成, stuck(未公開) {stuck_count}件\n"
+            f"- content_pipeline失敗: {pipeline_errors}件\n"
+            f"- 検出された問題: {issues if issues else 'なし'}\n\n"
+            f"## SNS投稿プレビュー (バリエーション確認用)\n"
+            f"{json.dumps(data['posted_previews'][:15], ensure_ascii=False, indent=1, default=str)[:2000]}\n\n"
+            f"## 失敗/拒否された投稿\n"
+            f"{json.dumps(data['failures'][:10], ensure_ascii=False, indent=1, default=str)[:1500]}\n\n"
+            f"## エンゲージメント上位\n"
+            f"{json.dumps(data['engagement_top'][:5], ensure_ascii=False, indent=1, default=str)[:1000]}\n\n"
+            f"## 未公開記事\n"
+            f"{json.dumps(data['stuck_articles'], ensure_ascii=False, indent=1, default=str)[:500]}\n\n"
+            f"## pipeline エラー\n"
+            f"{json.dumps(data['pipeline_errors'][:5], ensure_ascii=False, default=str)[:800]}\n\n"
+            "## やること\n"
+            "1. **投稿文のバリエーション**: 偏りがあれば `strategy/sns_theme_engine.py` の "
+            "テーマプールを改善（受けたテーマを増やし、受けなかったものを減らす）\n"
+            "2. **投稿品質**: ハレーションや事実と異なる内容があれば `strategy/sns_platform_voices.py` "
+            "の forbidden / voice_rules を更新\n"
+            "3. **記事公開**: stuck記事があれば原因を調査（`tools/note_publisher.py` や "
+            "`brain_alpha/product_packager.py` に問題がないか）\n"
+            "4. **pipeline失敗**: Stage3失敗の原因を分析して `brain_alpha/content_pipeline.py` "
+            "のプロンプトやパラメータを改善\n"
+            "5. **エンゲージメント反映**: 高エンゲージメント投稿のパターンを example_styles に反映\n\n"
+            "修正可能ファイル: strategy/*.py, brain_alpha/sns_batch.py, brain_alpha/content_pipeline.py\n"
+            "それ以外のファイルは変更禁止。構文チェック必須。\n"
+        )
+
+        audit_result = await _run_codex_audit(audit_prompt, timeout=420)
+        results["fixes_applied"] = len(audit_result.get("files_changed", []))
+        results["details"].append({
+            "success": audit_result.get("success"),
+            "files_changed": audit_result.get("files_changed", []),
+            "duration_ms": audit_result.get("duration_ms", 0),
+            "output_preview": audit_result.get("output", "")[:500],
+        })
+
+        # event_log に記録
         try:
             async with get_connection() as conn:
                 await conn.execute(
                     """INSERT INTO event_log (event_type, category, severity, source_node, payload, created_at)
-                       VALUES ('codex.content_optimization', 'codex', 'info', 'alpha', $1::jsonb, NOW())""",
+                       VALUES ('codex.daily_content_audit', 'codex', $1, 'alpha', $2::jsonb, NOW())""",
+                    "warning" if issues else "info",
                     json.dumps({
-                        "analysis_done": True,
-                        "improvements_applied": len(allowed_changes),
-                        "files": allowed_changes,
-                        "duration_ms": duration_ms,
-                        "top_post_count": len(data["top_posts"]),
-                        "low_post_count": len(data["low_posts"]),
+                        "posted": posted_count, "failed": failed_count,
+                        "articles": article_count, "stuck": stuck_count,
+                        "pipeline_errors": pipeline_errors,
+                        "issues": issues,
+                        "fixes_applied": results["fixes_applied"],
+                        "files_changed": audit_result.get("files_changed", []),
                     }, ensure_ascii=False),
                 )
         except Exception:
             pass
 
         # Discord 通知
-        if allowed_changes:
-            try:
-                from tools.discord_notify import notify_discord
-                await notify_discord(
-                    f"🎯 Codex コンテンツ最適化完了\n"
-                    f"分析: 高エンゲージ {len(data['top_posts'])}件 / 低エンゲージ {len(data['low_posts'])}件\n"
-                    f"改善: {', '.join(allowed_changes)}\n"
-                    f"所要: {duration_ms}ms"
-                )
-            except Exception:
-                pass
-
-        logger.info(
-            f"codex_content_optimizer: done. improvements={len(allowed_changes)} "
-            f"duration={duration_ms}ms"
-        )
+        try:
+            from tools.discord_notify import notify_discord
+            status_emoji = "🟢" if not issues else "🟡"
+            lines = [
+                f"{status_emoji} **Codex 日次コンテンツ品質管理**",
+                f"SNS: {posted_count} posted / {failed_count} failed",
+                f"記事: {article_count}件 / 未公開{stuck_count}件 / pipeline失敗{pipeline_errors}件",
+            ]
+            if issues:
+                lines.append(f"検出: {'; '.join(issues)}")
+            if audit_result.get("files_changed"):
+                lines.append(f"改善: {', '.join(audit_result['files_changed'])}")
+            await notify_discord("\n".join(lines))
+        except Exception:
+            pass
 
     except Exception as e:
-        logger.error(f"codex_content_optimizer 全体失敗: {e}")
+        logger.error(f"run_daily_content_audit 全体失敗: {e}")
 
     return results
+
+
+# 旧互換
+async def run_content_optimization():
+    return await run_daily_content_audit()
