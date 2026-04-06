@@ -173,13 +173,8 @@ syutain_beta/
 
 | Metric | Value |
 |--------|-------|
-| LLM Calls | 11,695 |
-| Total Cost | ¥1,236 |
-| Events Logged | 38,870 |
+| LLM Calls | 11,827 |
+| Total Cost | ¥1,293 |
+| Events Logged | 39,600 |
 | SNS Posts | 552 |
-| intel_items | 1,555（うち grok_x_research 3件） |
-| Goals | 103 |
-| Tasks | 1,141 |
-| Python Lines | 55,966 / 141 files |
-| PostgreSQL Tables | 49 + pgvector |
-| Last Updated | 2026-04-06 03:10 JST |
+| Last Updated | 2026-04-06 09:30 JST |
