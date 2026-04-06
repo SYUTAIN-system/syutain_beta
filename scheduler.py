@@ -558,6 +558,28 @@ class SyutainScheduler:
                 misfire_grace_time=300,
             )
 
+            # Codex 自動修正: gstack review の指摘事項を自動修正（毎日09:15 JST、review直後）
+            self._scheduler.add_job(
+                self.codex_auto_fix_review,
+                CronTrigger(hour=9, minute=15, timezone="Asia/Tokyo"),
+                id="codex_auto_fix_review",
+                name="Codex自動修正 gstack review（毎日09:15）",
+                replace_existing=True,
+                misfire_grace_time=300,
+                max_instances=1,
+            )
+
+            # Codex 自動修正: 繰り返しエラーの自動修正（毎日05:15 JST、夜間バッチ後）
+            self._scheduler.add_job(
+                self.codex_auto_fix_errors,
+                CronTrigger(hour=5, minute=15, timezone="Asia/Tokyo"),
+                id="codex_auto_fix_errors",
+                name="Codex自動修正 繰り返しエラー（毎日05:15）",
+                replace_existing=True,
+                misfire_grace_time=300,
+                max_instances=1,
+            )
+
             # Grok 競合・自己言及モニタリング (#3、毎日06:00 JST 朝レポ前)
             self._scheduler.add_job(
                 self.grok_competitor_monitor,
@@ -3563,6 +3585,30 @@ class SyutainScheduler:
             )
         except Exception as e:
             logger.error(f"日次コンテンツ生成失敗 [{slot_name}]: {e}")
+
+    async def codex_auto_fix_review(self):
+        """Codex 自動修正: gstack review の指摘事項を Codex で自動修正 (毎日09:15)"""
+        try:
+            from tools.codex_auto_fix import auto_fix_from_review
+            result = await auto_fix_from_review()
+            logger.info(
+                f"Codex自動修正(review): attempted={result.get('attempted', 0)} "
+                f"fixed={result.get('fixed', 0)} failed={result.get('failed', 0)}"
+            )
+        except Exception as e:
+            logger.error(f"codex_auto_fix_review 失敗: {e}")
+
+    async def codex_auto_fix_errors(self):
+        """Codex 自動修正: 繰り返しエラーの根本原因を Codex で修正 (毎日05:15)"""
+        try:
+            from tools.codex_auto_fix import auto_fix_from_errors
+            result = await auto_fix_from_errors()
+            logger.info(
+                f"Codex自動修正(errors): attempted={result.get('attempted', 0)} "
+                f"fixed={result.get('fixed', 0)}"
+            )
+        except Exception as e:
+            logger.error(f"codex_auto_fix_errors 失敗: {e}")
 
     async def brain_beta_health_audit(self):
         """2026-04-05 改善施策の実運用観測。
