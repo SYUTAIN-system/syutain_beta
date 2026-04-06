@@ -38,23 +38,23 @@ logger = logging.getLogger("syutain.sns_theme_engine")
 # 2026-04-07 更新: 21本/日体制に合わせた配分
 CATEGORY_DISTRIBUTION = {
     "x_shimahara": {
-        # 島原個人: 体験・気づき中心。syutain_ops は syutain アカウントに任せる
+        # 島原個人 5本: 体験・気づき中心
         "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
         "philosophy_bip": 1, "shimahara_fields": 1,
     },
     "x_syutain": {
-        # SYUTAINβ公式: データドリブン。「淡々と異常なことを言う」(実行書)
-        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 0,
-        "philosophy_bip": 1, "shimahara_fields": 1,
+        # SYUTAINβ公式 8本: データドリブン+異常な一言
+        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 0,
+        "philosophy_bip": 1, "shimahara_fields": 2,
     },
     "bluesky": {
-        # 技術コミュニティ: 深い洞察
-        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 1,
-        "philosophy_bip": 1, "shimahara_fields": 0,
+        # 技術コミュニティ 10本: 深い洞察
+        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 2,
+        "philosophy_bip": 2, "shimahara_fields": 1,
     },
     "threads": {
-        # カジュアル: 読者との距離が近い
-        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 1,
+        # カジュアル 7本: 読者との距離が近い
+        "syutain_ops": 1, "ai_tech_trend": 1, "creator_media": 2,
         "philosophy_bip": 1, "shimahara_fields": 2,
     },
 }
