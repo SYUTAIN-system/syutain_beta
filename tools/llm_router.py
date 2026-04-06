@@ -24,7 +24,7 @@ from tools.budget_guard import get_budget_guard
 from tools.discord_notify import notify_discord, notify_error
 
 # モデル別コスト概算（1Kトークンあたり、円）
-# コストレート: model_registry.py の $/1M を ¥/1K に変換 (×150/1000)
+# コストレート: model_registry.py の $/1M を ¥/1K に変換 (×152/1000)
 _COST_RATES_JPY_PER_1K = {
     "gpt-5.4":              {"input": 0.375,  "output": 2.250},   # $2.50/$15.00 per 1M
     "gemini-3.1-pro-preview": {"input": 0.300, "output": 1.800},  # $2.00/$12.00 per 1M
@@ -180,10 +180,11 @@ NEMOTRON_JP_NODES = [n.strip() for n in os.getenv("NEMOTRON_JP_NODES", "bravo,ch
 NEMOTRON_JP_MODEL = "nemotron-jp"  # ollama内のモデル名
 
 # Nemotron優先タスク（日本語コンテンツ生成/チャット/Tool Calling）
+# 2026-04-06 方針変更: content/sns_draft/drafting/note_article/note_draft/intel_summary は
+# OpenRouter 無料モデル (Qwen 3.6 Plus) に移行。Nemotron-JP はローカル品質で十分なもののみ。
 _NEMOTRON_PRIORITY_TASKS = {
-    "content", "sns_draft", "drafting", "note_article", "note_draft",
-    "product_desc", "booth_description", "persona_extraction",
-    "quality_scoring", "tool_calling", "intel_summary",
+    "persona_extraction",
+    "quality_scoring", "tool_calling",
 }
 
 # Nemotron + /think 推奨タスク（品質検証・推論）
@@ -217,20 +218,18 @@ _DELTA_TASKS = {
 
 # BRAVO/CHARLIEで十分なタスク（qwen3.5-9b、コスト¥0）
 # → 実データでAPI同等以上の品質が出ているタスクのみ
+# 2026-04-06 方針転換: 「ローカル LLM のみでの動作」から「無料クラウドモデル優先」に変更。
+# ローカル LLM (Qwen3.5-9B) は記事生成で 6000 字に届かない品質問題が判明（9 スロット中 6 失敗）。
+# content/analysis/research/sns_draft は _QWEN36_TASKS に移動して OpenRouter 無料モデル優先に。
+# ローカルは quality="low" + DELTA 軽量タスク + 以下の本当にローカルで十分なもののみ。
 _LOCAL_OK_TASKS = {
-    "drafting",           # ローカル0.76 > API 0.71（実データ）
     "variation_gen",      # 多様性生成、品質より量
-    "sns_draft",          # 短文、ローカルで十分
     "quality_scoring",    # スコアリング用（低品質でOK）
     "persona_extraction", # キーワード抽出系
     "coding",             # ローカル0.50 = API 0.50（同等）
     "data_extraction",    # 構造化抽出、ローカルで十分
-    "intel_summary",      # 要約、ローカルで十分
     "batch_process",      # 大量処理、コスト重視
     "bulk_draft",         # 大量ドラフト
-    "content",            # V30: ローカル0.62≈API 0.61（同等）。常駐LLMで高速化済み
-    "analysis",           # V30: ローカル0.67 vs API 0.75。差は小さくコスト削減優先
-    "research",           # V30: ローカル0.62 vs API 0.66。差は小さくコスト削減優先
 }
 
 # APIの方が品質が高いタスク → Gemini Flash（無料枠）優先
@@ -427,6 +426,10 @@ def _choose_best_model_v6_impl(
         "content_final", "note_article_final", "booth_description_final",       # 最終品質
         "complex_analysis", "persona_deep_analysis",                            # 深い分析
         "note_article", "product_desc", "booth_description", "note_draft",      # コンテンツ生成
+        # 2026-04-06 追加: ローカル LLM から無料クラウドに移行したタスク
+        "content", "analysis", "research",                                      # 記事生成/分析/リサーチ
+        "sns_draft", "drafting",                                                # SNS投稿/ドラフト
+        "intel_summary",                                                        # 情報要約
     }
     if task_type in _QWEN36_TASKS and _openrouter_available():
         return {"provider": "openrouter", "model": "qwen3.6-plus", "tier": "A", "via": "openrouter",
@@ -467,8 +470,15 @@ def _choose_best_model_v6_impl(
                 "note": "quality=high→Gemini Flash"}
 
     # === デフォルト ===
+    # 2026-04-06 方針変更: ローカルより先に OpenRouter 無料モデルを試す
 
-    # ローカル可能で未分類タスク → ローカル
+    # 未分類でも OpenRouter 無料が使えるならそちら優先
+    if _openrouter_available():
+        return {"provider": "openrouter", "model": "nemotron-3-nano-30b", "tier": "A", "via": "openrouter",
+                "openrouter_model_id": OPENROUTER_NEMOTRON30B_MODEL,
+                "note": f"未分類→Nemotron-3-Nano-30B(無料)"}
+
+    # OpenRouter 上限超え → ローカルフォールバック
     if local_available:
         node = _pick_local_node()
         model = "qwen3.5-4b" if node == "delta" else "qwen3.5-9b"
@@ -477,11 +487,11 @@ def _choose_best_model_v6_impl(
             return {"model": "gemini-2.5-flash", "tier": "A", "provider": "google",
                     "via": "direct", "note": f"avoid_modelsフォールバック({task_type})"}
         return {"provider": "local", "model": model, "tier": "L", "node": node,
-                "note": f"未分類→ローカル({node})"}
+                "note": f"OpenRouter上限超→ローカル({node})"}
 
-    # ローカル不可 → Gemini Flash
+    # 全部不可 → Gemini Flash
     return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
-            "note": "ローカル不可→Gemini Flash"}
+            "note": "全不可→Gemini Flash"}
 
 
 async def call_llm(

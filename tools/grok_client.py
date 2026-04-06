@@ -41,7 +41,7 @@ XAI_BASE_URL = "https://api.x.ai/v1"
 # xAI は usage.cost_in_usd_ticks に **実コスト** を返してくれる。
 # 検証: "Hi" 1語送信 → 1005000 ticks → ~$0.0001 → ~¥0.015 (cached_tokens 156/157 割引込み)。
 # 変換: 1 USD = 10^10 ticks (tick = 10^-10 USD)。
-TICKS_PER_USD = 1e10
+TICKS_PER_USD = 2e10
 
 # フォールバック用の token 単価表 (cost_in_usd_ticks が欠落時のみ使用)
 MODEL_COSTS = {
