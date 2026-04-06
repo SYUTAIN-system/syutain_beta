@@ -42,10 +42,13 @@ STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
 
 # ===== スケジュール定義 =====
 
-X_SHIMAHARA_TIMES = ["10:00", "13:00", "17:00", "20:00"]
-X_SYUTAIN_TIMES = ["11:00", "13:30", "15:00", "17:30", "19:00", "21:00"]
-BLUESKY_TIMES = [f"{h}:{m:02d}" for h in range(10, 23) for m in (0, 30)]  # 10:00-22:30
-THREADS_TIMES = [f"{h}:30" for h in range(10, 23)]  # 10:30-22:30
+# 2026-04-07 拡散実行書に基づく投稿数: 21本/日 (旧49本から削減、量より質)
+# X shimahara 5 / X syutain 5 / Bluesky 5 / Threads 5 / note 1(別パイプライン)
+# 最低2時間間隔で分散
+X_SHIMAHARA_TIMES = ["09:00", "12:00", "15:00", "18:00", "21:00"]
+X_SYUTAIN_TIMES = ["10:00", "13:00", "16:00", "19:00", "22:00"]
+BLUESKY_TIMES = ["09:30", "12:30", "15:30", "18:30", "21:30"]
+THREADS_TIMES = ["10:30", "13:30", "16:30", "19:30", "22:30"]
 
 # ===== テーマプール =====
 
@@ -96,12 +99,24 @@ _theme_quality_tracker: dict[tuple[str, str], list[float]] = {}
 
 # ===== AI定型表現チェック =====
 
+# 拡散実行書 NGリスト + AI定型表現
 AI_CLICHE_PATTERNS = [
     "について考えてみました", "いかがでしょうか", "ではないでしょうか",
     "皆さん、こんにちは", "みなさん、こんにちは", "それでは、また",
     "を深掘り", "についてまとめてみました", "のポイントは3つ",
     "させていただきます", "特筆すべき", "画期的な", "注目すべき",
     "それでは早速", "見ていきましょう", "ご紹介します",
+]
+
+# 拡散実行書「表の発信で絶対にやらないこと」(2026-04-07)
+DIFFUSION_NG_PATTERNS = [
+    "神話", "デジタル遺伝子", "突然変異エンジン",     # 内部用語を表で使わない
+    "異端者", "異端児",                                # 自称禁止
+    "月100万", "月収100万", "100万円",                # 看板禁止
+    "コード書けないおっさん", "おっさん",              # 弱者描写禁止
+    "これはドキュメンタリーです",                      # 説明禁止
+    "AIすごい", "AIって凄い", "AIの未来は",            # 抽象論禁止
+    "未来はこうなる", "これからの時代",                # 抽象論禁止
 ]
 
 
@@ -445,6 +460,10 @@ def _check_ai_cliche(text: str) -> bool:
     for p in AI_CLICHE_PATTERNS:
         if p in text:
             return True
+    # 拡散実行書 NG パターン (2026-04-07)
+    for p in DIFFUSION_NG_PATTERNS:
+        if p in text:
+            return True
     # 絵文字3個以上
     import re
     emoji_count = len(re.findall(r'[\U0001F300-\U0001F9FF\U00002702-\U000027B0]', text))
@@ -453,6 +472,15 @@ def _check_ai_cliche(text: str) -> bool:
     # ハッシュタグ3個以上
     if text.count('#') >= 3:
         return True
+    # 拡散実行書の品質基準: 抽象論・ポエム・自虐・システム紹介型は却下
+    # 具体的な数字/出来事/学び/問い の最低1つが必要
+    has_number = bool(re.search(r'\d{2,}', text))  # 2桁以上の数字
+    has_concrete = bool(re.search(r'¥[\d,]+|[\d,]+円|[\d,]+行|[\d,]+回|[\d,]+件|[\d,]+日|[\d.]+%', text))
+    has_question = text.rstrip().endswith('？') or '？' in text
+    if not (has_number or has_concrete or has_question):
+        # 数字も問いもない = 抽象論の可能性。ただし短文(80字未満)は除外
+        if len(text) >= 80:
+            return True
     return False
 
 
@@ -890,14 +918,14 @@ async def _warmup_nemotron():
         logger.debug(f"warmupスキップ: {e}")
 
 
-# バッチ分割定義
+# バッチ分割定義（拡散実行書: 21本/日を2バッチに分割）
 BATCH_1_SCHEDULE = (
     [("x", "shimahara", t) for t in X_SHIMAHARA_TIMES] +
     [("x", "syutain", t) for t in X_SYUTAIN_TIMES]
-)  # 10件
-BATCH_2_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES[:13]]  # 前半13件
-BATCH_3_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES[13:]]  # 後半13件
-BATCH_4_SCHEDULE = [("threads", "syutain", t) for t in THREADS_TIMES]       # 13件
+)  # X 10件 (shimahara 5 + syutain 5)
+BATCH_2_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES]     # Bluesky 5件
+BATCH_3_SCHEDULE = []  # 旧Bluesky後半は廃止（5件に削減済み）
+BATCH_4_SCHEDULE = [("threads", "syutain", t) for t in THREADS_TIMES]     # Threads 5件
 
 
 async def generate_batch(batch_name: str, schedule_items: list, target_date: datetime = None, warmup: bool = True) -> dict:

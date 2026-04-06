@@ -34,23 +34,28 @@ from typing import Optional
 
 logger = logging.getLogger("syutain.sns_theme_engine")
 
-# カテゴリ別の配分（各プラットフォーム×アカウントごと）
+# カテゴリ別の配分（拡散実行書: 各5件/プラットフォーム）
+# 2026-04-07 更新: 21本/日体制に合わせた配分
 CATEGORY_DISTRIBUTION = {
     "x_shimahara": {
-        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 1,
+        # 島原個人: 体験・気づき中心。syutain_ops は syutain アカウントに任せる
+        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
         "philosophy_bip": 1, "shimahara_fields": 1,
     },
     "x_syutain": {
-        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 1,
+        # SYUTAINβ公式: データドリブン。「淡々と異常なことを言う」(実行書)
+        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 0,
         "philosophy_bip": 1, "shimahara_fields": 1,
     },
     "bluesky": {
-        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 3,
-        "philosophy_bip": 3, "shimahara_fields": 2,
+        # 技術コミュニティ: 深い洞察
+        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 1,
+        "philosophy_bip": 1, "shimahara_fields": 0,
     },
     "threads": {
-        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 3,
-        "philosophy_bip": 3, "shimahara_fields": 4,
+        # カジュアル: 読者との距離が近い
+        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 1,
+        "philosophy_bip": 1, "shimahara_fields": 2,
     },
 }
 
