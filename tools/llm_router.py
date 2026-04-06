@@ -51,7 +51,10 @@ OPENROUTER_QWEN36_MODEL = "qwen/qwen3.6-plus:free"
 OPENROUTER_NEMOTRON30B_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 _openrouter_daily_count = 0
 _openrouter_daily_date = ""
-_OPENROUTER_DAILY_LIMIT = 180  # 安全マージン（上限200、Qwen3.6+Nemotron30B合算）
+# 2026-04-07 更新: $10 credit 購入済みのため上限 1,000/日。安全マージン 80% で 800。
+# 旧値 180 は「上限200」の古い情報に基づいていた。
+# リセット: UTC 00:00 (JST 09:00)。分あたり制限: 20 req/min (:free モデル共通)。
+_OPENROUTER_DAILY_LIMIT = 800
 
 
 def _estimate_cost_jpy(model: str, prompt: str) -> float:
@@ -604,15 +607,32 @@ async def _call_llm_internal(
             or_model = model_selection.get("openrouter_model_id", model) if model_selection else model
             try:
                 result = await _call_openrouter(prompt, system_prompt, or_model, max_tokens=max_tokens)
-                if provider == "openrouter":
-                    _openrouter_record_use()
             except Exception as or_err:
-                # OpenRouter失敗 → Gemini Flashにフォールバック
-                logger.warning(f"OpenRouter失敗({or_model}): {or_err} → Gemini Flashフォールバック")
-                result = await _call_google(prompt, system_prompt, "gemini-2.5-flash")
-                model = "gemini-2.5-flash"
-                provider = "google"
-                tier = "A"
+                # OpenRouter :free 失敗 → 3段フォールバックチェーン
+                # 2026-04-07: Qwen 3.6 Plus :free の upstream 429 対策
+                err_str = str(or_err).lower()
+                is_rate_limit = "429" in err_str or "rate" in err_str
+
+                if is_rate_limit:
+                    logger.warning(f"OpenRouter 429 ({or_model}) → DeepSeek V3.2 フォールバック")
+                    try:
+                        result = await _call_deepseek(prompt, system_prompt, "deepseek-v3.2")
+                        model = "deepseek-v3.2"
+                        provider = "deepseek"
+                        tier = "A"
+                    except Exception as ds_err:
+                        logger.warning(f"DeepSeek も失敗: {ds_err} → Gemini Flash フォールバック")
+                        result = await _call_google(prompt, system_prompt, "gemini-2.5-flash")
+                        model = "gemini-2.5-flash"
+                        provider = "google"
+                        tier = "A"
+                else:
+                    # 429 以外のエラー → Gemini Flash
+                    logger.warning(f"OpenRouter失敗({or_model}): {or_err} → Gemini Flashフォールバック")
+                    result = await _call_google(prompt, system_prompt, "gemini-2.5-flash")
+                    model = "gemini-2.5-flash"
+                    provider = "google"
+                    tier = "A"
         else:
             result = await _call_openrouter(prompt, system_prompt, model)
 
@@ -920,7 +940,9 @@ async def _call_google(prompt: str, system_prompt: str, model: str) -> dict:
 
 
 async def _call_openrouter(prompt: str, system_prompt: str, model: str, max_tokens: int = 4096) -> dict:
-    """OpenRouter API経由呼び出し（100+モデル統合アクセス）"""
+    """OpenRouter API経由呼び出し（100+モデル統合アクセス）
+    429 Rate Limit 対策: 最大3回リトライ(5秒間隔)、それでもダメなら例外を上位に伝播。
+    上位の call_llm で DeepSeek/Gemini Flash フォールバックが発動する。"""
     import openai
 
     client = openai.AsyncOpenAI(
@@ -932,12 +954,27 @@ async def _call_openrouter(prompt: str, system_prompt: str, model: str, max_toke
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-    return {
-        "text": resp.choices[0].message.content or "",
-        "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
-        "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
-    }
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
+            _increment_openrouter_count()
+            return {
+                "text": resp.choices[0].message.content or "",
+                "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
+                "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
+            }
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if "429" in err_str or "rate" in err_str:
+                if attempt < 2:
+                    logger.warning(f"OpenRouter 429 (attempt {attempt+1}/3, model={model}): {str(e)[:100]}. 5秒後リトライ")
+                    await asyncio.sleep(5)
+                    continue
+            raise  # 429 以外のエラー、または 3 回リトライ失敗は即 raise
+
+    raise last_error or RuntimeError("OpenRouter 3回リトライ後も失敗")
 
 
 async def call_llm_stream(
