@@ -580,12 +580,13 @@ class SyutainScheduler:
                 max_instances=1,
             )
 
-            # Codex コンテンツ品質管理: 毎日04:00 JST に前日の全成果物を精査・改善
+            # Codex コンテンツ品質管理: 毎日21:00 JST に当日の全成果物を精査・改善
+            # (04:00→21:00 に変更: 日中の投稿結果が出揃った夜に精査して翌日に反映)
             self._scheduler.add_job(
                 self.codex_daily_content_audit,
-                CronTrigger(hour=4, minute=0, timezone="Asia/Tokyo"),
+                CronTrigger(hour=21, minute=0, timezone="Asia/Tokyo"),
                 id="codex_daily_content_audit",
-                name="Codex 日次コンテンツ品質管理（毎日04:00）",
+                name="Codex 日次コンテンツ品質管理（毎日21:00）",
                 replace_existing=True,
                 misfire_grace_time=600,
                 max_instances=1,
