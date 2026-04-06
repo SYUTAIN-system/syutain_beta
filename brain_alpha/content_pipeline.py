@@ -1141,8 +1141,13 @@ async def generate_publishable_content(
             first_draft = result_draft.get("text", "").strip()
             # メタ指示漏洩を除去
             first_draft = _sanitize_article_output(first_draft)
-            if not first_draft or len(first_draft) < 6000:
-                raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低6000字必要）")
+            # 最低文字数: ローカル LLM (Qwen3.5-9B) は 6000 字を安定生成できないことが
+            # 2026-04-06 の 6 回連続失敗で判明（4234-5930字の範囲で打ち切られる）。
+            # API 予算超過時にローカルのみで記事パイプラインが完全停止するのを防ぐため、
+            # 閾値を 4000 字に下げる。品質は Stage 4 リライト + Stage 4.5 セルフ批評で補う。
+            _MIN_DRAFT_LENGTH = 4000
+            if not first_draft or len(first_draft) < _MIN_DRAFT_LENGTH:
+                raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低{_MIN_DRAFT_LENGTH}字必要）")
 
             # 事実検証チェック (static)
             factual_issues = _verify_factual_claims(first_draft)

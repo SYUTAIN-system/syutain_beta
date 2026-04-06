@@ -1261,7 +1261,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         if is_duplicate:
                             fixation_count += 1
                             logger.warning(f"重複検出 ({platform}/{time_str}): fixation_count={fixation_count}")
-                            # 固着検知: 連続3回重複→このバッチ残り全てCloud APIに切替
+                            # 固着検知: 連続3回重複→Cloud APIフォールバック試行
                             if fixation_count >= 3 and not using_cloud_fallback:
                                 using_cloud_fallback = True
                                 logger.warning("ローカルLLM固着検知→残りのバッチをCloud API(DeepSeek V3.2)にフォールバック")
@@ -1274,6 +1274,24 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                                     }, severity="warning")
                                 except Exception:
                                     pass
+                            # 固着10回以上 = Cloud fallback も budget 超過でブロックされるデッドロック状態
+                            # バッチ残りを強制スキップして無限ループを防ぐ（2026-04-06 デバッグで発見）
+                            if fixation_count >= 10:
+                                logger.error(
+                                    f"固着デッドロック検出 ({platform}): fixation_count={fixation_count}、"
+                                    f"残り{results['total'] - inserted_count}件スキップ"
+                                )
+                                try:
+                                    from tools.event_logger import log_event
+                                    await log_event("sns.fixation_deadlock", "sns", {
+                                        "fixation_count": fixation_count,
+                                        "platform": platform,
+                                        "skipped": results["total"] - inserted_count,
+                                        "reason": "Cloud fallback blocked by budget, local LLM repeating same output",
+                                    }, severity="error")
+                                except Exception:
+                                    pass
+                                break  # このバッチ内ループを強制終了
                             continue
 
                         # 検証6: 品質スコア
