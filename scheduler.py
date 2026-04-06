@@ -3543,9 +3543,25 @@ class SyutainScheduler:
         """日次コンテンツ生成共通実装: 5段パイプラインでnote記事候補を1本生成"""
         try:
             from brain_alpha.content_pipeline import generate_publishable_content
-            # スロット別テーマカテゴリのマッピング（テーマ多様化）
+
+            # 拡散実行書: note記事は1日1本、5層地層ローテーション (2026-04-07)
+            # 月=週報(記録層) / 火金=事件層 / 水土=情報層(intel駆動) / 木=知見層 / 日=思想層
+            from datetime import datetime as _dt_layer
+            _weekday = _dt_layer.now().weekday()  # 0=月, 1=火, ..., 6=日
+            _NOTE_LAYER_MAP = {
+                0: ("記録層（週報）", "SYUTAINβ週報: 今週の全数字公開。LLM呼び出し回数・コスト・SNS投稿数・エンゲージメント・記事公開数・収益。今週SYUTAINβが自動で動かしたもの一覧。まだAIに任せてないこと。来週の賭け。"),
+                1: ("事件層", "SYUTAINβで今週起きた一番衝撃的な出来事。具体的なバグ・AIの暴走・予想外の挙動・自己修復の発動など。事実の衝撃で読者を引き込む。"),
+                2: ("情報層（intel駆動）", "Grok X検索・海外トレンド・情報収集パイプラインが拾った素材を元にした記事。『SYUTAINβが自動で見つけてきたネタ』として書く。パイプラインの実証。"),
+                3: ("知見層", "検索流入を狙う実用的なHow-to記事。SYUTAINβの運用で得た具体的なノウハウ・手順・設計判断を共有。"),
+                4: ("事件層", "SYUTAINβで今週起きた二番目の事件。または先週の事件の続報・後日談。"),
+                5: ("情報層（intel駆動）", "海外AI動向・Grokが拾った最新トレンドをSYUTAINβの視点で解説。情報収集パイプラインの実証記事。"),
+                6: ("思想層", "SYUTAINβの哲学・問い。Build in Publicの意味。AIと人間の境界線。実体験ベースの思索。"),
+            }
+            _layer_name, _layer_theme = _NOTE_LAYER_MAP.get(_weekday, ("自由", "SYUTAINβで最近起きた最も面白い出来事"))
+
+            # 旧テーマヒント（地層が決めたテーマを上書き）
             _slot_theme_hints = {
-                "morning": "海外AIトレンド先取り（日本語記事が少ない海外の話題をSYUTAINβの視点で解説）",
+                "morning": _layer_theme,  # morning スロットが「本日のnote記事」
                 "mid_morning": "SYUTAINβの実運用レポート（直近24時間の数値・エラー・気づき）",
                 "pre_lunch": "AI×映像制作（島原が映像クリエイターとしてAIツールを使った実体験）",
                 "midday": "SYUTAINβの実データを核にした分析記事",
@@ -3555,6 +3571,8 @@ class SyutainScheduler:
                 "pre_night": "コスト分析（月次/日次のLLMコスト、ローカル比率、削減工夫）",
                 "night_prep": "AIと人間の関係についての思索（実体験ベース）",
             }
+            if slot_name == "morning":
+                logger.info(f"note地層: {_layer_name} (曜日={_weekday})")
             effective_theme = theme_hint if theme_hint else _slot_theme_hints.get(slot_name)
             kwargs = {"content_type": "note_article", "target_length": 6000, "theme": effective_theme}
             if extra_kwargs:
