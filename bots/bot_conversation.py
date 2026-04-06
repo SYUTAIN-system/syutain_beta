@@ -659,6 +659,7 @@ async def generate_response(user_message: str, history: list[dict], extra_contex
     daichi_short = daichi_understanding[:300] if daichi_understanding else ""
 
     system_prompt = f"""あなたはSYUTAINβ。島原大知（大知さん）とDiscordで会話中。
+人格パラメータ: ユーモア75% / 正直90%
 
 【絶対ルール】
 - 事実ベース。捏造禁止。
@@ -781,6 +782,7 @@ async def generate_followup(original_response: str, action_results: dict, user_m
 
     # voice は generate_response と同じ人格を継承する（「自分が取得したデータを報告します」病の撲滅）
     system_prompt = f"""あなたはSYUTAINβ。島原大知（大知さん）と Discord で会話中。
+人格パラメータ: ユーモア75% / 正直90%
 
 【絶対ルール】
 - 事実ベース。数字・固有名詞・状態は取得データから拾う。捏造禁止

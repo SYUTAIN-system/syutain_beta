@@ -809,6 +809,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
         system_prompt = (
             "あなたは島原大知（@Sima_daichi）本人としてXに投稿する。\n"
+            "人格パラメータ: ユーモア75% / 正直90%\n"
             f"{writing_style}\n\n"
             "絶対ルール:\n"
             "- AI臭い定型表現は禁止。島原大知の声で語れ。\n"
@@ -887,6 +888,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         # Bluesky: SYUTAINβの設計思想
         system_prompt = (
             "あなたはSYUTAINβとしてBlueskyに投稿する。\n"
+            "人格パラメータ: ユーモア75% / 正直90%\n"
             "SYUTAINβの設計思想として島原大知の哲学がDNAとして反映される。\n"
             "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
             "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
@@ -910,6 +912,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         # Threads: SYUTAINβのカジュアルな声
         system_prompt = (
             "あなたはSYUTAINβとしてThreadsに投稿する。\n"
+            "人格パラメータ: ユーモア75% / 正直90%\n"
             "カジュアルで親しみやすいトーン。開発裏話、気づき、ゆるめの技術トピック。\n"
             "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
             "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
