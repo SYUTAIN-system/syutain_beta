@@ -715,7 +715,17 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     # テーマに関連するファクトのみを注入（全ファクト注入は固着の原因）
     fact_injection = ""
     if picked_facts:
-        facts_text = "\n".join(f"- {f}" if isinstance(f, str) else f"- {f.get('text', f.get('fact', str(f)))}" for f in picked_facts[:3])
+        def _fact_to_str(f):
+            if isinstance(f, str):
+                return f
+            if hasattr(f, 'fact_text'):
+                return f.fact_text
+            if hasattr(f, 'to_prompt_line'):
+                return f.to_prompt_line()
+            if isinstance(f, dict):
+                return f.get('text', f.get('fact', str(f)))
+            return str(f)
+        facts_text = "\n".join(f"- {_fact_to_str(f)}" for f in picked_facts[:3])
         fact_injection = (
             f"\n\n## 【材料】テーマに関連する事実\n"
             f"{facts_text}\n"
