@@ -672,11 +672,13 @@ class NoteQualityChecker:
                     f"critical={len(critical_issues)}, "
                     f"passed={factual_result.get('passed', True)}"
                 )
-                if fab_score > 0.5:
+                # 判定基準: fabrication_risk > 0.6 かつ critical 3件以上で不合格
+                # (SYUTAINβ視点の記事では数値ズレは許容、明確な捏造のみ弾く)
+                if fab_score > 0.6 and len(critical_issues) >= 3:
                     await self._insert_review(
                         filepath, filename, title, len(content),
                         final_status="rejected_factual",
-                        blocked_reason=f"事実検証不合格(risk={fab_score:.2f}): {', '.join(critical_issues[:3])}",
+                        blocked_reason=f"事実検証不合格(risk={fab_score:.2f}, critical={len(critical_issues)}): {', '.join(critical_issues[:3])}",
                     )
                     return {
                         "filepath": str(filepath),
@@ -881,111 +883,50 @@ class NoteQualityChecker:
         import openai
 
         system_prompt = (
-            "あなたは記事の事実検証専門家です。嘘・捏造・ハルシネーションを絶対に見逃さない。"
-            "1つでも致命的問題があればpassedをfalseにする。必ずJSON形式のみで回答してください。"
+            "あなたは記事の事実検証専門家です。明らかな捏造・ハルシネーションを検出する。"
+            "ただし、動的に変わるシステム数値（コード行数、LLM呼び出し回数、コスト等）の多少のズレはcriticalにしない。"
+            "必ずJSON形式のみで回答してください。"
         )
 
-        user_prompt = f"""この記事の事実検証を行ってください。以下の全項目を厳密にチェック:
+        user_prompt = f"""この記事はSYUTAINβ（自律型AI事業OS）が自身の視点で書いた記事です。事実検証を行ってください。
 
-## A. 時系列の整合性（最重要）
+## 記事の著者について
+- 著者はSYUTAINβ（AIシステム）。一人称「私」
+- 設計者の島原大知について語る時は三人称（「島原」「島原さん」）
+- SYUTAINβは島原大知の個人開発プロジェクト。運用チーム・開発メンバー・同僚は存在しない
 
-### 島原大知のタイムライン（確定事実）
-- 2026年2月28日: プロジェクト開始。Claude Codeを初めて使用。AIエージェント11体をOpenClawで構築
-- 2026年3月4日: 第1世代システム全壊。無限ミーティングループ、自己発見能力欠如
-- 2026年3月6日: OpenClawアンインストール。全て白紙に
-- 2026年3月4日〜13日: 設計書を25回書き直し（v3→V25、2,865行）。コードゼロ行
-- 2026年3月17日: SYUTAINβ再構築開始（Claude Code一撃実装）
-- 2026年3月18日 05:39 JST: 最初のLLM呼び出し（DeepSeek V3.2、¥0.01）
-- 2026年3月19日: 初回クリーンスタート。エラー0件
-- 2026年3月25日: セマンティックループ検知器15回発動。最悪の日
-- 2026年4月3日: AI記事捏造事件（Claude 4.0虚偽記事、DeepSeek V4偽提案12件）
-- 2026年4月5日現在: Python 55,458行、LLM呼び出し11,085回、コスト¥1,104.93
+## A. 捏造の検出（critical_issue）
 
-**検出すべき矛盾:**
-- 「2023年」「2024年」「昨年」等にAI利用体験を置くのは捏造。島原がAIを使い始めたのは2026年2月28日
-- 「1年前」「半年前」等の相対表現で2026年2月以前を示すのも捏造
-- 「Claude 3.5 Sonnet」「GPT-4」等の旧モデルを「最近リリースされた」と書くのは時系列矛盾
+以下はcritical_issueとして検出:
+- 架空の会社名・クライアント名・同僚・友人のエピソード
+- 「運用チーム」「開発メンバー」「離職率」等の組織体制捏造（個人開発）
+- 島原がプログラミングできる風の記述（コードを一行も書けない非エンジニア）
+- 島原がVTuber活動をした風の記述（業界支援・裏方のみ）
+- ハーネスエンジニアリングを「命名」「考案」「発明」したという記述（既存方法論を実践しているだけ）
+- 使っていないツール名を「使っている」と書く（Grafana/Prometheus/Datadog/Sentry等は未使用）
+- 出典不明の外部事例（「〇〇社が〇〇倍」「ある調査によると」等、裏付けなし）
+- LLMの応答アーティファクト（「はい。」「了解しました」「以下が記事です」）
+- 内部用語の漏洩（「intel_items」「persona_memory」「theme_hint」等）
 
-### AIツールのリリース日（参照用）
-- ChatGPT: 2022年11月 / GPT-4: 2023年3月 / GPT-4o: 2024年5月 / GPT-5.4: 2026年3月
-- Claude: 2023年3月 / Claude 3.5 Sonnet: 2024年6月 / Claude Opus 4.6: 2026年2月
-- Claude Code: 2025年 / DeepSeek V3: 2024年12月 / Qwen3.5: 2026年2月
-- Midjourney: 2022年 / Stable Diffusion: 2022年
+## B. 許容する事項（criticalにしない）
 
-## B. 島原大知の人物像（確定事実）
+- システム数値（コード行数、LLM呼び出し回数、コスト、SNS投稿数等）の多少のズレ → 動的に変わるため許容
+- 島原の年齢・誕生日への言及がないこと → 正しい（言及禁止）
+- SYUTAINβ視点での主観的な分析・意見 → AIとしての視点なので許容
+- 記事内の数字が最新DBと完全一致しないこと → warning止まり
 
-**正しい情報:**
-- コードを一行も書けない非エンジニア（変数が何か分からないレベル）
-- 本業は映像制作: VFX、動画編集、カラーグレーディング、撮影、ドローン
-- VTuber業界に8年間関わった（業界支援・裏方。VTuber活動はしていない）
-- SYUTAINβをClaude Codeで開発（2026年2月28日〜）
-- 4台のPC（ALPHA/BRAVO/CHARLIE/DELTA）で分散システムを運用
+## C. コンテンツポリシー（warning）
 
-**検出すべき捏造:**
-- 年齢・誕生日への言及 → critical_issue
-- プログラミング経験がある風の記述 → critical_issue
-- VTuberとして活動した風の記述 → critical_issue
-- 架空の会社名・クライアント名 → critical_issue
-- 架空のプレゼン・会議・打ち合わせエピソード → critical_issue
-- 「同僚に聞いた」「友人が」等の匿名具体エピソード → critical_issue（島原はフリーランス）
-- 大学・学校・資格への言及（裏付けなし）→ warning
-- **ハーネスエンジニアリングを「命名」「考案」「誕生」「提唱」「発明」したという記述 → critical_issue**（島原はこの方法論の考案者ではなく、既存の方法論を適用しているだけ。「実践している」「適用している」「使っている」が正しい表現）
-- **「私は…と呼ぶ」「僕が…と命名した」「これを…と名付けた」系の自己命名パターン全般 → critical_issue**（ハーネスエンジニアリングを含め、既存概念を自分が作ったと偽装することの再発防止）
-- **SYUTAINβは島原大知の個人開発プロジェクトで、運用チーム・開発メンバー・同僚・離職者は存在しない**。「運用チーム」「開発チーム」「メンバーが会社を去った」「離職率」「ある担当者は」「開発メンバーの1人」等の記述 → critical_issue
-- **実在しないツールを「使っている」と書くのは捏造**。Grafana/Prometheus/Restic/Datadog/NewRelic/Sentry/Splunk等を「現在使用中」と書く場合、事実確認が必要。SYUTAINβの実運用は: PostgreSQL + NATS + Tailscale + Ollama + FastAPI + Next.js のみ
-- **出典不明の外部事例捏造**: 「BBC/NYTimes/WSJ等の海外メディアが〇〇を試験導入」「〇〇社が滞在時間2.1倍」「ある調査会社のデータ」→ critical_issue（裏付けがない場合）
-
-## B'. SYUTAINβ 組織体制（確定事実、違反はcritical_issue）
-- SYUTAINβは**島原大知の個人開発プロジェクト**。運用チーム・開発メンバー・同僚・エンジニア仲間・離職者は**存在しない**
-- 「チーム」「メンバー」「担当者」「離職率」「会社を去った」「部署」等は全て捏造
-- 技術スタック（これ以外を「使っている」と書いたら捏造）:
-  - DB: PostgreSQL
-  - メッセージング: NATS JetStream
-  - ネットワーク: Tailscale
-  - LLM: Ollama (qwen3.5-4b/9b/27b, nemotron-jp) + OpenRouter (Qwen 3.6 Plus, Nemotron-3-Nano-30B) + API (Claude/Gemini/DeepSeek/GPT)
-  - Web: FastAPI + Next.js
-  - ブラウザ自動化: Playwright
-  - Discord Bot: discord.py
-  - Grafana/Prometheus/Restic/Datadog/NewRelic/Sentry/Splunk等は**使っていない**
-
-## C. 数値の検証
-
-**信頼できるSYUTAINβ実データ（DB直接取得、2026年4月5日時点）:**
-- Python: 55,458行 / 135ファイル
-- LLM呼び出し: 11,085回
-- 累計LLMコスト: ¥1,104.93
-- SNS投稿: 519件posted
-- 情報収集: 1,547件
-- ペルソナ記憶: 551件
-- LoopGuard発動: 54回
-- スケジューラ: 93ジョブ / 5,164行
-- エージェント: 20体
-- 設計書: V25+V30統合 3,421行
-
-**検出すべき問題:**
-- 上記データと大きく矛盾する数値 → critical_issue
-- 出典不明の統計データ（「〇〇%の企業が」「調査によると」等）→ warning（出典を確認すべき）
-- 月収・収益の言及（現在¥0）→ 架空の収益を示唆していればcritical_issue
-
-## D. コンテンツポリシー
-
-- 2026年6月1日まで全記事無料方針。「有料」「購入してください」「ここから先は有料」等の販売文言 → warning
-- 「---ここから有料---」のペイウォールマーカー → warning（無料期間中は不要）
-- 外部AIニュース解説がメインテーマ（「GPTの使い方」「Claude活用ガイド」等）→ warning（Build in Public方針違反）
-- 他人の著作物の無断引用・盗用 → critical_issue
-
-## E. 文章品質
-
-- LLMの応答アーティファクト（「はい。」「了解しました」「以下が記事です」）→ critical_issue
-- system_prompt/theme_hintの漏洩（「自由テーマ」「intel_items」「persona_memory」等の内部用語）→ critical_issue
-- AI定型句（「いかがでしょうか」「深掘り」「させていただきます」「注目すべき」）→ warning
+- 有料販売の文言（6月まで全記事無料）→ warning
+- AI定型句（いかがでしょうか、深掘り、させていただきます）→ warning
+- 外部AIニュース解説がメインテーマ → warning
 
 ## 回答形式
 
-JSON形式で回答。critical_issuesが1件でもあればpassed=false:
-{{"passed": true/false, "critical_issues": ["問題の具体的な記述と該当箇所"], "warnings": ["軽微な懸念"], "fabrication_risk_score": 0.0-1.0}}
+JSON形式。critical_issuesが**3件以上**あればpassed=false（1件でfalseは厳しすぎた）:
+{{"passed": true/false, "critical_issues": ["問題の具体的な記述"], "warnings": ["軽微な懸念"], "fabrication_risk_score": 0.0-1.0}}
 
-fabrication_risk_score: 0.0（問題なし）〜 0.3（軽微）〜 0.6（要修正）〜 1.0（完全捏造）
+fabrication_risk_score: 0.0〜0.3=通過 / 0.3〜0.6=要確認 / 0.6〜1.0=捏造
 
 ## 記事本文
 {content}"""

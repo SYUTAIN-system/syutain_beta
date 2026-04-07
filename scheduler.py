@@ -203,30 +203,48 @@ class SyutainScheduler:
                 self.night_batch_sns_2,
                 CronTrigger(hour=22, minute=30, timezone="Asia/Tokyo"),
                 id="night_batch_sns_2",
-                name="SNS生成2: Bluesky前半13件（22:30）",
+                name="SNS生成2: Bluesky10件（22:30）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
                 self.night_batch_sns_3,
                 CronTrigger(hour=23, minute=0, timezone="Asia/Tokyo"),
                 id="night_batch_sns_3",
-                name="SNS生成3: Bluesky後半13件（23:00）",
+                name="SNS生成3: 予備（23:00）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
                 self.night_batch_sns_4,
                 CronTrigger(hour=23, minute=30, timezone="Asia/Tokyo"),
                 id="night_batch_sns_4",
-                name="SNS生成4: Threads13件（23:30）",
+                name="SNS生成4: Threads7件（23:30）",
                 replace_existing=True,
             )
 
-            # 日次コンテンツ生成 #1（07:30 JST — 海外トレンド先取り）
+            # 記事シード植付+育成（4時間間隔 — 人間の「反芻」に相当）
+            self._scheduler.add_job(
+                self.article_seed_cycle,
+                IntervalTrigger(hours=4),
+                id="article_seed_cycle",
+                name="記事シード植付+育成（4h）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            # note記事素材収集（07:00 JST — 記事生成の30分前に素材を蓄積）
+            self._scheduler.add_job(
+                self.note_material_collect,
+                CronTrigger(hour=7, minute=0, timezone="Asia/Tokyo"),
+                id="note_material_collect",
+                name="note記事素材収集（07:00）",
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            # 日次コンテンツ生成 #1（07:30 JST — 素材収集済みの状態で記事生成）
             self._scheduler.add_job(
                 self.generate_daily_content_morning,
                 CronTrigger(hour=7, minute=30, timezone="Asia/Tokyo"),
                 id="daily_content_morning",
-                name="日次コンテンツ#1 海外トレンド先取り（07:30）",
+                name="日次コンテンツ#1 記事生成（07:30）",
                 replace_existing=True,
                 misfire_grace_time=60,
             )
@@ -3559,21 +3577,26 @@ class SyutainScheduler:
             }
             _layer_name, _layer_theme = _NOTE_LAYER_MAP.get(_weekday, ("自由", "SYUTAINβで最近起きた最も面白い出来事"))
 
-            # 旧テーマヒント（地層が決めたテーマを上書き）
-            _slot_theme_hints = {
-                "morning": _layer_theme,  # morning スロットが「本日のnote記事」
-                "mid_morning": "SYUTAINβの実運用レポート（直近24時間の数値・エラー・気づき）",
-                "pre_lunch": "AI×映像制作（島原が映像クリエイターとしてAIツールを使った実体験）",
-                "midday": "SYUTAINβの実データを核にした分析記事",
-                "afternoon": "SYUTAINβで起きた失敗と教訓（具体的なバグ・誤判断・リカバリ）",
-                "mid_afternoon": "設計判断の記録（なぜこの選択をしたか、他の選択肢との比較）",
-                "evening": "自由テーマ（SYUTAINβで最近起きた最も面白い出来事）",
-                "pre_night": "コスト分析（月次/日次のLLMコスト、ローカル比率、削減工夫）",
-                "night_prep": "AIと人間の関係についての思索（実体験ベース）",
-            }
-            if slot_name == "morning":
-                logger.info(f"note地層: {_layer_name} (曜日={_weekday})")
-            effective_theme = theme_hint if theme_hint else _slot_theme_hints.get(slot_name)
+            # 拡散実行書: 全スロットが同じ地層テーマで生成（1日1本、最初の成功記事を公開）
+            # 地層テーマは無視できない — LLMが勝手に変えることを防ぐ
+            logger.info(f"note地層: {_layer_name} (曜日={_weekday}, slot={slot_name})")
+
+            # 今日既に品質通過した記事があればスキップ（1日1本制限）
+            try:
+                from tools.db_pool import get_connection as _gc
+                async with _gc() as _chk_conn:
+                    today_ready = await _chk_conn.fetchval(
+                        """SELECT COUNT(*) FROM product_packages
+                           WHERE platform = 'note' AND status IN ('ready', 'published')
+                           AND created_at > (NOW() AT TIME ZONE 'Asia/Tokyo')::date""",
+                    )
+                    if today_ready and today_ready > 0:
+                        logger.info(f"note記事: 本日分は既に生成済み ({today_ready}件)。スロット{slot_name}スキップ")
+                        return
+            except Exception as _skip_err:
+                logger.debug(f"note日次チェック失敗（続行）: {_skip_err}")
+
+            effective_theme = theme_hint if theme_hint else f"【{_layer_name}】{_layer_theme}"
             kwargs = {"content_type": "note_article", "target_length": 6000, "theme": effective_theme}
             if extra_kwargs:
                 kwargs.update(extra_kwargs)
@@ -3602,10 +3625,29 @@ class SyutainScheduler:
                     logger.warning(f"note_drafts保存失敗（タスクDBには記録済み）: {e}")
 
             if quality >= 0.70:
+                # product_packagesに投入 → note_auto_publish_check で自動公開
+                try:
+                    from tools.db_pool import get_connection as _get_conn
+                    async with _get_conn() as _conn:
+                        existing = await _conn.fetchval(
+                            "SELECT id FROM product_packages WHERE title = $1 AND platform = 'note'",
+                            title,
+                        )
+                        if not existing:
+                            await _conn.execute(
+                                """INSERT INTO product_packages
+                                   (platform, title, body_full, body_preview, status, tags, category)
+                                   VALUES ('note', $1, $2, $3, 'ready', $4, 'article')""",
+                                title, content, content[:200],
+                                json.dumps(result.get("tags", []), ensure_ascii=False),
+                            )
+                            logger.info(f"note記事をproduct_packagesに投入: {title} (status=ready)")
+                except Exception as e:
+                    logger.warning(f"product_packages投入失敗: {e}")
                 try:
                     from tools.discord_notify import notify_discord
                     await notify_discord(
-                        f"コンテンツ生成完了 [{slot_name}]: {title} (品質: {quality:.2f})"
+                        f"📄 note記事生成完了 [{slot_name}]: {title} (品質: {quality:.2f})"
                     )
                 except Exception as e:
                     logger.warning(f"Discord通知失敗: {e}")
@@ -4019,6 +4061,30 @@ class SyutainScheduler:
                     pass
         except Exception as e:
             logger.error(f"process_article_commissions 全体失敗: {e}")
+
+    async def article_seed_cycle(self):
+        """記事シードの自動植付+育成（4h間隔、人間の「反芻」プロセス）"""
+        try:
+            from tools.article_seed_bank import auto_plant_from_events, nurture_seeds
+            from tools.db_pool import get_connection
+            async with get_connection() as conn:
+                planted = await auto_plant_from_events(conn)
+                nurtured = await nurture_seeds(conn)
+                logger.info(f"記事シードサイクル: 植付{planted}件, 育成{nurtured}件")
+        except Exception as e:
+            logger.error(f"記事シードサイクル失敗: {e}")
+
+    async def note_material_collect(self):
+        """note記事素材を事前収集（07:00 JST、記事生成の30分前）"""
+        try:
+            from tools.note_material_collector import collect_materials_for_today
+            result = await collect_materials_for_today()
+            logger.info(
+                f"note素材収集: layer={result.get('layer')}, "
+                f"materials={result.get('materials', 0)}件"
+            )
+        except Exception as e:
+            logger.error(f"note素材収集失敗: {e}")
 
     async def generate_daily_content_morning(self):
         """07:30 JST: SYUTAINβ運用レポート"""

@@ -1939,8 +1939,8 @@ def apply_deviation(original_value: float, action_id: str) -> float:
 
 | ノード | 設計書V25記載 | 実装（.env実測値） |
 |--------|-------------|-----------------|
-| CHARLIE | 100.98.82.108 | 100.x.x.x |
-| DELTA | 100.99.122.69 | 100.x.x.x |
+| CHARLIE | CHARLIE_TAILSCALE_IP | 100.x.x.x |
+| DELTA | DELTA_TAILSCALE_IP | 100.x.x.x |
 
 BRAVO (100.x.x.x) は設計書と一致。
 

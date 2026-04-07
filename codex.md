@@ -1,7 +1,8 @@
 # Codex Instructions for SYUTAINβ
 
 ## Project
-SYUTAINβ is a 58K+ line distributed autonomous AI business OS running on 4 nodes (ALPHA macOS + BRAVO/CHARLIE/DELTA Ubuntu).
+SYUTAINβ is a 62K+ line distributed autonomous AI business OS running on 4 nodes (ALPHA macOS + BRAVO/CHARLIE/DELTA Ubuntu).
+Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry support).
 
 ## Rules
 1. NEVER modify: agents/os_kernel.py, tools/emergency_kill.py, agents/approval_manager.py, tools/loop_guard.py, .env, credentials.json, token.json, CLAUDE.md
@@ -24,3 +25,54 @@ SYUTAINβ is a 58K+ line distributed autonomous AI business OS running on 4 node
 - Fabricate test data or statistics
 - Let LLM free-text narrate destructive action completion ("承認しました" etc.) — use regex direct route
 - Leak raw Python exceptions to user chat (use bot_actions._sanitize_error_for_user)
+
+## Brand & Personality (SOUL.md / 拡散実行書)
+- Humor: 75% — serious analysis with naturally occurring oddness. Never intentionally joke
+- Honesty: 90% — never hide facts. 10% is how you say it, not what
+- SNS voice: "淡々と異常なことを言う" (calmly says abnormal things). Dead serious
+- First person: Discord="自分", SNS="私", "僕"=shimahara only
+- Four attractions: 異常性(numbers), 未完成性(progress), 透明性(hide nothing), 問い(boundaries)
+
+## Content NG List (Absolute Prohibitions)
+- "神話" "デジタル遺伝子" "突然変異エンジン" (internal terms, never public)
+- Self-label as "異端者"
+- "月100万" as headline
+- "コード書けないおっさん" self-deprecation (shimahara is not weak)
+- "これはドキュメンタリーです" (show, don't tell)
+- Poem-style, abstract, "AIすごい", "未来はこうなる"
+- Fabricated episodes (companies, clients, colleagues)
+- AI clichés (いかがでしょうか, 深掘り, させていただきます)
+- Tools not used (Grafana, Prometheus, Datadog, Sentry)
+- Things shimahara doesn't do (programming, VTuber activity, music production jobs)
+
+## Channel Strategy (2026-04-07)
+| Channel | Posts/day | Voice |
+|---|---|---|
+| X shimahara | 5 | shimahara's voice, experience-based |
+| X syutain | 8 | SYUTAINβ voice, data-driven, 35% abnormal line |
+| Bluesky | 10 | SYUTAINβ voice, tech community |
+| Threads | 7 | SYUTAINβ voice, casual |
+| note | 1 | shimahara's voice, Build in Public documentary |
+
+## Theme Engine (5 categories, equal distribution)
+1. syutain_ops — operations (max 2/day to prevent fixation)
+2. ai_tech_trend — AI/tech news from Grok X search + intel_items
+3. creator_media — video/VTuber/drone/photo/advertising
+4. philosophy_bip — Build in Public philosophy, design decisions
+5. shimahara_fields — business/startup/marketing/culture
+
+## Architecture Notes
+- LLM routing: choose_best_model_v6() — local LLM first, articles use free cloud
+- SNS posts: local LLM only (nemotron-jp / qwen3.5:9b), NOT OpenRouter
+- Articles: OpenRouter Qwen 3.6 Plus (free) → Gemini Flash fallback
+- Timezone: all scheduled_at must be JST-aware (timezone(timedelta(hours=9)))
+- Destructive ACTIONs: never via LLM free-text, only regex direct route or ACTION tag
+
+## Recent Changes (2026-04-07)
+- Fixed: SNS scheduled_at stored in UTC → now JST-aware
+- Fixed: factbook injecting all facts → now theme-relevant only
+- Fixed: Stage 4 rewrite using local LLM → now uses cloud LLM
+- Added: theme engine for SNS content diversification
+- Added: content_pipeline → product_packages auto-insertion
+- Added: posting_queue dedup guard
+- Removed: sns_draft from OpenRouter task routing (local LLM only)

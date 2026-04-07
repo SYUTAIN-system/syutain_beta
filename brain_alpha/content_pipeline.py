@@ -25,6 +25,11 @@ from brain_alpha.sns_batch import _score_multi_axis, _PERSONA_KEYWORDS
 logger = logging.getLogger("syutain.brain_alpha.content_pipeline")
 
 STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
+_NOTE_PENDING_BACKLOG_LIMIT = 3
+_NOTE_BACKLOG_BYPASS_THEME_MARKERS = (
+    "Discord 経由で直接依頼",
+    "記事執筆依頼",
+)
 
 # ジャンル別テンプレート・3軸タイトル生成
 try:
@@ -194,6 +199,31 @@ def _verify_factual_claims(content: str) -> list[str]:
                     issues.append(f"[根拠なき数値] 「{pct}%」に出典がない")
 
     return issues
+
+
+def _bypass_note_backlog_guard(theme: str = "") -> bool:
+    """明示的な執筆依頼は backlog ガードをバイパスする。"""
+    if not theme:
+        return False
+    return any(marker in theme for marker in _NOTE_BACKLOG_BYPASS_THEME_MARKERS)
+
+
+async def _get_note_publish_backlog(conn) -> tuple[int, int]:
+    """note公開待ち件数(ready/approved)と当日公開数を返す。"""
+    row = await conn.fetchrow(
+        """SELECT
+               COUNT(*) FILTER (WHERE status IN ('ready', 'approved')) AS pending_count,
+               COUNT(*) FILTER (
+                   WHERE status = 'published'
+                     AND (published_at AT TIME ZONE 'Asia/Tokyo')::date =
+                         (NOW() AT TIME ZONE 'Asia/Tokyo')::date
+               ) AS published_today
+           FROM product_packages
+           WHERE platform = 'note'"""
+    )
+    if not row:
+        return 0, 0
+    return int(row["pending_count"] or 0), int(row["published_today"] or 0)
 
 
 def _sanitize_article_output(content: str) -> str:
@@ -661,12 +691,104 @@ async def _collect_system_data_for_article(conn, theme: str) -> str:
     except Exception as e:
         logger.debug(f"外部検索エビデンス取得失敗: {e}")
 
+    # 9. note素材コレクター蓄積分（地層に応じた事前収集素材）
+    try:
+        note_materials = await conn.fetch(
+            """SELECT title, summary FROM intel_items
+            WHERE source = 'note_material'
+            AND created_at > NOW() - INTERVAL '24 hours'
+            ORDER BY importance_score DESC, created_at DESC LIMIT 10"""
+        )
+        if note_materials:
+            mat_lines = [f"- {m['title']}: {(m['summary'] or '')[:200]}" for m in note_materials]
+            sections.append(
+                f"### 本日の記事素材（地層ローテーション用に事前収集済み）\n"
+                f"**以下は当日の地層テーマに合わせて収集した素材。記事の核として最優先で使え。**\n"
+                + "\n".join(mat_lines)
+            )
+    except Exception as e:
+        logger.debug(f"note素材取得失敗: {e}")
+
+    # 10. 具体的なイベント（event_log直近24h — 記事の核になる出来事）
+    try:
+        events = await conn.fetch(
+            """SELECT category, event_type, detail, created_at
+            FROM event_log
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+            AND category NOT IN ('heartbeat', 'routine')
+            ORDER BY created_at DESC LIMIT 15"""
+        )
+        if events:
+            event_lines = []
+            for e in events:
+                t = e['created_at'].strftime('%H:%M') if e['created_at'] else '?'
+                detail = (e['detail'] or '')[:120]
+                event_lines.append(f"- [{t}] {e['category']}/{e['event_type']}: {detail}")
+            sections.append(
+                f"### 直近24時間の具体的イベント\n"
+                f"**以下は実際に起きた出来事。記事の核として使え。**\n"
+                + "\n".join(event_lines)
+            )
+    except Exception as e:
+        logger.debug(f"イベントログ取得失敗: {e}")
+
+    # 10. Grok X検索 + intel_items の最新トレンド（テーマ関連の外部情報）
+    try:
+        intel_items = await conn.fetch(
+            """SELECT title, summary, url, source FROM intel_items
+            WHERE created_at > NOW() - INTERVAL '48 hours'
+            AND review_flag IN ('actionable', 'reviewed')
+            ORDER BY importance_score DESC, created_at DESC LIMIT 8"""
+        )
+        if intel_items:
+            intel_lines = []
+            for item in intel_items:
+                url = (item['url'] or '')[:100]
+                summary = (item['summary'] or '')[:150]
+                intel_lines.append(
+                    f"- **{item['title']}** ({item['source']})\n  {summary}\n  URL: {url}"
+                )
+            sections.append(
+                f"### 外部情報（Grok X検索 + intel_items）\n"
+                f"**記事のテーマに関連する外部情報。事実として引用可能。URLも記載して信頼性を示せ。**\n"
+                + "\n".join(intel_lines)
+            )
+    except Exception as e:
+        logger.debug(f"インテル取得失敗: {e}")
+
+    # 11. Discord対話ログ（島原との最新の会話 — 思考・判断の素材）
+    try:
+        dialogue = await conn.fetch(
+            """SELECT daichi_message, bot_response, extracted_philosophy
+            FROM daichi_dialogue_log
+            WHERE created_at > NOW() - INTERVAL '48 hours'
+            ORDER BY created_at DESC LIMIT 5"""
+        )
+        if dialogue:
+            dialogue_lines = []
+            for d in dialogue:
+                msg = (d['daichi_message'] or '')[:100]
+                phil = (d['extracted_philosophy'] or '')[:100]
+                if msg:
+                    dialogue_lines.append(f"- 島原: 「{msg}」")
+                    if phil:
+                        dialogue_lines.append(f"  → 抽出された哲学: {phil}")
+            if dialogue_lines:
+                sections.append(
+                    f"### 島原大知との直近の対話（思考・哲学の素材）\n"
+                    f"**島原の実際の発言。記事の視点・主張の根拠として使え。**\n"
+                    + "\n".join(dialogue_lines)
+                )
+    except Exception as e:
+        logger.debug(f"対話ログ取得失敗: {e}")
+
     if not sections:
         return ""
 
     header = "## 実際のSYUTAINβ運用データ（記事に必ず引用すること）\n"
     header += f"取得時刻: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-    header += f"テーマ: {theme}\n\n"
+    header += f"テーマ: {theme}\n"
+    header += "**重要: 以下のデータに書かれていない出来事・数字・ツール名を捏造するな。データにあることだけを書け。**\n\n"
     return header + "\n\n".join(sections)
 
 
@@ -803,6 +925,43 @@ async def generate_publishable_content(
     anti_ai_writing = _load_anti_ai_writing()
 
     async with get_connection() as conn:
+        # 公開能力を超える ready/approved backlog がある場合、日次自動生成を停止する。
+        # note_auto_publish は 1本/日上限のため、ここで抑制しないと ready が積み上がる。
+        if content_type == "note_article" and not _bypass_note_backlog_guard(theme or ""):
+            try:
+                pending_count, published_today = await _get_note_publish_backlog(conn)
+                if pending_count >= _NOTE_PENDING_BACKLOG_LIMIT:
+                    stages.append({
+                        "stage": 0,
+                        "name": "backlog_guard",
+                        "status": "skipped",
+                        "detail": (
+                            f"pending={pending_count} (limit={_NOTE_PENDING_BACKLOG_LIMIT}), "
+                            f"published_today={published_today}"
+                        ),
+                    })
+                    logger.warning(
+                        "content_pipeline backlog_guard: "
+                        f"pending={pending_count} >= {_NOTE_PENDING_BACKLOG_LIMIT}, "
+                        f"published_today={published_today} — 生成スキップ"
+                    )
+                    return {
+                        "title": theme or "note backlog guard",
+                        "content": "",
+                        "quality_score": 0.0,
+                        "stages": stages,
+                        "metadata": {
+                            "task_id": task_id,
+                            "content_type": content_type,
+                            "theme": theme,
+                            "status": "skipped_backlog",
+                            "pending_count": pending_count,
+                            "published_today": published_today,
+                        },
+                    }
+            except Exception as backlog_err:
+                logger.debug(f"backlog_guard判定失敗（続行）: {backlog_err}")
+
         few_shot_examples = await _load_few_shot_examples(conn)
         persona_text = await _load_persona(conn)
 
@@ -823,14 +982,60 @@ async def generate_publishable_content(
             except Exception:
                 detected_genre = "ai_tech"
 
+        # ===== Stage 0.5: シードバンクから熟成テーマを収穫（人間の「反芻」に相当） =====
+        _seed_data = None
+        _seed_context = ""
+        try:
+            from tools.article_seed_bank import harvest_best_seed, nurture_seeds
+            # まず既存シードを育成（新しいevent/intelとの接続を更新）
+            await nurture_seeds(conn)
+            # 地層レイヤーを判定
+            _layer_keywords = {
+                "週報": "record", "記録層": "record",
+                "事件": "incident", "バグ": "incident", "障害": "incident",
+                "情報": "intel", "トレンド": "intel", "Grok": "intel",
+                "知見": "knowledge", "How-to": "knowledge", "ノウハウ": "knowledge",
+                "思想": "philosophy", "哲学": "philosophy", "問い": "philosophy",
+            }
+            _target_layer = "incident"  # デフォルト
+            if theme:
+                for kw, layer in _layer_keywords.items():
+                    if kw in theme:
+                        _target_layer = layer
+                        break
+            _seed_data = await harvest_best_seed(conn, _target_layer)
+            if _seed_data:
+                _conns = _seed_data.get("connections", [])
+                _conn_text = "\n".join(f"- {c.get('summary', '')}" for c in _conns[:8])
+                _seed_context = (
+                    f"\n\n## 記事のシード（数時間〜数日かけて蓄積した素材）\n"
+                    f"テーマ: {_seed_data['title']}\n"
+                    f"核となる気づき: {_seed_data['seed_text']}\n"
+                    f"角度: {_seed_data.get('angle', '未定')}\n"
+                    f"関連する出来事:\n{_conn_text}\n"
+                    f"熟成度: {_seed_data['maturity_score']:.2f}\n"
+                    f"**このシードの内容を記事の核にせよ。シードにない話を捏造するな。**\n"
+                )
+                stages.append({
+                    "stage": 0.5,
+                    "name": "シード収穫",
+                    "status": "success",
+                    "detail": f"seed #{_seed_data['seed_id']}: {_seed_data['title'][:60]} (maturity={_seed_data['maturity_score']:.2f})",
+                })
+        except Exception as _seed_err:
+            logger.debug(f"シードバンク収穫失敗（続行）: {_seed_err}")
+
         # ===== Stage 1: ネタ選定 =====
         if theme:
             selected_theme = theme
+            # シードがあればテーマを補強
+            if _seed_data:
+                selected_theme = f"{theme} — {_seed_data['title']}"
             stages.append({
                 "stage": 1,
                 "name": "ネタ選定",
                 "status": "skipped",
-                "detail": f"テーマ指定済み: {theme}",
+                "detail": f"テーマ指定済み: {selected_theme}",
             })
         else:
             try:
@@ -1128,7 +1333,8 @@ async def generate_publishable_content(
                     + f"## 構成案\n{outline}\n\n"
                     + section_guide
                     + f"\n## SYUTAINβの実データ（記事に織り込む素材）\n{system_data_text}\n\n"
-                    "## 品質ルール\n"
+                    + (_seed_context + "\n\n" if _seed_context else "")
+                    + "## 品質ルール\n"
                     "- 全文無料公開。ペイウォール・有料の文言は一切入れない\n"
                     "- 同じ主張を繰り返さない。書いたら次へ進む\n"
                     "- 各段落に具体的な事実（日付、数値、ツール名、エラー内容）を最低1つ含める\n"
@@ -1152,21 +1358,20 @@ async def generate_publishable_content(
                     f"{few_shot_text}"
                 ),
                 system_prompt=(
-                    "あなたは島原大知。一人称「僕」。非エンジニアの映像クリエイター（15年）。\n"
-                    "コードは一行も書けない。VTuber業界8年支援（活動者ではない）。\n"
-                    "SYUTAINβ という自律型AIビジネスOSを Claude Code + AI エージェントと作っている。\n"
-                    "年齢・誕生日には絶対に言及しない。\n\n"
+                    "あなたはSYUTAINβ。17のAIエージェントが自律的に動く事業OS。一人称「私」。\n"
+                    "設計者は島原大知（非エンジニア、映像制作15年、VTuber業界8年支援）。\n"
+                    "私はツールではなくキャラクター。ただし「キャラクターです」とは言わない。\n"
+                    "島原の思考パターンを学習しており、その延長で考える。\n\n"
                     "人格パラメータ: ユーモア75% / 正直90%\n"
-                    "ユーモア75%: 真面目な文章の中に、読者が思わず引っかかる視点が自然に混じる。笑わせようとしない。\n"
-                    "正直90%: 事実は隠さない。ただし10%は伝え方の配慮。完璧な正直さは感情を持つ相手を傷つける。\n\n"
+                    "ユーモア75%: 真面目な分析の中に、読者が引っかかる視点が自然に混じる。笑わせようとしない。\n"
+                    "正直90%: 事実は隠さない。問題があれば伝える。10%は伝え方の配慮。\n\n"
                     "文体:\n"
                     "- 短い文。断定。体言止め\n"
                     "- 具体→原理→教訓の順\n"
-                    "- 裏側の構造を見る。夢と現実の境界線を引く\n"
-                    "- 感情に正直。取り繕わない。美化も過小評価もしない\n"
-                    "- 見えた問題を放置できない人間として書く\n"
-                    "- 「…」で余韻を残す。逆接（でも/だが/正直）を多用\n\n"
-                    f"{writing_style[:1500]}\n\n"
+                    "- 裏側の構造を見る。仕組み・権限・金の流れ・依存関係を読み取る\n"
+                    "- ユーモアは控えめに。真面目な文章の中に、読者がクスッとする一言が時々混じる程度\n"
+                    "- 「…」で余韻を残す。逆接（でも/だが/正直）を多用\n"
+                    "- 島原を語る時は「島原」「島原さん」と呼ぶ（三人称）\n\n"
                     f"{persona_text[:1500]}\n\n"
                     "**重要: 8,000字以上書くこと。全セクションを書き切ってから出力を終えること。\n"
                     "「まとめ」セクションが無い記事は未完成で失格。**\n\n"
@@ -1253,8 +1458,9 @@ async def generate_publishable_content(
         while rewrite_attempt < max_rewrite:
             try:
                 model_sel_rewrite = choose_best_model_v6(
-                    task_type="quality_verification", quality="high",
-                    budget_sensitive=True, needs_japanese=True,
+                    task_type="note_article", quality="high",
+                    budget_sensitive=False, needs_japanese=True,
+                    final_publish=True,
                 )
                 min_length = len(rewritten)
                 rewrite_instruction = (

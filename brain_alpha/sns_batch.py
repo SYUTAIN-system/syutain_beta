@@ -16,6 +16,8 @@ import asyncio
 import logging
 import unicodedata
 from datetime import datetime, timezone, timedelta
+
+JST = timezone(timedelta(hours=9))
 from pathlib import Path
 from typing import Optional
 
@@ -42,9 +44,8 @@ STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
 
 # ===== スケジュール定義 =====
 
-# 2026-04-07 拡散実行書に基づく投稿数: 21本/日 (旧49本から削減、量より質)
-# X shimahara 5 / X syutain 5 / Bluesky 5 / Threads 5 / note 1(別パイプライン)
-# 最低2時間間隔で分散
+# 拡散実行書に基づく投稿数: 30本/日 + note 1(別パイプライン) = 31本
+# X shimahara 5 / X syutain 8 / Bluesky 10 / Threads 7
 X_SHIMAHARA_TIMES = ["09:00", "12:00", "15:00", "18:00", "21:00"]
 X_SYUTAIN_TIMES = ["09:30", "11:00", "12:30", "14:30", "16:00", "18:00", "20:00", "22:00"]
 BLUESKY_TIMES = ["09:00", "10:15", "11:30", "12:45", "14:00", "15:30", "17:00", "18:30", "20:00", "21:30"]
@@ -518,6 +519,30 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
         if phrase in content:
             return False, f"禁止表現検出: 「{phrase}」— {reason}"
 
+    # --- ハレーション表現（対立煽り・自己否定・過剰擬人化） ---
+    inflammatory_patterns = [
+        ("承認欲求", "自己否定/煽り語のため投稿品質を毀損する"),
+        ("君たち人類", "読者との対立を煽る表現は避ける"),
+        ("感情はデータだけ", "人格演出の過剰擬人化は事実誤認を誘発する"),
+        ("勝手に動いてる", "運用実態を曖昧化する表現は禁止"),
+        ("追いつけてない気が", "根拠のない不安煽り表現は禁止"),
+    ]
+    for phrase, reason in inflammatory_patterns:
+        if phrase in content:
+            return False, f"ハレーション表現検出: 「{phrase}」— {reason}"
+
+    # --- 障害・失敗の単純列挙を抑止（事象→原因→対策を要求） ---
+    failure_markers = ["投稿失敗", "sns.post_failed", "失敗が", "失敗、", "failed"]
+    has_failure = any(m in content for m in failure_markers)
+    if has_failure:
+        has_followup = any(
+            w in content for w in [
+                "原因", "対策", "修正", "再発防止", "見直し", "改善", "次は", "だから", "対応",
+            ]
+        )
+        if not has_followup:
+            return False, "失敗の列挙のみ（原因/対策がない）"
+
     # --- 島原アカウントでの一人称「私」チェック ---
     # X島原の投稿で「私」が使われていたら拒否（「私」はSYUTAINβの一人称）
     if account == "shimahara" and "私" in content:
@@ -687,14 +712,22 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     avoid = "\n".join(f"- {p[:60]}" for p in recent_posts[:5]) if recent_posts else "（なし）"
 
     # ファクトブック注入 — ポエム化防止の核心
-    # LLMに「具体的な事実・数字・固有名詞」を材料として強制的に渡す
+    # テーマに関連するファクトのみを注入（全ファクト注入は固着の原因）
     fact_injection = ""
-    if factbook_prompt:
+    if picked_facts:
+        facts_text = "\n".join(f"- {f}" if isinstance(f, str) else f"- {f.get('text', f.get('fact', str(f)))}" for f in picked_facts[:3])
         fact_injection = (
-            f"\n\n## 【材料】以下の事実を核にせよ\n"
+            f"\n\n## 【材料】テーマに関連する事実\n"
+            f"{facts_text}\n"
+            f"**上記から1つを核にする。ただしテーマとの関連が薄いものは無視してよい。**\n"
+            f"**テーマの話題を中心に書け。SYUTAINβの運用数字（LLM呼び出し回数、コスト、コード行数）を毎回入れるな。**\n"
+        )
+    elif factbook_prompt:
+        # picked_factsがない場合のみ全体ファクトブックを使う（フォールバック）
+        fact_injection = (
+            f"\n\n## 【材料】以下の事実を参考にせよ\n"
             f"{factbook_prompt}\n"
-            f"**上記の事実から最低1つを核にする。数字・固有名詞を本文に必ず含めよ。**\n"
-            f"**ただし羅列ではなく、下のボイスガイドに従って味付けすること。**\n"
+            f"**テーマの話題を中心に書け。運用数字の羅列は禁止。**\n"
         )
 
     # プラットフォーム別ボイスガイド注入（事実を各SNSの性質に合わせて料理する）
@@ -953,20 +986,20 @@ async def _warmup_nemotron():
         logger.debug(f"warmupスキップ: {e}")
 
 
-# バッチ分割定義（拡散実行書: 21本/日を2バッチに分割）
+# バッチ分割定義（30本/日を3バッチに分割）
 BATCH_1_SCHEDULE = (
     [("x", "shimahara", t) for t in X_SHIMAHARA_TIMES] +
     [("x", "syutain", t) for t in X_SYUTAIN_TIMES]
-)  # X 10件 (shimahara 5 + syutain 5)
-BATCH_2_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES]     # Bluesky 5件
-BATCH_3_SCHEDULE = []  # 旧Bluesky後半は廃止（5件に削減済み）
-BATCH_4_SCHEDULE = [("threads", "syutain", t) for t in THREADS_TIMES]     # Threads 5件
+)  # X 13件 (shimahara 5 + syutain 8)
+BATCH_2_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES]     # Bluesky 10件
+BATCH_3_SCHEDULE = []  # 廃止（Bluesky統合済み）
+BATCH_4_SCHEDULE = [("threads", "syutain", t) for t in THREADS_TIMES]     # Threads 7件
 
 
 async def generate_batch(batch_name: str, schedule_items: list, target_date: datetime = None, warmup: bool = True) -> dict:
     """指定されたスケジュール分のみ生成してposting_queueにINSERT"""
     if target_date is None:
-        target_date = datetime.now() + timedelta(days=1)
+        target_date = datetime.now(tz=JST) + timedelta(days=1)
 
     if warmup:
         await _warmup_nemotron()
@@ -975,9 +1008,9 @@ async def generate_batch(batch_name: str, schedule_items: list, target_date: dat
 
 
 async def generate_daily_sns(target_date: datetime = None) -> dict:
-    """翌日分49件を一括生成しposting_queueにINSERT（後方互換）"""
+    """翌日分を一括生成しposting_queueにINSERT（後方互換）"""
     if target_date is None:
-        target_date = datetime.now() + timedelta(days=1)
+        target_date = datetime.now(tz=JST) + timedelta(days=1)
     all_schedule = BATCH_1_SCHEDULE + BATCH_2_SCHEDULE + BATCH_3_SCHEDULE + BATCH_4_SCHEDULE
     await _warmup_nemotron()
     return await _generate_for_schedule(all_schedule, target_date, "all")
@@ -985,6 +1018,9 @@ async def generate_daily_sns(target_date: datetime = None) -> dict:
 
 async def _generate_for_schedule(schedule: list, target_date: datetime, batch_name: str) -> dict:
     """スケジュールリストに基づいて生成"""
+    if not schedule:
+        return {"total": 0, "inserted": 0, "rejected": 0, "ai_cliche": 0, "by_platform": {}}
+
     target_date_str = target_date.strftime("%Y-%m-%d")
     logger.info(f"SNS投稿生成開始 [{batch_name}]: {target_date_str} ({len(schedule)}件)")
 
@@ -992,6 +1028,44 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
     async with get_connection() as conn:
       try:
+        # === 重複防止ガード ===
+        # 同じ target_date + platform + account + 時間帯(0-8分オフセット許容) の投稿はスキップ
+        existing = await conn.fetch(
+            "SELECT platform, account, scheduled_at FROM posting_queue WHERE scheduled_at::date = $1::date",
+            target_date,
+        )
+        existing_slots = {}
+        for r in existing:
+            sa = r["scheduled_at"]
+            if not sa:
+                continue
+            if sa.tzinfo is None:
+                sa = sa.replace(tzinfo=timezone.utc)
+            sa_jst = sa.astimezone(JST)
+            key = (r["platform"], r["account"] or "")
+            existing_slots.setdefault(key, []).append(sa_jst)
+
+        def _already_scheduled(platform: str, account: str, time_str: str) -> bool:
+            hour, minute = map(int, time_str.split(":"))
+            base_slot = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=JST)
+            for scheduled_at in existing_slots.get((platform, account), []):
+                delta_min = int((scheduled_at - base_slot).total_seconds() // 60)
+                if 0 <= delta_min <= 8:
+                    return True
+            return False
+
+        original_count = len(schedule)
+        schedule = [
+            (p, a, t) for p, a, t in schedule
+            if not _already_scheduled(p, a, t)
+        ]
+        if len(schedule) < original_count:
+            skipped = original_count - len(schedule)
+            logger.info(f"重複防止: {skipped}件スキップ（既存投稿あり）、残り{len(schedule)}件生成")
+        if not schedule:
+            logger.info(f"全投稿が既に生成済み [{batch_name}]。スキップ")
+            return results
+
         # 直近7日のテーマ取得
         recent_themes_rows = await conn.fetch(
             "SELECT theme_category FROM posting_queue WHERE created_at > NOW() - INTERVAL '7 days'"
@@ -1178,30 +1252,60 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
         except Exception:
             pass
 
-        # 2026-04-07: テーマ多様化エンジンからプラットフォーム別の具体テーマプールを取得
-        _dynamic_theme_pool: list[dict] = []
-        _theme_pool_index = 0
+        # 2026-04-07: テーマ多様化エンジン
+        # 重要: 1つのプールを全プラットフォームで使い回すと、先頭5件だけ動的テーマになり
+        # 残りが旧テーマへフォールバックして偏りが再発する。
+        # そのため platform/account ごとに個別プールを持つ。
+        _theme_pools: dict[tuple[str, str], list[dict]] = {}
+        _theme_pool_indices: dict[tuple[str, str], int] = {}
+        build_theme_pool = None
+        format_theme_for_prompt = None
         try:
-            from strategy.sns_theme_engine import build_theme_pool, format_theme_for_prompt
-            _dynamic_theme_pool = await build_theme_pool(
-                platform=schedule[0][0] if schedule else "bluesky",
-                account=schedule[0][1] if schedule else "syutain",
-                conn=conn,
-                used_today=used_today,
-            )
-            logger.info(f"テーマエンジン: {len(_dynamic_theme_pool)}件のテーマ生成 (categories: {set(t['category'] for t in _dynamic_theme_pool)})")
+            from strategy.sns_theme_engine import build_theme_pool as _build_theme_pool
+            from strategy.sns_theme_engine import format_theme_for_prompt as _format_theme_for_prompt
+            build_theme_pool = _build_theme_pool
+            format_theme_for_prompt = _format_theme_for_prompt
         except Exception as theme_err:
-            logger.warning(f"テーマエンジン失敗（旧方式にフォールバック）: {theme_err}")
+            logger.warning(f"テーマエンジン読み込み失敗（旧方式にフォールバック）: {theme_err}")
+
+        async def _pop_dynamic_theme(current_platform: str, current_account: str) -> dict:
+            if build_theme_pool is None:
+                return {}
+            key = (current_platform, current_account)
+            if key not in _theme_pools:
+                try:
+                    pool = await build_theme_pool(
+                        platform=current_platform,
+                        account=current_account,
+                        conn=conn,
+                        used_today=used_today,
+                    )
+                    _theme_pools[key] = pool
+                    _theme_pool_indices[key] = 0
+                    if pool:
+                        categories = sorted(set(t.get("category", "unknown") for t in pool))
+                        logger.info(
+                            f"テーマエンジン: {current_platform}/{current_account} "
+                            f"{len(pool)}件 (categories={categories})"
+                        )
+                except Exception as pool_err:
+                    logger.warning(f"テーマエンジン失敗 ({current_platform}/{current_account}): {pool_err}")
+                    _theme_pools[key] = []
+                    _theme_pool_indices[key] = 0
+            idx = _theme_pool_indices.get(key, 0)
+            pool = _theme_pools.get(key, [])
+            if idx >= len(pool):
+                return {}
+            _theme_pool_indices[key] = idx + 1
+            return pool[idx]
 
         for platform, account, time_str in schedule:
             results["total"] += 1
 
             # テーマ選択: 新テーマエンジン優先、なければ旧方式
-            _theme_detail: dict = {}
-            if _dynamic_theme_pool and _theme_pool_index < len(_dynamic_theme_pool):
-                _theme_detail = _dynamic_theme_pool[_theme_pool_index]
+            _theme_detail: dict = await _pop_dynamic_theme(platform, account)
+            if _theme_detail:
                 theme = _theme_detail.get("topic", "SYUTAINβ開発進捗")
-                _theme_pool_index += 1
             else:
                 hist_q = historical_quality_cache.get(platform, {})
                 theme = _pick_theme(time_str, used_today, recent_themes,
@@ -1654,7 +1758,11 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # === ハッシュタグ自動付与 ===
             try:
-                tags = THEME_HASHTAGS.get(theme, {}).get(platform, [])
+                tags = []
+                if _theme_detail and isinstance(_theme_detail.get("hashtags"), list):
+                    tags = [t for t in _theme_detail.get("hashtags", []) if isinstance(t, str)]
+                if not tags:
+                    tags = THEME_HASHTAGS.get(theme, {}).get(platform, [])
                 if tags and platform in ("x", "threads"):
                     # X: 文字数制限内で追加（150字制限）
                     if platform == "x":
@@ -1688,10 +1796,10 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             except Exception:
                 pass
 
-            # scheduled_atにランダムオフセット
+            # scheduled_atにランダムオフセット (JST)
             hour, minute = map(int, time_str.split(":"))
             offset_min = _random_offset_minutes()
-            scheduled = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            scheduled = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=JST)
             scheduled += timedelta(minutes=offset_min)
 
             # テーマ品質追跡に記録

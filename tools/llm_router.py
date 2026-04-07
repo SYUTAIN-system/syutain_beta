@@ -431,7 +431,8 @@ def _choose_best_model_v6_impl(
         "note_article", "product_desc", "booth_description", "note_draft",      # コンテンツ生成
         # 2026-04-06 追加: ローカル LLM から無料クラウドに移行したタスク
         "content", "analysis", "research",                                      # 記事生成/分析/リサーチ
-        "sns_draft", "drafting",                                                # SNS投稿/ドラフト
+        # sns_draft はローカルLLMで十分（OpenRouter 429で全バッチが遅延する問題回避）
+        "drafting",                                                                # ドラフト
         "intel_summary",                                                        # 情報要約
     }
     if task_type in _QWEN36_TASKS and _openrouter_available():
@@ -958,7 +959,9 @@ async def _call_openrouter(prompt: str, system_prompt: str, model: str, max_toke
     for attempt in range(3):
         try:
             resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-            _increment_openrouter_count()
+            _openrouter_record_use()
+            if not resp or not resp.choices:
+                raise ValueError("OpenRouter returned empty choices")
             return {
                 "text": resp.choices[0].message.content or "",
                 "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,

@@ -532,14 +532,14 @@ class NotePublisher:
             return {"success": False, "error": str(e)}
 
     async def _load_approved_package(self, package_id: int) -> Optional[dict]:
-        """承認済みパッケージをDBから取得"""
+        """公開対象パッケージをDBから取得（ready or approved）"""
         try:
             async with get_connection() as conn:
                 row = await conn.fetchrow(
                     """SELECT id, platform, title, body_preview, body_full,
                               price_jpy, tags, category, status
                        FROM product_packages
-                       WHERE id = $1 AND status = 'approved' AND platform = 'note'""",
+                       WHERE id = $1 AND status IN ('approved', 'ready') AND platform = 'note'""",
                     package_id,
                 )
                 if row:
@@ -659,7 +659,8 @@ async def note_auto_publish_check() -> dict:
 
         # 日次公開上限チェック（note.comスパム判定回避）
         # JST基準で判定（サーバTZ非依存）
-        DAILY_PUBLISH_LIMIT = 5
+        # 拡散実行書: 1日1本。地層を積む場所。量より質
+        DAILY_PUBLISH_LIMIT = 1
         async with get_connection() as conn:
             today_published = await conn.fetchval(
                 """SELECT COUNT(*) FROM product_packages
@@ -673,17 +674,18 @@ async def note_auto_publish_check() -> dict:
                 return results
             remaining_today = DAILY_PUBLISH_LIMIT - today_published
 
-            # 承認済みパッケージを取得（残り公開可能数まで）
+            # 品質チェック通過済みパッケージを取得（ready or approved）
+            # 拡散実行書: 品質6層防御通過で承認なし自動公開OK
             packages = await conn.fetch(
                 """SELECT id, title FROM product_packages
-                   WHERE status = 'approved' AND platform = 'note'
-                   ORDER BY approved_at ASC
+                   WHERE status IN ('approved', 'ready') AND platform = 'note'
+                   ORDER BY created_at ASC
                    LIMIT $1""",
                 remaining_today,
             )
 
         if not packages:
-            logger.debug("note自動公開: 承認済みパッケージなし")
+            logger.debug("note自動公開: 対象パッケージなし")
             return results
 
         publisher = NotePublisher()

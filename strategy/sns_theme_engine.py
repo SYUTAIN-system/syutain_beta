@@ -38,24 +38,24 @@ logger = logging.getLogger("syutain.sns_theme_engine")
 # 2026-04-07 更新: 21本/日体制に合わせた配分
 CATEGORY_DISTRIBUTION = {
     "x_shimahara": {
-        # 島原個人 5本: 体験・気づき中心
+        # 島原個人 5本: 体験・違和感・学びを優先
         "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
-        "philosophy_bip": 1, "shimahara_fields": 1,
+        "philosophy_bip": 2, "shimahara_fields": 0,
     },
     "x_syutain": {
-        # SYUTAINβ公式 8本: データドリブン+異常な一言
-        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 0,
+        # SYUTAINβ公式 8本: データ偏重を抑え、原因/設計判断を増やす
+        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 2,
         "philosophy_bip": 1, "shimahara_fields": 2,
     },
     "bluesky": {
         # 技術コミュニティ 10本: 深い洞察
-        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 2,
+        "syutain_ops": 1, "ai_tech_trend": 3, "creator_media": 3,
         "philosophy_bip": 2, "shimahara_fields": 1,
     },
     "threads": {
-        # カジュアル 7本: 読者との距離が近い
-        "syutain_ops": 1, "ai_tech_trend": 1, "creator_media": 2,
-        "philosophy_bip": 1, "shimahara_fields": 2,
+        # カジュアル 7本: 共感+学び。運用メトリクス一辺倒を避ける
+        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
+        "philosophy_bip": 2, "shimahara_fields": 2,
     },
 }
 
@@ -69,6 +69,10 @@ _SYUTAIN_OPS_ANGLES = [
     "夜間モードと日中モードの切り替えで起きること",
     "4台のPCの役割分担の進化",
     "CLAUDE.md のルールが増えた理由",
+    "投稿失敗を再現して原因を1つ潰した記録",
+    "ready記事が詰まった日に優先順位をどう決めたか",
+    "同じ数字の投稿が増えた日にテーマ設計を見直した話",
+    "自動化を止める判断をした理由",
 ]
 
 # creator_media テーマの静的候補（intel がない場合のフォールバック）
@@ -76,6 +80,8 @@ _CREATOR_FALLBACK = [
     {"topic": "AI映像制作ツールの現在地", "angle": "Runway/Sora/Kling等の実体験ベース比較", "category": "creator_media"},
     {"topic": "VTuber業界のAI活用", "angle": "モデリング/配信/マネジメントのどこにAIが入るか", "category": "creator_media"},
     {"topic": "ドローン×AIの可能性", "angle": "空撮/検査/農業での実用例", "category": "creator_media"},
+    {"topic": "AI迎撃ドローン映像を見て引いた理由", "angle": "演算が構図を決める時代にクリエイターが残す価値", "category": "creator_media"},
+    {"topic": "AIが6万行を書いた時、人間は何を設計するか", "angle": "設計書の書き直しから見えた責任境界", "category": "creator_media"},
     {"topic": "写真のAI編集", "angle": "Lightroom AI/Topaz等の実体験", "category": "creator_media"},
     {"topic": "広告制作とAI", "angle": "コピー生成/ビジュアル生成の現場", "category": "creator_media"},
     {"topic": "映画制作のAI革命", "angle": "プリプロ/VFX/カラグレのどこが変わるか", "category": "creator_media"},
@@ -86,6 +92,8 @@ _PHILOSOPHY_FALLBACK = [
     {"topic": "Build in Publicの本当の意味", "angle": "恥ずかしい記録こそ価値がある理由", "category": "philosophy_bip"},
     {"topic": "AIに「出来ました」と言われた時", "angle": "信じるか検証するかの判断基準", "category": "philosophy_bip"},
     {"topic": "非エンジニアの武器", "angle": "コードは書けないけど壊れ方は想像できる", "category": "philosophy_bip"},
+    {"topic": "失敗回数を公開する意味", "angle": "失敗の数より再発防止の設計を語る", "category": "philosophy_bip"},
+    {"topic": "任せるほど忙しくなる逆説", "angle": "自動化の運用コストが委譲コストを超える瞬間", "category": "philosophy_bip"},
     {"topic": "設計書を25回書き直した話", "angle": "なぜドキュメントファーストが必須だったか", "category": "philosophy_bip"},
     {"topic": "AIエージェントの失敗パターン", "angle": "Gartner/McKinseyの予測と自分の実体験の交差", "category": "philosophy_bip"},
     {"topic": "完璧を待たずに公開する判断", "angle": "デッドコード207個あっても出す理由", "category": "philosophy_bip"},
@@ -95,6 +103,7 @@ _PHILOSOPHY_FALLBACK = [
 _SHIMAHARA_FALLBACK = [
     {"topic": "経営判断とAI", "angle": "提案エンジンが出した提案を人間がどう裁くか", "category": "shimahara_fields"},
     {"topic": "個人事業×AI自動化", "angle": "何を委譲して何を握り続けるか", "category": "shimahara_fields"},
+    {"topic": "自動化の責任境界", "angle": "AIに委譲しても最終責任は人が持つ設計", "category": "shimahara_fields"},
     {"topic": "マーケティングのAI化", "angle": "SNS投稿49件/日を自動生成する実験結果", "category": "shimahara_fields"},
     {"topic": "メディアの未来", "angle": "AIがコンテンツを生成する時代の人間の役割", "category": "shimahara_fields"},
     {"topic": "文化産業とテクノロジー", "angle": "クリエイターがAIを使いこなす vs AIに置き換えられる", "category": "shimahara_fields"},
@@ -128,8 +137,8 @@ async def build_theme_pool(
         grok_items = await conn.fetch(
             """SELECT title, summary, url, metadata FROM intel_items
                WHERE source IN ('grok_x_research', 'trend_detector', 'overseas_trend')
-               AND created_at > NOW() - INTERVAL '48 hours'
-               AND review_flag = 'actionable'
+               AND created_at > NOW() - INTERVAL '72 hours'
+               AND review_flag IN ('actionable', 'reviewed')
                ORDER BY importance_score DESC, created_at DESC
                LIMIT $1""",
             ai_tech_count * 3,  # 候補を多めに取って重複回避

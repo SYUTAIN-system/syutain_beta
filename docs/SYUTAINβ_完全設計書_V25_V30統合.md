@@ -222,7 +222,7 @@ SYUTAINβは4台のPCを**Phase 1初日から全て連携**させて動作する
 | 推論サーバー | Ollama v0.17.7+ |
 | KV Cache最適化 | **OLLAMA_FLASH_ATTENTION=1, OLLAMA_KV_CACHE_TYPE=q8_0（VRAM約50%削減、perplexity +0.004）** |
 | プロセス管理 | systemd（Restart=always） |
-| ネットワーク | Tailscale IP: 100.99.122.69 / NATS Server + JetStream（4ノードRAFTクラスタ参加） |
+| ネットワーク | Tailscale IP: DELTA_TAILSCALE_IP / NATS Server + JetStream（4ノードRAFTクラスタ参加） |
 | 特記事項 | 48GB RAMの大容量を活かし、CPU推論バックアップとしても機能。GTX 980Ti（Maxwell世代）はBF16/FP16テンサーコア非対応のため、Qwen3.5-4Bが最適解。**GPU推論速度が8 tok/s未満の場合、llama.cpp CPU推論にフォールバック（48GB RAMで十分動作、3-5 tok/s）。feature_flagsの`delta_inference_mode`で`gpu`/`cpu`/`auto`を切替可能** |
 
 ## 2.2 ノード間通信アーキテクチャ（V25：全4台Phase 1完全接続、V30統合版）
@@ -2325,8 +2325,8 @@ cluster {
     listen: 0.0.0.0:6222
     routes: [
         nats-route://BRAVO_TAILSCALE_IP:6222  # BRAVO
-        nats-route://100.98.82.108:6222  # CHARLIE
-        nats-route://100.99.122.69:6222  # DELTA
+        nats-route://CHARLIE_TAILSCALE_IP:6222  # CHARLIE
+        nats-route://DELTA_TAILSCALE_IP:6222  # DELTA
     ]
 }
 EOF
@@ -2374,8 +2374,8 @@ cluster {
     listen: 0.0.0.0:6222
     routes: [
         nats-route://ALPHA_TAILSCALE_IP:6222
-        nats-route://100.98.82.108:6222
-        nats-route://100.99.122.69:6222
+        nats-route://CHARLIE_TAILSCALE_IP:6222
+        nats-route://DELTA_TAILSCALE_IP:6222
     ]
 }
 EOF
@@ -2457,7 +2457,7 @@ cluster {
     routes: [
         nats-route://ALPHA_TAILSCALE_IP:6222
         nats-route://BRAVO_TAILSCALE_IP:6222
-        nats-route://100.99.122.69:6222
+        nats-route://DELTA_TAILSCALE_IP:6222
     ]
 }
 EOF
@@ -2479,7 +2479,7 @@ ollama run qwen3.5:9b "こんにちは。テストです。" --verbose
 # 7. Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
-tailscale ip -4  # 100.98.82.108 確認
+tailscale ip -4  # CHARLIE_TAILSCALE_IP 確認
 ```
 
 ### DELTA（Xeon E5 + GTX 980Ti 6GB + 48GB RAM）
@@ -2512,7 +2512,7 @@ cluster {
     routes: [
         nats-route://ALPHA_TAILSCALE_IP:6222
         nats-route://BRAVO_TAILSCALE_IP:6222
-        nats-route://100.98.82.108:6222
+        nats-route://CHARLIE_TAILSCALE_IP:6222
     ]
 }
 EOF
@@ -2543,7 +2543,7 @@ cd llama.cpp && cmake -B build && cmake --build build --config Release && cd ..
 # 8. Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
-tailscale ip -4  # 100.99.122.69 確認
+tailscale ip -4  # DELTA_TAILSCALE_IP 確認
 ```
 
 ### 全ノード相互疎通確認
@@ -2551,8 +2551,8 @@ tailscale ip -4  # 100.99.122.69 確認
 ```bash
 # ALPHA上で実行
 ping -c 3 $(tailscale ip -4 bravo)   # BRAVO
-ping -c 3 100.98.82.108              # CHARLIE
-ping -c 3 100.99.122.69              # DELTA
+ping -c 3 CHARLIE_TAILSCALE_IP              # CHARLIE
+ping -c 3 DELTA_TAILSCALE_IP              # DELTA
 
 # NATS疎通確認（全ノード起動後）
 nats sub "test.>" &
@@ -2560,8 +2560,8 @@ nats pub test.hello "V25 connectivity test"
 
 # ローカルLLM疎通確認（ALPHAにはOllamaなし）
 curl http://$(tailscale ip -4 bravo):11434/api/tags  # BRAVO Ollama
-curl http://100.98.82.108:11434/api/tags              # CHARLIE Ollama
-curl http://100.99.122.69:11434/api/tags              # DELTA Ollama
+curl http://CHARLIE_TAILSCALE_IP:11434/api/tags              # CHARLIE Ollama
+curl http://DELTA_TAILSCALE_IP:11434/api/tags              # DELTA Ollama
 ```
 
 ### ALPHA→各ノードのSSH鍵設定（Claude Codeがssh経由でデプロイするために必要）
@@ -2573,13 +2573,13 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""  # パスフレーズなし
 # 各ノードに公開鍵を配布（Tailscale IP経由）
 # V30統合：SSHユーザー名は環境変数 $SSH_USER で管理
 ssh-copy-id -i ~/.ssh/id_ed25519.pub $SSH_USER@$(tailscale ip -4 bravo)
-ssh-copy-id -i ~/.ssh/id_ed25519.pub $SSH_USER@100.98.82.108  # CHARLIE
-ssh-copy-id -i ~/.ssh/id_ed25519.pub $SSH_USER@100.99.122.69  # DELTA
+ssh-copy-id -i ~/.ssh/id_ed25519.pub $SSH_USER@CHARLIE_TAILSCALE_IP  # CHARLIE
+ssh-copy-id -i ~/.ssh/id_ed25519.pub $SSH_USER@DELTA_TAILSCALE_IP  # DELTA
 
 # 接続テスト
 ssh $SSH_USER@$(tailscale ip -4 bravo) "hostname"  # bravoと表示
-ssh $SSH_USER@100.98.82.108 "hostname"             # charlieと表示
-ssh $SSH_USER@100.99.122.69 "hostname"             # deltaと表示
+ssh $SSH_USER@CHARLIE_TAILSCALE_IP "hostname"             # charlieと表示
+ssh $SSH_USER@DELTA_TAILSCALE_IP "hostname"             # deltaと表示
 ```
 
 ## 18.3 PHASE 0-C：設定ファイル確認（.envは作成済み）
