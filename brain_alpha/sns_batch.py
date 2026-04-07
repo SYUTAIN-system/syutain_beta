@@ -132,6 +132,142 @@ PLATFORM_QUALITY_THRESHOLDS = {
 }
 DEFAULT_QUALITY_THRESHOLD = 0.60
 
+
+# ===== V2: 素材選定 + 虚偽フィルター =====
+
+async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list[str]:
+    """テーマに関連する具体的素材を最大5件選定。LLMはこの素材だけで投稿を書く"""
+    materials = []
+
+    # 1. intel_items からテーマ関連を検索（Grok/情報収集パイプライン由来）
+    try:
+        keywords = [w for w in theme.replace("【", "").replace("】", "").split() if len(w) >= 2][:3]
+        for kw in keywords:
+            intels = await conn.fetch(
+                """SELECT title, summary, url FROM intel_items
+                WHERE (title ILIKE $1 OR summary ILIKE $1)
+                AND created_at > NOW() - INTERVAL '72 hours'
+                AND review_flag IN ('actionable', 'reviewed')
+                ORDER BY importance_score DESC LIMIT 2""",
+                f"%{kw}%",
+            )
+            for i in intels:
+                line = f"[外部情報] {i['title']}: {(i['summary'] or '')[:150]}"
+                if i.get('url'):
+                    line += f" ({i['url'][:100]})"
+                if line not in materials:
+                    materials.append(line)
+            if len(materials) >= 2:
+                break
+    except Exception:
+        pass
+
+    # 2. event_log から具体的な出来事（直近24h）
+    try:
+        events = await conn.fetch(
+            """SELECT event_type, category, payload FROM event_log
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+            AND category NOT IN ('heartbeat', 'routine')
+            ORDER BY created_at DESC LIMIT 3"""
+        )
+        for e in events:
+            payload_str = str(e['payload'] or '')[:150]
+            materials.append(f"[出来事] {e['category']}/{e['event_type']}: {payload_str}")
+    except Exception:
+        pass
+
+    # 3. 島原との対話ログ（哲学・判断の素材）
+    try:
+        dialogues = await conn.fetch(
+            """SELECT daichi_message, extracted_philosophy FROM daichi_dialogue_log
+            WHERE created_at > NOW() - INTERVAL '48 hours'
+            AND extracted_philosophy IS NOT NULL AND extracted_philosophy != ''
+            ORDER BY created_at DESC LIMIT 2"""
+        )
+        for d in dialogues:
+            msg = (d['daichi_message'] or '')[:100]
+            phil = (d['extracted_philosophy'] or '')[:100]
+            materials.append(f"[島原の発言] 「{msg}」 → {phil}")
+    except Exception:
+        pass
+
+    # 4. テーマエンジンの素材（angle, key_data, source_url）
+    # _theme_detail から直接取得（呼び出し元で渡す）
+
+    if not materials:
+        materials.append("[フォールバック] SYUTAINβの直近の運用状況を1つだけ報告")
+
+    return materials[:5]
+
+
+# 虚偽フィルター（正規表現ベース、LLM不使用で高速）
+import re as _re_falsity
+
+_FALSITY_PATTERNS = [
+    # 使っていないツール名
+    (_re_falsity.compile(r'(?:Grafana|Prometheus|Datadog|Sentry|NewRelic|Splunk|Restic)\s*(?:で|を|に|の|が)', _re_falsity.IGNORECASE),
+     "未使用ツール名"),
+    # 組織体制の捏造
+    (_re_falsity.compile(r'(?:運用チーム|開発チーム|開発メンバー|同僚|離職率|部署|担当者が)'),
+     "組織捏造（個人開発）"),
+    # プログラミング経験の捏造
+    (_re_falsity.compile(r'(?:コードを書[いくけ]|プログラミングし|コーディングし|実装し(?:た|て))'),
+     "コーディング捏造"),
+    # 島原のVTuber活動捏造
+    (_re_falsity.compile(r'(?:VTuberとして活動|配信し(?:た|て)|VTuberデビュー)'),
+     "VTuber活動捏造"),
+    # ハーネスエンジニアリングの命名捏造
+    (_re_falsity.compile(r'(?:命名し|考案し|発明し|提唱し|誕生させ)(?:た|て)'),
+     "自己命名捏造"),
+]
+
+
+def check_falsity(text: str) -> list[str]:
+    """投稿文の虚偽をチェック。検出された問題のリストを返す（空なら問題なし）"""
+    issues = []
+    for pattern, label in _FALSITY_PATTERNS:
+        if pattern.search(text):
+            issues.append(label)
+    return issues
+
+
+def check_account_voice(text: str, platform: str, account: str) -> float:
+    """アカウントの声との一致度を返す（-0.1〜+0.1のスコア調整値）"""
+    adjustment = 0.0
+
+    if platform == "x" and account == "shimahara":
+        # 島原アカウント: 一人称「僕」「自分」、思考特性キーワード
+        if "僕" in text or "自分" in text:
+            adjustment += 0.03
+        if "私" in text and "僕" not in text:
+            adjustment -= 0.05  # 島原は「私」を使わない
+        # 構造的思考キーワード
+        for kw in ["構造", "境界", "設計", "正直", "本質", "裏側"]:
+            if kw in text:
+                adjustment += 0.01
+                break
+        # ポエム検出（減点）
+        if any(w in text for w in ["光が", "風が", "静寂", "紡ぐ", "息を"]):
+            adjustment -= 0.05
+
+    elif account in ("syutain", "syutain_beta"):
+        # SYUTAINβアカウント: 一人称「私」または主語なし
+        if "私" in text or "私の" in text:
+            adjustment += 0.02
+        if "僕" in text:
+            adjustment -= 0.05  # SYUTAINβは「僕」を使わない
+        # AI自己認識表現（加点）
+        for kw in ["島原さん", "記録されている", "分析した", "検出した", "event_log", "報告"]:
+            if kw in text:
+                adjustment += 0.02
+                break
+        # 「…」で考え込む素振り（加点）
+        if "…" in text:
+            adjustment += 0.01
+
+    return max(-0.1, min(0.1, adjustment))
+
+
 # === テーマ品質追跡（Strategy: 低品質テーマの回避） ===
 # バッチ実行中にテーマ×プラットフォームの品質を追跡
 # { (theme, platform): [score1, score2, ...] }
@@ -732,7 +868,8 @@ def _load_writing_style() -> str:
 def _build_prompt(platform: str, account: str, theme: str, time_str: str,
                   writing_style: str, few_shot: list[str], recent_posts: list[str],
                   persona_hint: str = "", factbook_prompt: str = "",
-                  picked_facts: list = None, buzz_prompt: str = "") -> tuple[str, str]:
+                  picked_facts: list = None, buzz_prompt: str = "",
+                  materials: list = None) -> tuple[str, str]:
     """platform+accountに応じたプロンプトを構築。(system_prompt, user_prompt)を返す"""
 
     period = _get_time_period(time_str)
@@ -765,6 +902,16 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"\n\n## 【材料】以下の事実を参考にせよ\n"
             f"{factbook_prompt}\n"
             f"**テーマの話題を中心に書け。運用数字の羅列は禁止。**\n"
+        )
+
+    # V2: 素材注入（テーマに関連する具体的素材。LLMはこれだけで書く）
+    materials_injection = ""
+    if materials:
+        mat_text = "\n".join(f"- {m}" for m in materials[:5])
+        materials_injection = (
+            f"\n\n## 【素材】以下の事実を元に投稿を書け\n"
+            f"{mat_text}\n"
+            f"**上記の素材にない情報は書くな。素材だけで投稿を構成しろ。**\n"
         )
 
     # プラットフォーム別ボイスガイド注入（事実を各SNSの性質に合わせて料理する）
@@ -905,6 +1052,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- {ellipsis_hint}\n"
             f"{'- ' + bracket_hint if bracket_hint else ''}\n"
             f"{'- ' + oneword_hint if oneword_hint else ''}\n"
+            f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
             f"{buzz_injection}"
@@ -948,6 +1096,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 日本語150字以内（厳守）。テーマ: 【{theme}】\n"
             f"- 具体的な数字を最低1つ含める\n"
             f"- 時間帯: {time_str}。長さ: {length_hint}\n"
+            f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
             f"{buzz_injection}"
@@ -973,6 +1122,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 300字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
             f"{buzz_injection}"
@@ -997,6 +1147,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 500字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
             f"{buzz_injection}"
@@ -1371,11 +1522,28 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             # few-shot（X島原のみ）
             few_shot = random.sample(few_shot_pool, min(3, len(few_shot_pool))) if platform == "x" and account == "shimahara" else []
 
-            # プロンプト構築（factbookでポエム化を構造的に防止）
+            # V2: テーマに関連する素材を選定（LLMはこの素材だけで書く）
+            _materials = []
+            try:
+                _theme_cat = _theme_detail.get("category", "") if _theme_detail else ""
+                _materials = await pick_materials_for_post(theme, _theme_cat, conn)
+                # テーマエンジンの素材も追加
+                if _theme_detail:
+                    if _theme_detail.get("angle"):
+                        _materials.insert(0, f"[テーマ角度] {_theme_detail['angle']}")
+                    if _theme_detail.get("key_data"):
+                        _materials.insert(0, f"[キーデータ] {_theme_detail['key_data']}")
+                    if _theme_detail.get("source_url"):
+                        _materials.append(f"[ソースURL] {_theme_detail['source_url']}")
+            except Exception as mat_err:
+                logger.debug(f"素材選定失敗（続行）: {mat_err}")
+
+            # ファクトブック（フォールバック用、素材が少ない場合のみ）
             _picked_facts = []
             try:
-                from tools.syutain_factbook import pick_facts_for_post
-                _picked_facts = pick_facts_for_post(factbook_facts, n=3, theme=theme)
+                if len(_materials) < 2:
+                    from tools.syutain_factbook import pick_facts_for_post
+                    _picked_facts = pick_facts_for_post(factbook_facts, n=3, theme=theme)
             except Exception:
                 pass
 
@@ -1390,9 +1558,10 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             system_prompt, user_prompt = _build_prompt(
                 platform, account, theme, time_str, writing_style, few_shot, recent_posts,
                 persona_hint=persona_hint + ("\n\n" + _theme_injection if _theme_injection else ""),
-                factbook_prompt=factbook_prompt,
+                factbook_prompt=factbook_prompt if len(_materials) < 2 else "",
                 picked_facts=_picked_facts,
                 buzz_prompt=buzz_prompt,
+                materials=_materials,
             )
 
             # === モデル選択（固着時はCloud APIにフォールバック）===
@@ -1857,6 +2026,23 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # テーマ品質追跡に記録
             _track_theme_quality(theme, platform, quality)
+
+            # V2: 虚偽フィルター（正規表現ベース、高速）
+            falsity_issues = check_falsity(draft)
+            if falsity_issues:
+                logger.warning(f"虚偽検出 ({platform}/{account}): {falsity_issues}")
+                results["rejected"] += 1
+                await conn.execute(
+                    """INSERT INTO posting_queue
+                       (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    platform, account, draft, scheduled, "falsity_blocked", quality, theme,
+                )
+                continue
+
+            # V2: アカウント一致チェック（スコア調整）
+            voice_adj = check_account_voice(draft, platform, account)
+            quality += voice_adj
 
             # 品質スコアに基づく承認判定（プラットフォーム別閾値）
             if quality >= quality_threshold:
