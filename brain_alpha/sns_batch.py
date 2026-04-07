@@ -194,10 +194,65 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
     # 4. テーマエンジンの素材（angle, key_data, source_url）
     # _theme_detail から直接取得（呼び出し元で渡す）
 
+    # 5. persona_memory（島原の学習済み哲学・判断パターン）
+    try:
+        memories = await conn.fetch(
+            """SELECT content, category FROM persona_memory
+            WHERE category IN ('philosophy', 'design_decision', 'lesson_learned', 'working_fact')
+            AND created_at > NOW() - INTERVAL '7 days'
+            ORDER BY priority_tier DESC, created_at DESC LIMIT 2"""
+        )
+        for m in memories:
+            content = (m['content'] or '')[:150]
+            materials.append(f"[島原の記憶/{m['category']}] {content}")
+    except Exception:
+        pass
+
+    # 6. 記事シードバンク（熟成中のテーマとの接続）
+    try:
+        seeds = await conn.fetch(
+            """SELECT title, seed_text, connections FROM article_seeds
+            WHERE status = 'germinating' AND maturity_score >= 0.3
+            ORDER BY maturity_score DESC LIMIT 2"""
+        )
+        for s in seeds:
+            seed_text = (s['seed_text'] or '')[:150]
+            materials.append(f"[熟成中のネタ] {s['title']}: {seed_text}")
+    except Exception:
+        pass
+
+    # 7. 過去の高評価投稿（エンゲージメントが高かった構造を参考に）
+    try:
+        top_posts = await conn.fetch(
+            """SELECT content, theme_category, platform FROM posting_queue
+            WHERE status = 'posted' AND quality_score >= 0.75
+            AND posted_at > NOW() - INTERVAL '14 days'
+            ORDER BY quality_score DESC LIMIT 2"""
+        )
+        for p in top_posts:
+            body = (p['content'] or '')[:100]
+            materials.append(f"[高評価投稿/{p['platform']}] {body}")
+    except Exception:
+        pass
+
+    # 8. failure_memory（過去の障害記録 — 事件テーマの生々しい素材）
+    try:
+        failures = await conn.fetch(
+            """SELECT failure_type, context, resolution FROM failure_memory
+            WHERE created_at > NOW() - INTERVAL '7 days'
+            ORDER BY created_at DESC LIMIT 2"""
+        )
+        for f in failures:
+            ctx = (f['context'] or '')[:100]
+            res = (f['resolution'] or '未解決')[:80]
+            materials.append(f"[障害記録] {f['failure_type']}: {ctx} → {res}")
+    except Exception:
+        pass
+
     if not materials:
         materials.append("[フォールバック] SYUTAINβの直近の運用状況を1つだけ報告")
 
-    return materials[:5]
+    return materials[:7]
 
 
 # 虚偽フィルター（正規表現ベース、LLM不使用で高速）
