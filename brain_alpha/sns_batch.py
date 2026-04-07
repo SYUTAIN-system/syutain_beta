@@ -72,20 +72,47 @@ THEME_POOL = [
 ]
 
 # テーマ別ハッシュタグ（プラットフォーム別、最大2個）
-THEME_HASHTAGS = {
-    "AI技術": {"x": ["#AI開発", "#個人開発"], "threads": ["#AI", "#テック", "#個人開発", "#自動化", "#AIエージェント"]},
-    "開発進捗": {"x": ["#SYUTAINβ", "#AI開発"], "threads": ["#AI", "#開発記録", "#非エンジニア", "#個人開発", "#BuildInPublic"]},
-    "VTuber業界": {"x": ["#VTuber"], "threads": ["#VTuber", "#クリエイター", "#映像制作", "#エンタメ", "#配信"]},
-    "哲学/思考": {"x": [], "threads": ["#思考", "#エッセイ", "#AI時代", "#働き方", "#自己成長"]},
-    "ビジネス": {"x": ["#AI事業"], "threads": ["#ビジネス", "#AI活用", "#起業", "#フリーランス", "#副業"]},
-    "映画/映像": {"x": ["#映像制作"], "threads": ["#映像", "#クリエイター", "#VFX", "#動画編集", "#カラグレ"]},
-    "業界批評": {"x": ["#AI"], "threads": ["#AI", "#テック", "#業界分析", "#トレンド", "#テクノロジー"]},
-    "自己内省": {"x": [], "threads": ["#エッセイ", "#日記", "#振り返り", "#成長", "#挑戦"]},
-    "日常": {"x": [], "threads": ["#日常", "#フリーランス", "#クリエイター"]},
-    "音楽/趣味": {"x": [], "threads": ["#趣味", "#SunoAI", "#作詞"]},
-    "カメラ/写真": {"x": ["#写真"], "threads": ["#カメラ", "#写真", "#撮影"]},
-    "雑談": {"x": [], "threads": ["#雑談", "#つぶやき"]},
+# テーマ→ハッシュタグ: テーマエンジンの5カテゴリ + テーマ文字列からキーワードマッチで選定
+# ハッシュタグは生成後に後処理で付与（LLMには生成させない）
+_HASHTAG_RULES = {
+    # カテゴリベース（テーマエンジンのcategory）
+    "syutain_ops": {"x": ["#AI開発"], "bluesky": ["#AI"], "threads": ["#AI開発", "#個人開発"]},
+    "ai_tech_trend": {"x": ["#AI"], "bluesky": ["#AI"], "threads": ["#AI", "#テック"]},
+    "creator_media": {"x": ["#映像制作"], "bluesky": ["#クリエイター"], "threads": ["#クリエイター", "#映像制作"]},
+    "philosophy_bip": {"x": [], "bluesky": [], "threads": ["#BuildInPublic"]},
+    "shimahara_fields": {"x": [], "bluesky": [], "threads": ["#ビジネス"]},
 }
+# キーワードベース（テーマ文字列に含まれるキーワードで追加タグ）
+_HASHTAG_KEYWORD_MAP = {
+    "VTuber": "#VTuber",
+    "ドローン": "#ドローン",
+    "映画": "#映像制作",
+    "写真": "#写真",
+    "広告": "#マーケティング",
+    "Grok": "#AI",
+    "Claude": "#AI",
+    "非エンジニア": "#非エンジニア",
+}
+
+
+def _select_hashtags(theme: str, theme_category: str, platform: str, max_tags: int = 2) -> list[str]:
+    """テーマ内容に基づいてハッシュタグを最大max_tags個選定"""
+    tags = []
+    # カテゴリベースのタグ
+    cat_tags = _HASHTAG_RULES.get(theme_category, {}).get(platform, [])
+    tags.extend(cat_tags)
+    # キーワードベースの追加タグ
+    for kw, tag in _HASHTAG_KEYWORD_MAP.items():
+        if kw in theme and tag not in tags:
+            tags.append(tag)
+    # 重複除去 + 最大数制限
+    seen = set()
+    unique = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique[:max_tags]
 
 # 時間帯別テーマ重み
 TIME_THEME_WEIGHTS = {
@@ -99,11 +126,11 @@ TIME_THEME_WEIGHTS = {
 # Blueskyは短文のため persona_score / structure_score が低くなりやすい
 # Threadsはカジュアルなため完結性スコアが低くなりやすい
 PLATFORM_QUALITY_THRESHOLDS = {
-    "x": 0.68,        # X: 高品質要求（ブランド直結）
-    "bluesky": 0.62,  # Bluesky: 短文のためスコアが構造的に低い
-    "threads": 0.64,  # Threads: カジュアル寄り
+    "x": 0.60,        # X: 0.68→0.60に緩和（2026-04-07: 品質改善まで暫定）
+    "bluesky": 0.58,  # Bluesky: 0.62→0.58に緩和
+    "threads": 0.58,  # Threads: 0.64→0.58に緩和
 }
-DEFAULT_QUALITY_THRESHOLD = 0.70
+DEFAULT_QUALITY_THRESHOLD = 0.60
 
 # === テーマ品質追跡（Strategy: 低品質テーマの回避） ===
 # バッチ実行中にテーマ×プラットフォームの品質を追跡
@@ -757,10 +784,11 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     content_structure_guide = (
         "\n【投稿の構造ルール（daichi_content_patterns準拠）】\n"
         "- 冒頭は毎回異なるパターンで入れ（同じ導入は禁止）。以下からランダムに選べ:\n"
-        "  A) 具体的な数字から入る（例:「54,155行。全部AIが書いた。僕はゼロ行」「月987円のサーバー4台で20体のAIが動いてる」「1日20回デプロイした。壊れたの3回」）\n"
-        "  B) 実際に起きたトラブルから入る（例:「schedulerが2重起動してた。3日間誰も気づかなかった」「deepseekのreasoningパラメータが間違ってて全botが沈黙した」「Discord botが朝9時に全員落ちた。原因はタイムゾーン」）\n"
-        "  C) 自分の体験を断言（例:「設計書25回書き直した。まだ直す」「さっきClaude Codeがコード壊した。直すのもClaude Code」「コード読めないのにコードレビューしてる矛盾」）\n"
-        "  D) 運用の生々しい瞬間（例:「朝5時、Slackにアラート6件」「CORTEXのheartbeatが10分止まった。MEDULLAが代理CEOになった」「Ollamaのメモリが溢れてqwen3.5が応答しなくなった」）\n"
+        "  A) テーマに直結する具体的事実から入る（数字だけの羅列はNG）\n"
+        "  B) 実際に起きたトラブルや発見から入る\n"
+        "  C) 自分の体験・判断を断言する（「〜した」「〜だった」）\n"
+        "  D) 問いかけから入る（「なぜ〜なのか」「〜は本当か」）\n"
+        "- **重要: LLM呼び出し回数・コスト・コード行数は毎回入れるな。テーマの話題を中心に書け。運用数字は10投稿に1回程度。**\n"
         "- **絶対禁止フレーズ（含むと自動リジェクト）**: 「風+止」「画面は真っ暗/黒」「息を殺」「光の粒子」「指先を伸ばす」「肩を落とし」「紡ぐ」「夕暮れ+デスク」「湯気+コーヒー/カップ」「静かに+光/息」「未完成の+シナリオ/映像」「ドローンのプロペラ」「赤文字/赤い文字」「N回目の緊急シャットダウン/強制停止」「空は真っ暗/紺」「誰もいない」「バッテリーが切れ」「画面にエラーログが流れ」。\n"
         "- **絶対禁止**: 映像制作メタファーの抽象ポエム全般。「デスクで光が〜」「画面が静かに〜」系は全てリジェクト。\n"
         "- **絶対禁止**: 情景描写・雰囲気描写で始まる投稿。「朝の光が〜」「夜の静寂の中〜」「モニターの明かりだけが〜」は全てリジェクト。\n"
@@ -777,7 +805,8 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 「最短で月100万」「革命」「覇権」「無双」\n"
         "- 「〜について考えてみました」「いかがでしょうか」「深掘り」「させていただきます」\n"
         "- 「特筆すべき」「画期的な」「注目すべきは」\n"
-        "- 絵文字3個以上禁止。ハッシュタグ3個以上禁止。箇条書き連打禁止。\n"
+        "- 絵文字3個以上禁止。箇条書き連打禁止。\n"
+        "- **ハッシュタグは本文に含めるな。ハッシュタグは後処理で自動付与される。**\n"
         "- 情景描写ポエム全般: 「〜が光る」「〜が静まる」「〜の向こうに」「〜が揺れる」\n"
     )
 
@@ -1002,7 +1031,7 @@ BATCH_1_SCHEDULE = (
     [("x", "syutain", t) for t in X_SYUTAIN_TIMES]
 )  # X 13件 (shimahara 5 + syutain 8)
 BATCH_2_SCHEDULE = [("bluesky", "syutain", t) for t in BLUESKY_TIMES]     # Bluesky 10件
-BATCH_3_SCHEDULE = []  # 廃止（Bluesky統合済み）
+BATCH_3_SCHEDULE = BATCH_1_SCHEDULE.copy()  # X予備（batch1失敗時のフォールバック、dedup guardで既存分はスキップ）
 BATCH_4_SCHEDULE = [("threads", "syutain", t) for t in THREADS_TIMES]     # Threads 7件
 
 
@@ -1015,6 +1044,22 @@ async def generate_batch(batch_name: str, schedule_items: list, target_date: dat
         await _warmup_nemotron()
 
     return await _generate_for_schedule(schedule_items, target_date, batch_name)
+
+
+async def generate_missing_posts(target_date: datetime = None) -> dict:
+    """不足分自動補充（24:00実行）。全プラットフォームの不足分を検出して生成"""
+    if target_date is None:
+        target_date = datetime.now(tz=JST) + timedelta(days=1)
+
+    all_schedule = BATCH_1_SCHEDULE + BATCH_2_SCHEDULE + BATCH_4_SCHEDULE
+    # dedup guardが既存分をスキップするので、全スケジュールを渡せば不足分のみ生成される
+    await _warmup_nemotron()
+    result = await _generate_for_schedule(all_schedule, target_date, "missing_補充")
+    logger.info(
+        f"不足分補充: {result.get('inserted', 0)}件生成 "
+        f"(既存スキップ含む全{result.get('total', 0)}件)"
+    )
+    return result
 
 
 async def generate_daily_sns(target_date: datetime = None) -> dict:
@@ -1766,24 +1811,22 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 if len(draft) + len(label) <= 150:
                     draft = draft + label
 
-            # === ハッシュタグ自動付与 ===
+            # === ハッシュタグ自動付与（テーマ内容に基づいて後処理で選定） ===
             try:
-                tags = []
-                if _theme_detail and isinstance(_theme_detail.get("hashtags"), list):
-                    tags = [t for t in _theme_detail.get("hashtags", []) if isinstance(t, str)]
-                if not tags:
-                    tags = THEME_HASHTAGS.get(theme, {}).get(platform, [])
-                if tags and platform in ("x", "threads"):
-                    # X: 文字数制限内で追加（150字制限）
-                    if platform == "x":
-                        tag_str = " " + " ".join(tags[:2])
-                        if len(draft) + len(tag_str) <= 150:
-                            draft = draft + tag_str
-                    # Threads: 末尾に追加（500字制限に余裕がある、最大5個）
-                    elif platform == "threads":
-                        tag_str = "\n" + " ".join(tags[:5])
-                        if len(draft) + len(tag_str) <= 500:
-                            draft = draft + tag_str
+                # LLMが本文に含めたハッシュタグを除去（後処理で付け直す）
+                import re as _re_tag
+                draft = _re_tag.sub(r'\s*#\S+', '', draft).strip()
+
+                _theme_cat = ""
+                if _theme_detail and isinstance(_theme_detail, dict):
+                    _theme_cat = _theme_detail.get("category", "")
+                tags = _select_hashtags(theme, _theme_cat, platform, max_tags=2)
+
+                if tags and platform in ("x", "threads", "bluesky"):
+                    tag_str = " " + " ".join(tags)
+                    max_len = 150 if platform == "x" else 300
+                    if len(draft) + len(tag_str) <= max_len:
+                        draft = draft + tag_str
             except Exception:
                 pass
 
