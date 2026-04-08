@@ -277,12 +277,51 @@ _FALSITY_PATTERNS = [
 ]
 
 
-def check_falsity(text: str) -> list[str]:
-    """投稿文の虚偽をチェック。検出された問題のリストを返す（空なら問題なし）"""
+def check_falsity(text: str, theme: str = "", theme_category: str = "") -> list[str]:
+    """投稿文の虚偽をチェック。検出された問題のリストを返す（空なら問題なし）
+
+    V2: テーマ逸脱検出を統合。テーマから外れた主張は虚偽リスクが高い。
+    """
     issues = []
+    # 1. 基本虚偽パターン
     for pattern, label in _FALSITY_PATTERNS:
         if pattern.search(text):
             issues.append(label)
+
+    # 2. テーマ逸脱検出（テーマ外の具体的主張は捏造リスク）
+    if theme_category:
+        # カテゴリ別に「書いてはいけない主張」を定義
+        _off_topic_checks = {
+            "creator_media": [
+                # クリエイター系テーマなのに運用報告だけの投稿
+                (r"LLM.*呼び出し.*\d+.*回.*コスト.*¥", "テーマ外の運用数字羅列"),
+            ],
+            "philosophy_bip": [
+                (r"LLM.*呼び出し.*\d+.*回.*コスト.*¥", "テーマ外の運用数字羅列"),
+            ],
+            "ai_tech_trend": [
+                # AI動向テーマなのにSYUTAINβの運用報告だけ
+            ],
+            "shimahara_fields": [
+                (r"LLM.*呼び出し.*\d+.*回.*コスト.*¥", "テーマ外の運用数字羅列"),
+            ],
+        }
+        for pattern_str, label in _off_topic_checks.get(theme_category, []):
+            if _re_falsity.search(pattern_str, text):
+                issues.append(f"テーマ逸脱: {label}")
+
+        # テーマに全く関連しないカテゴリの主張を検出
+        _category_expected_words = {
+            "creator_media": ["映像", "クリエイター", "VTuber", "ドローン", "写真", "広告", "カメラ", "制作", "編集"],
+            "philosophy_bip": ["設計", "哲学", "判断", "境界", "問い", "意味", "価値", "Build", "Public"],
+            "ai_tech_trend": ["AI", "モデル", "トレンド", "技術", "LLM", "エージェント", "開発"],
+            "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "事業", "収益", "顧客"],
+            "syutain_ops": ["バグ", "エラー", "修正", "デプロイ", "運用", "監視", "LLM", "コスト"],
+        }
+        expected = _category_expected_words.get(theme_category, [])
+        if expected and not any(w in text for w in expected):
+            issues.append(f"テーマ逸脱: {theme_category}に関連する語が投稿に含まれていない")
+
     return issues
 
 
@@ -2124,7 +2163,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # V2: 虚偽フィルター → 検出時は修正を試みる（最大2回）
             for _fix_attempt in range(3):
-                falsity_issues = check_falsity(draft)
+                falsity_issues = check_falsity(draft, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "")
                 if not falsity_issues:
                     break  # 虚偽なし、通過
 
