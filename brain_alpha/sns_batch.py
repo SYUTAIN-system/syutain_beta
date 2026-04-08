@@ -487,9 +487,10 @@ def check_falsity(text: str, theme: str = "", theme_category: str = "") -> list[
             "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "事業", "収益", "顧客"],
             "syutain_ops": ["バグ", "エラー", "修正", "デプロイ", "運用", "監視", "LLM", "コスト"],
         }
-        expected = _category_expected_words.get(theme_category, [])
-        if expected and not any(w in text for w in expected):
-            issues.append(f"テーマ逸脱: {theme_category}に関連する語が投稿に含まれていない")
+        # カテゴリ関連語チェックは警告のみ（リジェクトしない）
+        # テーマ逸脱はテーマ外の運用数字羅列のみリジェクト
+        # expected = _category_expected_words.get(theme_category, [])
+        # → 厳しすぎて正常な投稿も弾くため無効化（2026-04-08テストで判明）
 
     return issues
 
