@@ -2213,6 +2213,20 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             if falsity_issues and _fix_attempt >= 2:
                 continue  # リジェクト済み、次の投稿へ
 
+            # V2: ファクトチェック（DB突合 + intel照合、SNSレベル）
+            try:
+                from tools.fact_checker import check_facts, apply_hedging
+                fc_result = await check_facts(draft, check_level="sns")
+                if fc_result.get("suggestions"):
+                    # 一次ソースなしの主張に留保表現を自動適用
+                    draft = apply_hedging(draft, fc_result["suggestions"])
+                    logger.info(f"ファクトチェック留保適用 ({platform}/{account}): {len(fc_result['suggestions'])}件")
+                if not fc_result.get("passed"):
+                    logger.warning(f"ファクトチェック不合格 ({platform}/{account}): {fc_result['issues'][:3]}")
+                    quality -= 0.05  # 不合格なら品質減点
+            except Exception as fc_err:
+                logger.debug(f"ファクトチェック失敗（続行）: {fc_err}")
+
             # V2: アカウント一致チェック（スコア調整）
             voice_adj = check_account_voice(draft, platform, account)
             quality += voice_adj
