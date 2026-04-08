@@ -166,6 +166,23 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # Qiita記事生成+公開（第1・第3月曜 11:00 JST）
+            self._scheduler.add_job(
+                self.publish_qiita_article,
+                CronTrigger(day_of_week="mon", hour=11, minute=0, timezone="Asia/Tokyo"),
+                id="publish_qiita_article",
+                name="Qiita記事生成+公開（月曜11:00）",
+                replace_existing=True,
+            )
+            # Zenn記事生成+公開（第2・第4月曜 11:00 JST）
+            self._scheduler.add_job(
+                self.publish_zenn_article,
+                CronTrigger(day_of_week="mon", hour=11, minute=30, timezone="Asia/Tokyo"),
+                id="publish_zenn_article",
+                name="Zenn記事生成+公開（月曜11:30）",
+                replace_existing=True,
+            )
+
             self._scheduler.add_job(
                 self.reactive_proposal,
                 IntervalTrigger(hours=6),
@@ -1477,6 +1494,50 @@ class SyutainScheduler:
                 pass
         except Exception as e:
             logger.error(f"週次提案生成失敗: {e}")
+
+    async def publish_qiita_article(self):
+        """Qiita記事生成+公開（第1・第3月曜のみ実行）"""
+        from datetime import datetime as _dt
+        week_num = _dt.now().isocalendar()[1]
+        if week_num % 2 != 1:  # 奇数週のみ（第1・3週）
+            logger.info("Qiita記事: 偶数週のためスキップ（第1・3月曜のみ）")
+            return
+        try:
+            from brain_alpha.tech_article_generator import publish_and_announce
+            result = await publish_and_announce("qiita")
+            if result.get("published"):
+                logger.info(f"Qiita記事公開完了: announced={result.get('announced')}")
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(f"📝 Qiita記事公開完了！ SNS拡散{'済み' if result.get('announced') else '未'}")
+                except Exception:
+                    pass
+            else:
+                logger.error(f"Qiita記事公開失敗: {result.get('error', '不明')}")
+        except Exception as e:
+            logger.error(f"Qiita記事ジョブ失敗: {e}")
+
+    async def publish_zenn_article(self):
+        """Zenn記事生成+公開（第2・第4月曜のみ実行）"""
+        from datetime import datetime as _dt
+        week_num = _dt.now().isocalendar()[1]
+        if week_num % 2 != 0:  # 偶数週のみ（第2・4週）
+            logger.info("Zenn記事: 奇数週のためスキップ（第2・4月曜のみ）")
+            return
+        try:
+            from brain_alpha.tech_article_generator import publish_and_announce
+            result = await publish_and_announce("zenn")
+            if result.get("published"):
+                logger.info(f"Zenn記事公開完了: announced={result.get('announced')}")
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(f"📝 Zenn記事公開完了！ SNS拡散{'済み' if result.get('announced') else '未'}")
+                except Exception:
+                    pass
+            else:
+                logger.error(f"Zenn記事公開失敗: {result.get('error', '不明')}")
+        except Exception as e:
+            logger.error(f"Zenn記事ジョブ失敗: {e}")
 
     async def reactive_proposal(self):
         """6時間ごとにリアクティブ提案を生成"""
