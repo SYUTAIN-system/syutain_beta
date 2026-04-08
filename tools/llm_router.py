@@ -240,6 +240,7 @@ _LOCAL_OK_TASKS = {
     "data_extraction",    # 構造化抽出、ローカルで十分
     "batch_process",      # 大量処理、コスト重視
     "bulk_draft",         # 大量ドラフト
+    "sns_draft",          # SNS投稿（Nemotron Nanoでは長いプロンプトが処理できない、ローカル9Bで十分）
 }
 
 # APIの方が品質が高いタスク → Gemini Flash（無料枠）優先

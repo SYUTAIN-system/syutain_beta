@@ -203,7 +203,11 @@ def _extract_external_claims(text: str) -> list[str]:
     ]
     for p in patterns:
         matches = re.findall(p, text)
-        claims.extend(matches if isinstance(matches[0], str) else [m[0] for m in matches] if matches else [])
+        if matches:
+            if isinstance(matches[0], str):
+                claims.extend(matches)
+            else:
+                claims.extend([m[0] for m in matches])
     return claims[:5]
 
 

@@ -230,6 +230,25 @@ _HASHTAG_KEYWORD_MAP = {
 }
 
 
+_THEME_CATEGORY_INFER_RULES = {
+    "syutain_ops": ["運用", "障害", "エラー", "修正", "デプロイ", "監視", "LoopGuard", "コスト", "呼び出し"],
+    "creator_media": ["映像", "VTuber", "ドローン", "写真", "広告", "映画", "カメラ", "編集", "クリエイター"],
+    "philosophy_bip": ["Build in Public", "Build", "Public", "哲学", "判断", "境界", "意味", "価値", "責任"],
+    "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "収益", "顧客", "事業", "委譲"],
+    "ai_tech_trend": ["AI", "モデル", "トレンド", "技術", "LLM", "エージェント", "Grok", "Claude", "GPT"],
+}
+
+
+def _infer_theme_category(theme: str) -> str:
+    """テーマ文字列からカテゴリを推定（履歴学習と品質集計の整合性を維持）"""
+    if not theme:
+        return "ai_tech_trend"
+    for category, keywords in _THEME_CATEGORY_INFER_RULES.items():
+        if any(kw in theme for kw in keywords):
+            return category
+    return "ai_tech_trend"
+
+
 def _select_hashtags(theme: str, theme_category: str, platform: str, max_tags: int = 2) -> list[str]:
     """テーマ内容に基づいてハッシュタグを最大max_tags個選定"""
     tags = []
@@ -978,6 +997,32 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
         if phrase in content:
             return False, f"ハレーション表現検出: 「{phrase}」— {reason}"
 
+    # --- 中国語混線/文字化け系（意図しない多言語混在） ---
+    chinese_markers = [
+        "小时", "我们", "这是", "现象", "因为", "你们", "不是", "分钟内", "失败是", "流行",
+    ]
+    if sum(1 for marker in chinese_markers if marker in content) >= 2:
+        return False, "多言語混線検出: 中国語フレーズが混在（日本語投稿ルール違反）"
+
+    # --- 扇情的で検証不能な断定表現 ---
+    import re as _re_fact
+    sensational_patterns = [
+        (r'IQ\s*\d{2,3}', "IQ断定は検証不能で誤情報リスクが高い"),
+        (r'99(?:\.\d+)?%\s*の?人類', "優越率の断定は誤情報リスクが高い"),
+        (r'人類を(?:凌駕|超え)', "人類超越の断定はハレーションを招く"),
+        (r'急騰', "煽り語は避ける"),
+    ]
+    for pat, reason in sensational_patterns:
+        if _re_fact.search(pat, content):
+            return False, f"誇張断定検出: {reason}"
+
+    # --- 軍事・攻撃用途の断定表現 ---
+    military_markers = [
+        "敵位置", "迎撃", "警告信号", "自動送信", "攻撃", "戦闘", "命中", "防衛システム",
+    ]
+    if any(marker in content for marker in military_markers):
+        return False, "軍事/攻撃用途の断定表現を検出（投稿方針で禁止）"
+
     # --- 障害・失敗の単純列挙を抑止（事象→原因→対策を要求） ---
     failure_markers = ["投稿失敗", "sns.post_failed", "失敗が", "失敗、", "failed"]
     has_failure = any(m in content for m in failure_markers)
@@ -1074,8 +1119,9 @@ def _pick_theme(time_str: str, used_today: list[str], recent_themes: list[str],
     for t in available:
         w = weights.get(t, 1)
         # 過去の品質データに基づく重み調整
-        if historical_quality and t in historical_quality:
-            avg_q = historical_quality[t]
+        inferred_category = _infer_theme_category(t)
+        if historical_quality and inferred_category in historical_quality:
+            avg_q = historical_quality[inferred_category]
             if avg_q >= threshold + 0.05:
                 w = int(w * 2)   # 高品質テーマは重みを2倍
             elif avg_q < threshold - 0.05:
@@ -1231,13 +1277,9 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
     # daichi_content_patterns構造ガイド + NG語（全プラットフォーム共通）
     content_structure_guide = (
-        "\n【投稿の構造ルール（daichi_content_patterns準拠）】\n"
-        "- 冒頭は毎回異なるパターンで入れ（同じ導入は禁止）。以下からランダムに選べ:\n"
-        "  A) テーマに直結する具体的事実から入る（数字だけの羅列はNG）\n"
-        "  B) 実際に起きたトラブルや発見から入る\n"
-        "  C) 自分の体験・判断を断言する（「〜した」「〜だった」）\n"
-        "  D) 問いかけから入る（「なぜ〜なのか」「〜は本当か」）\n"
-        "- **重要: LLM呼び出し回数・コスト・コード行数は毎回入れるな。テーマの話題を中心に書け。運用数字は10投稿に1回程度。**\n"
+        "\n【ルール】\n"
+        "- テーマの話題を中心に書け。LLM呼び出し回数やコードの行数は毎回入れるな\n"
+        "- 素材にないことは書くな\n"
         "- **絶対禁止フレーズ（含むと自動リジェクト）**: 「風+止」「画面は真っ暗/黒」「息を殺」「光の粒子」「指先を伸ばす」「肩を落とし」「紡ぐ」「夕暮れ+デスク」「湯気+コーヒー/カップ」「静かに+光/息」「未完成の+シナリオ/映像」「ドローンのプロペラ」「赤文字/赤い文字」「N回目の緊急シャットダウン/強制停止」「空は真っ暗/紺」「誰もいない」「バッテリーが切れ」「画面にエラーログが流れ」。\n"
         "- **絶対禁止**: 映像制作メタファーの抽象ポエム全般。「デスクで光が〜」「画面が静かに〜」系は全てリジェクト。\n"
         "- **絶対禁止**: 情景描写・雰囲気描写で始まる投稿。「朝の光が〜」「夜の静寂の中〜」「モニターの明かりだけが〜」は全てリジェクト。\n"
@@ -1261,56 +1303,13 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
     # 事実誤認防止 + 人物像ルール（全プラットフォーム共通）
     factual_rules = (
-        "\n## 島原大知の事実（絶対厳守）:\n"
-        "- コードを一行も書けない非エンジニア\n"
-        "- 本業は映像制作（VFX/動画編集/カラーグレーディング/撮影/ドローン）\n"
-        "- VTuber業界に8年間関わった（業界支援。VTuber活動はしていない）\n"
-        "- SYUTAINβを開発中（AIエージェントと共に）\n"
-        "- SunoAIでの作詞は完全に趣味（仕事として語るな）\n"
-        "- 一人称は「僕」または「自分」\n"
-        "\n## 絶対禁止表現:\n"
-        "- 「コードを書く」「コーディング」「プログラミングする」→ 島原はコードを書けない\n"
+        "\n## 禁止:\n"
+        "- 島原がコードを書く/プログラミングする記述\n"
+        "- 使っていないツール名（Grafana/Prometheus/Datadog）\n"
+        "- チーム/同僚/組織の記述（個人開発）\n"
+        "- ポエム調・情景描写・抽象論\n"
         "- 「僕の音楽」「曲を作る」「メロディーを紡ぐ」→ 音楽は趣味\n"
-        "- 「深夜、コードが〜」で始まるポエム → ワンパターン禁止\n"
-        "- 意味のない抽象的ポエム → 具体的な情報や体験を含めること\n"
-        "- 情景描写（夕暮れ、コーヒー、光、静寂、風）→ 事実・数字・固有名詞で語れ\n"
-        "\n## 島原大知の思考特性（投稿のトーンに反映）:\n"
-        "- 物事の裏側の構造を見る。仕組み・依存関係・ボトルネックを読み取る視点\n"
-        "- 壮大なビジョンに「それを実現するには具体的に何が必要か」を問う\n"
-        "- 技術の話でも必ず「人」に帰着。数字の向こうの人間の営みを見る\n"
-        "- 自分の感情に正直。取り繕わない。それは現状認識の精度を上げるため\n"
-        "- 不確実性への鋭敏な感覚。それでも構造を組み火を灯し続ける意志\n"
-        "\n## 投稿内容のルール:\n"
-        "- 毎回異なるテーマ・構造で投稿する（同じパターンの繰り返し禁止）\n"
-        "- 具体的な事実、数字、ツール名、体験を含める\n"
-        "- SYUTAINβの実際の運用データや出来事に基づく投稿を増やす\n"
-        "- 読者にとって「役に立つ」「面白い」「共感する」のいずれかを満たすこと\n"
-        "- 島原の視点を反映: 表面でなく構造を語る。抽象でなく具体を出す。夢と現実の境界を引く\n"
-        "\n【絶対禁止: 事実誤認・捏造】\n"
-        "- 楽曲制作・音楽制作を仕事として語るな。島原大知は音楽の仕事をしていない。\n"
-        "- SunoAIでの作詞は完全に個人の趣味。仕事・案件・クライアントとして語るな。\n"
-        "- VTuberの楽曲制作に携わった事実はない。\n"
-        "- 島原大知の本業: 映像制作（VFX/動画編集/カラーグレーディング/撮影/ドローン）、VTuber業界支援、事業運営。\n"
-        "- 「コードを書く」「プログラミングする」「コーディングする」は禁止。島原はコードを一行も書けない。\n"
-        "- 存在しない機能・サービス・実績を捏造するな。\n"
-        "- 架空の数値（○%向上、○倍改善など）を捏造するな。\n"
-        "- 実際にやっていないことを「やっている」「開始した」と語るな。\n"
-        "- **ハーネスエンジニアリングは島原大知が命名・考案した方法論ではない。既存の方法論を適用しているだけ。「命名した」「考え出した」「誕生させた」「提唱した」は禁止。「実践している」「適用している」が正しい。**\n"
-        "- **「私は…と呼ぶ」「僕が…と命名した」「これを…と名付けた」系の自己命名パターン全般は禁止**（既存概念を自分が作ったと偽装しない）\n"
-        "- **SYUTAINβは個人開発。運用チーム・開発メンバー・同僚・離職者は存在しない**。「チーム」「メンバー」「担当者」「離職率」等の捏造は禁止\n"
-        "- **使っていないツールを「使っている」と書かない**。Grafana/Prometheus/Restic/Datadog/Sentry等は使用していない。実運用はPostgreSQL/NATS/Tailscale/Ollama/FastAPI/Next.js/Playwright/Discord.pyのみ\n"
-        "\n【島原大知の人物像（投稿に反映すべきこと）】\n"
-        "- 島原は自分を全肯定しない人間。弱さ・迷い・自嘲を含めて島原大知。完璧な人間として描くな。\n"
-        "- ユーモアや自虐は熱量制御。本気の温度が高すぎるため逃がしている。\n"
-        "- 傷を負うと構造を見る人間。「どこが壊れたのか」から再設計に向かう。\n"
-        "- 橋渡し役に徹する。スターになることを求めない。\n"
-        "- 島原を「完璧なAIエンジニア」「成功した起業家」として描くな。泥臭い日常の中の閃きを書け。\n"
-        "- 答えではなく問いかけ。大きな野望より目の前の1人に届ける言葉。ただし余韻＝ポエムではない。具体的な事実で問いかけろ。\n"
-        "- 島原は「成立の人」。場の不足を自分で埋める。専門家ぶるな。\n"
-        "- 一度信じた光景が壊れる条件まで知った上で、それでも作る側へ戻る人として描け。\n"
-        "- 矛盾を恐れるな: 目立ちたくないのに中心になる、熱を信じつつ壊れると知っている。それが島原。\n"
-        "- 島原は「証明したい人」。作品は存在の痕跡。失敗すら「残るなら価値がある」。\n"
-        "- 不完全でも渡す美学。完璧より「止めずに渡す、始める、残す、繋ぐ」。\n"
+        "- ポエム・情景描写は禁止。事実だけで書け\n"
         "- 安い答えを売らない。問いを持ち続ける人として書け。\n"
     )
 
@@ -1824,6 +1823,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                                     platform=platform, historical_quality=hist_q,
                                     engagement_weights=engagement_theme_weights)
             used_today.append(theme)
+            _theme_category = _theme_detail.get("category", "") if _theme_detail else _infer_theme_category(theme)
 
             # few-shot（X島原のみ）
             few_shot = random.sample(few_shot_pool, min(3, len(few_shot_pool))) if platform == "x" and account == "shimahara" else []
@@ -1831,8 +1831,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             # V2: テーマに関連する素材を選定（LLMはこの素材だけで書く）
             _materials = []
             try:
-                _theme_cat = _theme_detail.get("category", "") if _theme_detail else ""
-                _materials = await pick_materials_for_post(theme, _theme_cat, conn)
+                _materials = await pick_materials_for_post(theme, _theme_category, conn)
                 # テーマエンジンの素材も追加
                 if _theme_detail:
                     if _theme_detail.get("angle"):
@@ -2022,7 +2021,14 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             continue
 
                         # 検証6: 品質スコア
-                        candidate_quality = _score_multi_axis(candidate_draft, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
+                        candidate_quality = _score_multi_axis(
+                            candidate_draft,
+                            persona_keywords=_PERSONA_KEYWORDS,
+                            theme=theme,
+                            theme_category=_theme_category,
+                            platform=platform,
+                            account=account,
+                        )
 
                         # 0.50未満は完全却下
                         if candidate_quality < 0.50:
@@ -2101,7 +2107,14 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                                any(retry_head in p for p in recent_posts):
                                 continue
 
-                            retry_quality = _score_multi_axis(retry_draft, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
+                            retry_quality = _score_multi_axis(
+                                retry_draft,
+                                persona_keywords=_PERSONA_KEYWORDS,
+                                theme=theme,
+                                theme_category=_theme_category,
+                                platform=platform,
+                                account=account,
+                            )
                             if retry_quality >= 0.50:
                                 candidates.append((retry_draft, retry_quality))
                         except Exception:
@@ -2150,7 +2163,14 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             refined, platform=platform, account=account,
                         )
                         if ng_refined["passed"] and refined_factual_ok:
-                            refined_quality = _score_multi_axis(refined, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
+                            refined_quality = _score_multi_axis(
+                                refined,
+                                persona_keywords=_PERSONA_KEYWORDS,
+                                theme=theme,
+                                theme_category=_theme_category,
+                                platform=platform,
+                                account=account,
+                            )
                             if refined_quality > quality:
                                 # content_edit_logに精錬記録
                                 try:
@@ -2235,7 +2255,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                            VALUES ($1, $2, $3, $4, $5, $6, $7)""",
                         platform, account, draft,
                         target_date.replace(hour=0, minute=0, second=0, microsecond=0),
-                        "lint_blocked", quality, theme,
+                        "lint_blocked", quality, _theme_category,
                     )
                     continue
             except Exception as e:
@@ -2275,7 +2295,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                        VALUES ($1, $2, $3, $4, $5, $6, $7)""",
                     platform, account, draft,
                     target_date.replace(hour=0, minute=0, second=0, microsecond=0),
-                    "redact_blocked", quality, theme,
+                    "redact_blocked", quality, _theme_category,
                 )
                 continue
 
@@ -2292,10 +2312,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 import re as _re_tag
                 draft = _re_tag.sub(r'\s*#\S+', '', draft).strip()
 
-                _theme_cat = ""
-                if _theme_detail and isinstance(_theme_detail, dict):
-                    _theme_cat = _theme_detail.get("category", "")
-                tags = _select_hashtags(theme, _theme_cat, platform, max_tags=2)
+                tags = _select_hashtags(theme, _theme_category, platform, max_tags=2)
 
                 if tags and platform in ("x", "threads", "bluesky"):
                     tag_str = " " + " ".join(tags)
@@ -2335,7 +2352,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # V2: 虚偽フィルター → 検出時は修正を試みる（最大2回）
             for _fix_attempt in range(3):
-                falsity_issues = check_falsity(draft, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "")
+                falsity_issues = check_falsity(draft, theme=theme, theme_category=_theme_category)
                 if not falsity_issues:
                     break  # 虚偽なし、通過
 
@@ -2376,7 +2393,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         """INSERT INTO posting_queue
                            (platform, account, content, scheduled_at, status, quality_score, theme_category)
                            VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                        platform, account, draft, scheduled, "falsity_blocked", quality, theme,
+                        platform, account, draft, scheduled, "falsity_blocked", quality, _theme_category,
                     )
                     break
             else:
@@ -2415,7 +2432,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                     """INSERT INTO posting_queue
                        (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
-                    platform, account, draft, scheduled, post_status, quality, theme, affiliate_url_value,
+                    platform, account, draft, scheduled, post_status, quality, _theme_category, affiliate_url_value,
                 )
                 continue
 
@@ -2432,7 +2449,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 """INSERT INTO posting_queue
                    (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url, ab_test_id, ab_variant)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
-                platform, account, draft, scheduled, post_status, quality, theme, affiliate_url_value,
+                platform, account, draft, scheduled, post_status, quality, _theme_category, affiliate_url_value,
                 _ab_test_id, _ab_variant,
             )
             inserted_count += 1
@@ -2463,7 +2480,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             """INSERT INTO posting_queue
                                (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url, ab_test_id, ab_variant)
                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
-                            platform, account, _variant_b, _scheduled_b, "pending", quality, theme, affiliate_url_value,
+                            platform, account, _variant_b, _scheduled_b, "pending", quality, _theme_category, affiliate_url_value,
                             _ab_test_id, "B",
                         )
                         inserted_count += 1
