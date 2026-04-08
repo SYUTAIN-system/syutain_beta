@@ -426,6 +426,15 @@ class SyutainScheduler:
                 replace_existing=True,
                 next_run_time=_eng_first_run + timedelta(minutes=1),
             )
+            # A/Bテスト評価（エンゲージメント取得の10分後に実行、両バリアント24h経過分のみ評価）
+            self._scheduler.add_job(
+                self.evaluate_ab_tests_job,
+                IntervalTrigger(hours=12),
+                id="evaluate_ab_tests",
+                name="A/Bテスト評価（12時間、エンゲージメント取得後）",
+                replace_existing=True,
+                next_run_time=_eng_first_run + timedelta(minutes=10),
+            )
 
             self._scheduler.add_job(
                 self.threads_engagement_check,
@@ -1724,6 +1733,20 @@ class SyutainScheduler:
                 logger.info(f"A/Bテスト評価完了: {len(results)}件のテスト結果を記録")
             else:
                 logger.info("A/Bテスト評価: 評価対象なし")
+        except Exception as e:
+            logger.error(f"A/Bテスト評価失敗: {e}")
+
+    async def evaluate_ab_tests_job(self):
+        """A/Bテスト評価（両バリアント投稿から24h経過分のみ）"""
+        try:
+            from brain_alpha.sns_batch import evaluate_ab_tests
+            results = await evaluate_ab_tests()
+            if results:
+                logger.info(f"A/Bテスト評価: {len(results)}件完了")
+                for r in results:
+                    logger.info(f"  {r['ab_test_id']}: winner={r['winner']} (A={r['a_score']}, B={r['b_score']})")
+            else:
+                logger.debug("A/Bテスト評価: 対象なし")
         except Exception as e:
             logger.error(f"A/Bテスト評価失敗: {e}")
 
