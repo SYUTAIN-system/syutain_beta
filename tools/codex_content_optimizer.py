@@ -134,6 +134,21 @@ async def _run_codex_audit(prompt: str, timeout: int = 420) -> dict:
         diff_out, _ = await diff_proc.communicate()
         files_changed = [f.strip() for f in diff_out.decode().strip().split("\n") if f.strip()]
 
+        # 変更行数チェック（200行超過なら全revert — 大規模リファクタ防止）
+        try:
+            import re as _re_stat2
+            stat_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat", stdout=asyncio.subprocess.PIPE, cwd=PROJECT_DIR,
+            )
+            stat_out, _ = await stat_proc.communicate()
+            total_lines = sum(int(m.group(1)) for m in _re_stat2.finditer(r'(\d+) (?:insertion|deletion)', stat_out.decode()))
+            if total_lines > 200:
+                logger.error(f"Codex audit: 変更が{total_lines}行（上限200行）。全revert")
+                await (await asyncio.create_subprocess_exec("git", "checkout", "--", ".", cwd=PROJECT_DIR)).wait()
+                return {"success": False, "output": f"変更行数超過 ({total_lines}>200)", "files_changed": []}
+        except Exception:
+            pass
+
         # strategy/ と brain_alpha/sns_batch.py と brain_alpha/content_pipeline.py のみ許可
         allowed_prefixes = ("strategy/", "brain_alpha/sns_batch.py", "brain_alpha/content_pipeline.py")
         allowed = []

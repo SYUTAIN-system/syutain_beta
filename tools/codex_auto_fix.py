@@ -70,6 +70,26 @@ async def run_codex_fix(issue_description: str, files_hint: list[str] = None, ti
     output_file = f"/tmp/codex_fix_{datetime.now().strftime('%H%M%S')}.txt"
     start = datetime.now()
 
+    # 安全装置: 修正前にgit stashで現状を保存
+    try:
+        stash_proc = await asyncio.create_subprocess_exec(
+            "git", "stash", "push", "-m", f"codex_auto_fix_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=PROJECT_DIR,
+        )
+        stash_out, _ = await stash_proc.communicate()
+        stash_saved = b"No local changes" not in stash_out
+        if stash_saved:
+            logger.info("Codex修正前: git stashで現状を保存")
+            # stash したらすぐ pop して元に戻す（stash はバックアップとして残す）
+            await (await asyncio.create_subprocess_exec(
+                "git", "stash", "pop",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                cwd=PROJECT_DIR,
+            )).communicate()
+    except Exception as stash_err:
+        logger.debug(f"git stash失敗（続行）: {stash_err}")
+
     try:
         proc = await asyncio.create_subprocess_exec(
             CODEX_PATH, "exec", prompt,
@@ -121,7 +141,37 @@ async def run_codex_fix(issue_description: str, files_hint: list[str] = None, ti
                 await revert_proc.wait()
                 files_changed.remove(f)
 
-        # 変更が多すぎたら全 revert
+        # 変更行数チェック（MAX_LINES_CHANGED超過なら全revert）
+        try:
+            stat_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--stat",
+                stdout=asyncio.subprocess.PIPE,
+                cwd=PROJECT_DIR,
+            )
+            stat_out, _ = await stat_proc.communicate()
+            stat_text = stat_out.decode()
+            # 最終行から総変更行数を抽出（"X files changed, Y insertions(+), Z deletions(-)"）
+            import re as _re_stat
+            total_match = _re_stat.search(r'(\d+) insertion|(\d+) deletion', stat_text)
+            total_lines = 0
+            for m in _re_stat.finditer(r'(\d+) (?:insertion|deletion)', stat_text):
+                total_lines += int(m.group(1))
+            if total_lines > MAX_LINES_CHANGED:
+                logger.error(f"Codex変更が{total_lines}行（上限{MAX_LINES_CHANGED}行）。全revert")
+                await (await asyncio.create_subprocess_exec(
+                    "git", "checkout", "--", ".",
+                    cwd=PROJECT_DIR,
+                )).wait()
+                return {
+                    "success": False,
+                    "output": f"変更行数が多すぎる ({total_lines} > {MAX_LINES_CHANGED})。全revert",
+                    "duration_ms": duration,
+                    "files_changed": [],
+                }
+        except Exception:
+            pass
+
+        # 変更ファイル数が多すぎたら全 revert
         if len(files_changed) > 10:
             logger.error(f"Codex が {len(files_changed)} ファイルを変更（上限10）。全 revert")
             await (await asyncio.create_subprocess_exec(
