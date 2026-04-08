@@ -200,6 +200,22 @@ class SyutainScheduler:
             )
 
             self._scheduler.add_job(
+                self.weekly_engagement_adjustment,
+                CronTrigger(day_of_week="sun", hour=21, minute=30, timezone="Asia/Tokyo"),
+                id="weekly_engagement_adjustment",
+                name="エンゲージメント→投稿数自動調整（日曜 21:30）",
+                replace_existing=True,
+            )
+
+            self._scheduler.add_job(
+                self.evaluate_ab_tests_job,
+                CronTrigger(hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="evaluate_ab_tests",
+                name="A/Bテスト結果評価（毎日10:00）",
+                replace_existing=True,
+            )
+
+            self._scheduler.add_job(
                 self.redispatch_orphan_tasks,
                 IntervalTrigger(minutes=5),
                 id="redispatch_orphan",
@@ -1697,6 +1713,43 @@ class SyutainScheduler:
                 logger.warning(f"週次学習レポート生成に問題: {report.get('error', 'unknown')}")
         except Exception as e:
             logger.error(f"週次学習レポート生成失敗: {e}")
+
+    async def evaluate_ab_tests_job(self):
+        """A/Bテスト結果を評価してログ記録（毎日10:00）"""
+        logger.info("A/Bテスト結果評価開始")
+        try:
+            from brain_alpha.sns_batch import evaluate_ab_tests
+            results = await evaluate_ab_tests()
+            if results:
+                logger.info(f"A/Bテスト評価完了: {len(results)}件のテスト結果を記録")
+            else:
+                logger.info("A/Bテスト評価: 評価対象なし")
+        except Exception as e:
+            logger.error(f"A/Bテスト評価失敗: {e}")
+
+    async def weekly_engagement_adjustment(self):
+        """週次エンゲージメント分析→投稿数自動調整（日曜21:30）"""
+        logger.info("エンゲージメント→投稿数自動調整開始")
+        try:
+            from brain_alpha.sns_batch import analyze_engagement_and_adjust
+            from tools.event_logger import log_event
+            result = await analyze_engagement_and_adjust()
+            adjustments = result.get("adjustments", {})
+            if adjustments:
+                nonzero = {k: v for k, v in adjustments.items() if v != 0}
+                if nonzero:
+                    logger.info(f"投稿数調整適用: {nonzero}")
+                    await log_event("sns.engagement_adjustment", "system", {
+                        "adjustments": nonzero,
+                        "avg_engagement": result.get("avg_engagement", {}),
+                        "overall_avg": result.get("overall_avg", 0),
+                    })
+                else:
+                    logger.info("エンゲージメント調整: 全プラットフォーム変動なし")
+            else:
+                logger.info("エンゲージメント調整: データ不足、調整なし")
+        except Exception as e:
+            logger.error(f"エンゲージメント調整失敗: {e}")
 
     async def backup_postgresql(self):
         """毎日03:00 JSTにPostgreSQLをバックアップ"""
@@ -3693,6 +3746,29 @@ class SyutainScheduler:
                 "思想層": "AIと人間の境界線についての問い",
             }
             effective_theme = theme_hint if theme_hint else _layer_short_themes.get(_layer_name, f"{_layer_name}の記事")
+
+            # 週報レイヤー: weekly_report_builder から実データを集計しテーマに注入
+            _weekly_report_context = ""
+            if _layer_name == "記録層（週報）":
+                try:
+                    from tools.weekly_report_builder import build_weekly_report_data, format_weekly_report
+                    from tools.db_pool import get_connection as _wr_gc
+                    async with _wr_gc() as _wr_conn:
+                        _wr_data = await build_weekly_report_data(_wr_conn)
+                    import math
+                    _week_num = math.ceil(_dt_layer.now().timetuple().tm_yday / 7)
+                    _weekly_report_context = format_weekly_report(_wr_data, week_number=_week_num)
+                    logger.info(f"週報データ注入: {len(_wr_data)}指標, {len(_weekly_report_context)}字")
+                except Exception as _wr_err:
+                    logger.warning(f"週報データ取得失敗（テーマのみで続行）: {_wr_err}")
+
+            if _weekly_report_context:
+                effective_theme = (
+                    f"{effective_theme}\n\n"
+                    f"## 週報自動集計データ（この数字を記事に織り込むこと）\n"
+                    f"{_weekly_report_context}"
+                )
+
             kwargs = {"content_type": "note_article", "target_length": 6000, "theme": effective_theme}
             if extra_kwargs:
                 kwargs.update(extra_kwargs)

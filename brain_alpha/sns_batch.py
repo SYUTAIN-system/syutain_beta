@@ -51,6 +51,141 @@ X_SYUTAIN_TIMES = ["09:30", "11:00", "12:30", "14:30", "16:00", "18:00", "20:00"
 BLUESKY_TIMES = ["09:00", "10:15", "11:30", "12:45", "14:00", "15:30", "17:00", "18:30", "20:00", "21:30"]
 THREADS_TIMES = ["09:30", "11:30", "13:30", "15:30", "17:30", "19:30", "21:30"]
 
+# === 追加時間帯プール（エンゲージメント自動調整で追加/削除される候補） ===
+_EXTRA_TIMES = {
+    "x_shimahara": ["10:30", "14:00"],
+    "x_syutain": ["10:00", "15:30"],
+    "bluesky": ["10:45", "13:30", "16:15", "19:15"],
+    "threads": ["10:30", "12:30", "14:30", "16:30"],
+}
+
+
+async def analyze_engagement_and_adjust() -> dict:
+    """直近7日のエンゲージメントを分析し、プラットフォーム別投稿数を調整する。
+
+    Returns:
+        dict: {"adjustments": {platform: delta_int}, "avg_engagement": {platform: float}, "overall_avg": float}
+    """
+    try:
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT platform, engagement_data
+                   FROM posting_queue
+                   WHERE status = 'posted'
+                     AND posted_at > NOW() - INTERVAL '7 days'
+                     AND engagement_data IS NOT NULL"""
+            )
+            if not rows:
+                logger.info("エンゲージメント調整: データなし、調整スキップ")
+                return {"adjustments": {}, "avg_engagement": {}, "overall_avg": 0.0}
+
+            # プラットフォーム別エンゲージメントスコア集計
+            platform_scores: dict[str, list[float]] = {}
+            for r in rows:
+                pf = r["platform"]
+                ed = r["engagement_data"]
+                if isinstance(ed, str):
+                    try:
+                        ed = json.loads(ed)
+                    except Exception:
+                        continue
+                if not isinstance(ed, dict):
+                    continue
+                # エンゲージメントスコア: likes + retweets*2 + replies*3 (重み付き)
+                score = (
+                    (ed.get("likes", 0) or 0)
+                    + (ed.get("retweets", 0) or ed.get("reposts", 0) or 0) * 2
+                    + (ed.get("replies", 0) or 0) * 3
+                )
+                platform_scores.setdefault(pf, []).append(score)
+
+            avg_by_platform = {
+                pf: sum(scores) / len(scores)
+                for pf, scores in platform_scores.items()
+                if scores
+            }
+            all_scores = [s for scores in platform_scores.values() for s in scores]
+            overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+            adjustments = {}
+            for pf, pf_avg in avg_by_platform.items():
+                if overall_avg <= 0:
+                    adjustments[pf] = 0
+                elif pf_avg > overall_avg * 1.5:
+                    # 高エンゲージメント → 投稿数 +1〜+2
+                    adjustments[pf] = 2 if pf_avg > overall_avg * 2.0 else 1
+                elif pf_avg < overall_avg * 0.5:
+                    # 低エンゲージメント → 投稿数 -1〜-2
+                    adjustments[pf] = -2 if pf_avg < overall_avg * 0.25 else -1
+                else:
+                    adjustments[pf] = 0
+
+            # feature_flags テーブルに保存 (upsert)
+            if adjustments:
+                adj_json = json.dumps(adjustments, ensure_ascii=False)
+                await conn.execute(
+                    """INSERT INTO feature_flags (flag_name, flag_value, updated_at)
+                       VALUES ('sns_post_count_adjustments', $1, NOW())
+                       ON CONFLICT (flag_name) DO UPDATE SET flag_value = $1, updated_at = NOW()""",
+                    adj_json,
+                )
+                logger.info(f"エンゲージメント調整保存: {adjustments} (overall_avg={overall_avg:.2f})")
+
+            return {
+                "adjustments": adjustments,
+                "avg_engagement": avg_by_platform,
+                "overall_avg": overall_avg,
+            }
+    except Exception as e:
+        logger.error(f"エンゲージメント調整分析エラー: {e}")
+        return {"adjustments": {}, "error": str(e)}
+
+
+async def _get_adjusted_schedule() -> list:
+    """feature_flags のエンゲージメント調整を反映したスケジュールを返す"""
+    base_schedules = {
+        "x_shimahara": ([("x", "shimahara", t) for t in X_SHIMAHARA_TIMES], _EXTRA_TIMES["x_shimahara"]),
+        "x_syutain": ([("x", "syutain", t) for t in X_SYUTAIN_TIMES], _EXTRA_TIMES["x_syutain"]),
+        "bluesky": ([("bluesky", "syutain", t) for t in BLUESKY_TIMES], _EXTRA_TIMES["bluesky"]),
+        "threads": ([("threads", "syutain", t) for t in THREADS_TIMES], _EXTRA_TIMES["threads"]),
+    }
+
+    adjustments = {}
+    try:
+        async with get_connection() as conn:
+            row = await conn.fetchval(
+                "SELECT flag_value FROM feature_flags WHERE flag_name = 'sns_post_count_adjustments'"
+            )
+            if row:
+                raw = json.loads(row) if isinstance(row, str) else row
+                # raw keys are platform names (x, bluesky, threads) → map to schedule keys
+                for k, v in raw.items():
+                    if k == "x":
+                        adjustments["x_shimahara"] = adjustments.get("x_shimahara", 0) + v
+                        adjustments["x_syutain"] = adjustments.get("x_syutain", 0) + v
+                    else:
+                        adjustments[k] = v
+    except Exception as e:
+        logger.debug(f"エンゲージメント調整読み込み失敗（デフォルト使用）: {e}")
+
+    result = []
+    for sched_key, (base_items, extra_times) in base_schedules.items():
+        delta = adjustments.get(sched_key, 0)
+        if delta > 0:
+            # 追加: extra_times から delta 個を追加
+            platform = base_items[0][0] if base_items else "x"
+            account = base_items[0][1] if base_items else ""
+            for t in extra_times[:delta]:
+                base_items = base_items + [(platform, account, t)]
+        elif delta < 0:
+            # 削減: 末尾から |delta| 個を除去（最低2本は維持）
+            keep = max(2, len(base_items) + delta)
+            base_items = base_items[:keep]
+        result.extend(base_items)
+
+    return result
+
+
 # ===== テーマプール =====
 
 # 旧抽象テーマプール → 拡散実行書の5カテゴリに準拠した具体テーマに変更 (2026-04-07)
@@ -2247,14 +2382,57 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 )
                 continue
 
+            # A/Bテスト: ~20% の投稿で variant B を追加生成
+            _ab_test_id = None
+            _ab_variant = None
+            if random.random() < 0.20 and post_status == "pending":
+                import uuid as _uuid_ab
+                _ab_test_id = f"ab_{_uuid_ab.uuid4().hex[:12]}"
+                _ab_variant = "A"
+
             # posting_queueにINSERT
             await conn.execute(
                 """INSERT INTO posting_queue
-                   (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                   (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url, ab_test_id, ab_variant)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
                 platform, account, draft, scheduled, post_status, quality, theme, affiliate_url_value,
+                _ab_test_id, _ab_variant,
             )
             inserted_count += 1
+
+            # A/Bテスト: variant B を生成（別角度で2時間後に投稿）
+            if _ab_test_id:
+                try:
+                    from tools.llm_router import choose_best_model_v6 as _ab_choose, call_llm as _ab_call
+                    _ab_model = _ab_choose(
+                        task_type="chat", quality="medium",
+                        budget_sensitive=True, needs_japanese=True,
+                    )
+                    _ab_result = await _ab_call(
+                        prompt=(
+                            f"以下のSNS投稿を、別の切り口/冒頭で書き直してください。"
+                            f"同じ情報を伝えるが、入り口が違う投稿にする。\n\n"
+                            f"元の投稿:\n{draft}\n\n"
+                            f"プラットフォーム: {platform}\n"
+                            f"文字数は元と同程度。別の切り口で書き直した投稿のみ出力。"
+                        ),
+                        system_prompt="SNS投稿のA/Bテスト variant B を生成するアシスタント。",
+                        model_selection=_ab_model,
+                    )
+                    _variant_b = (_ab_result.get("text", "") or "").strip()
+                    if _variant_b and len(_variant_b) > 20:
+                        _scheduled_b = scheduled + timedelta(hours=2)
+                        await conn.execute(
+                            """INSERT INTO posting_queue
+                               (platform, account, content, scheduled_at, status, quality_score, theme_category, affiliate_url, ab_test_id, ab_variant)
+                               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+                            platform, account, _variant_b, _scheduled_b, "pending", quality, theme, affiliate_url_value,
+                            _ab_test_id, "B",
+                        )
+                        inserted_count += 1
+                        logger.info(f"A/Bテスト生成: {_ab_test_id} ({platform}/{account}) variant B at {_scheduled_b}")
+                except Exception as _ab_err:
+                    logger.warning(f"A/Bテスト variant B 生成失敗（続行）: {_ab_err}")
 
             # 直近投稿リスト更新（重複検知用）
             recent_posts.insert(0, draft[:60])
@@ -2297,3 +2475,77 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
         results["error"] = str(e)
 
     return results
+
+
+async def evaluate_ab_tests() -> list[dict]:
+    """24時間以上経過したA/Bテストの結果を評価し、勝者をログに記録する。
+
+    Returns:
+        list[dict]: 各テストの結果 {"ab_test_id", "winner", "a_score", "b_score"}
+    """
+    eval_results = []
+    try:
+        async with get_connection() as conn:
+            # 24h以上前に投稿されたA/Bテストペアを集計
+            tests = await conn.fetch(
+                """SELECT ab_test_id,
+                       json_agg(json_build_object(
+                           'variant', ab_variant,
+                           'engagement_data', engagement_data,
+                           'content', LEFT(content, 80),
+                           'id', id
+                       )) as variants
+                   FROM posting_queue
+                   WHERE ab_test_id IS NOT NULL
+                     AND status = 'posted'
+                     AND posted_at < NOW() - INTERVAL '24 hours'
+                   GROUP BY ab_test_id
+                   HAVING COUNT(*) = 2"""
+            )
+
+            for test in tests:
+                ab_id = test["ab_test_id"]
+                variants_raw = test["variants"]
+                if isinstance(variants_raw, str):
+                    variants_raw = json.loads(variants_raw)
+
+                scores = {}
+                for v in variants_raw:
+                    variant = v.get("variant", "?")
+                    ed = v.get("engagement_data") or {}
+                    if isinstance(ed, str):
+                        try:
+                            ed = json.loads(ed)
+                        except Exception:
+                            ed = {}
+                    score = (
+                        (ed.get("likes", 0) or 0)
+                        + (ed.get("retweets", 0) or ed.get("reposts", 0) or 0) * 2
+                        + (ed.get("replies", 0) or 0) * 3
+                    )
+                    scores[variant] = score
+
+                a_score = scores.get("A", 0)
+                b_score = scores.get("B", 0)
+                winner = "A" if a_score >= b_score else "B"
+
+                result_entry = {
+                    "ab_test_id": ab_id,
+                    "winner": winner,
+                    "a_score": a_score,
+                    "b_score": b_score,
+                }
+                eval_results.append(result_entry)
+                logger.info(f"A/Bテスト結果: {ab_id} → winner={winner} (A={a_score}, B={b_score})")
+
+                # event_log に記録
+                try:
+                    from tools.event_logger import log_event
+                    await log_event("sns.ab_test_result", "system", result_entry)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.error(f"A/Bテスト評価エラー: {e}")
+
+    return eval_results
