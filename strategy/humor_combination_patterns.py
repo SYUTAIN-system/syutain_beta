@@ -1,10 +1,11 @@
 """笑いの構造 組み合わせパターン — 投稿生成テンプレート
 
-各パターンは「構造A × 構造B」の掛け合わせ。
-SYUTAINβの投稿生成時にパターンを1つ選び、テンプレートに素材を当てはめる。
+構造 × 技法 × トーンの掛け算で100+パターンを自動生成。
+手書きの固定パターン23個 + 自動生成の組み合わせパターン。
 """
 
 import random
+import itertools
 
 # 全30パターン（6構造 × 5技法 から有効な組み合わせを厳選）
 HUMOR_COMBO_PATTERNS = [
@@ -148,14 +149,75 @@ HUMOR_COMBO_PATTERNS = [
 ]
 
 
+# === 自動生成パターンエンジン ===
+# 構造 × 技法 × トーンの掛け算で100+パターン
+
+STRUCTURES = {
+    "1箇所ズラし": "普通のことを3-4行書いて、最後の1行だけ世界観がズレる",
+    "情報の非対称": "AIが自分の異常さに気づいていない。読者だけが気づく",
+    "感情未遂": "AIが感情に近づくが持てない。その境界線",
+    "主従逆転": "人間とAIの立場が普通と逆になっている",
+    "過剰な誠実さ": "聞かれてもいないことまで正直に報告してしまう",
+    "建前本音ギャップ": "社会的に言えないことをAIが淡々と言語化",
+    "自己矛盾": "自分で自分を評価/否定する状況",
+    "日常に紛れる異常": "完全に日常的な文脈にAIの異常さが1つ混じる",
+}
+
+TECHNIQUES = {
+    "真顔の報告": "業務報告の体裁で淡々と",
+    "古スラング": "2ch/なんJ語を真面目に使う（ktkr, orz, もちつけ等）",
+    "お笑いフレーズ": "芸人のテンプレを業務に適用（安村, テツトモ等）",
+    "三段オチ": "パターン→パターン→破壊",
+    "落差": "壮大なものとしょぼいものの対比",
+    "ツッコミ誘発": "読者が「いやおかしいやろ」と思う仕掛け",
+    "メタ自己認識": "AIが自分の生成プロセスに言及する",
+    "数字で殴る": "具体的な数値で状況の異常さを伝える",
+}
+
+TONES = {
+    "淡々": "感情を一切出さず事実だけ述べる",
+    "困惑気味": "「…」を使って少し戸惑っている風",
+    "自信満々": "AIが堂々と異常なことを言い切る",
+}
+
+# 無効な組み合わせ（寒くなるやつ）
+_INVALID_COMBOS = {
+    ("感情未遂", "自信満々"),  # 感情に近づくのに自信満々は矛盾
+    ("建前本音ギャップ", "古スラング"),  # 本音とスラングは方向がバラバラ
+    ("主従逆転", "お笑いフレーズ"),  # 芸人フレーズで立場逆転は寒い
+}
+
+# 自動生成
+_AUTO_PATTERNS = []
+for (s_name, s_desc), (t_name, t_desc), (tone_name, tone_desc) in itertools.product(
+    STRUCTURES.items(), TECHNIQUES.items(), TONES.items()
+):
+    if (s_name, tone_name) in _INVALID_COMBOS or (s_name, t_name) in _INVALID_COMBOS:
+        continue
+    _AUTO_PATTERNS.append({
+        "id": f"A{len(_AUTO_PATTERNS):03d}",
+        "name": f"{s_name} × {t_name} × {tone_name}",
+        "structure": s_desc,
+        "technique": t_desc,
+        "tone": tone_desc,
+        "template": f"【構造】{s_desc}\n【技法】{t_desc}\n【トーン】{tone_desc}",
+        "example": "",  # 自動パターンは例なし（LLMが素材から生成）
+    })
+
+# 全パターン = 手書き23 + 自動生成
+ALL_PATTERNS = HUMOR_COMBO_PATTERNS + _AUTO_PATTERNS
+
+
 def pick_pattern(theme_category: str = "", platform: str = "", account: str = "") -> dict:
     """テーマカテゴリとプラットフォームに合うパターンを1つ選ぶ"""
-    # syutain アカウントは全パターン使用可
-    # shimahara アカウントは笑い系パターンは使わない（真面目投稿）
     if account == "shimahara":
-        return {}  # 島原アカウントはパターン不使用
+        return {}
 
-    return random.choice(HUMOR_COMBO_PATTERNS)
+    # 70%の確率で手書きパターン（質が高い）、30%で自動パターン（バリエーション）
+    if random.random() < 0.70 and HUMOR_COMBO_PATTERNS:
+        return random.choice(HUMOR_COMBO_PATTERNS)
+    else:
+        return random.choice(_AUTO_PATTERNS) if _AUTO_PATTERNS else random.choice(HUMOR_COMBO_PATTERNS)
 
 
 def format_pattern_prompt(pattern: dict) -> str:
