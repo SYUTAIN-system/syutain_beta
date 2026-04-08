@@ -824,6 +824,15 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # 拡散KPIダッシュボード通知（毎日 21:00 JST — 実行書「毎日見る数字」）
+            self._scheduler.add_job(
+                self.diffusion_kpi_daily,
+                CronTrigger(hour=21, minute=0, timezone="Asia/Tokyo"),
+                id="diffusion_kpi_daily",
+                name="拡散KPI日次通知（21:00）",
+                replace_existing=True,
+            )
+
             # 経営日報（毎日 07:05 JST）
             self._scheduler.add_job(
                 self.executive_briefing,
@@ -1735,6 +1744,50 @@ class SyutainScheduler:
                 logger.info("A/Bテスト評価: 評価対象なし")
         except Exception as e:
             logger.error(f"A/Bテスト評価失敗: {e}")
+
+    async def diffusion_kpi_daily(self):
+        """拡散実行書「毎日見る数字」をDiscord通知"""
+        try:
+            from tools.db_pool import get_connection
+            from tools.discord_notify import notify_discord
+            async with get_connection() as conn:
+                x_eng = await conn.fetchrow("""
+                    SELECT COUNT(*) as posted,
+                           COALESCE(SUM((engagement_data->>'replies')::int), 0) as replies,
+                           COALESCE(SUM((engagement_data->>'retweets')::int), 0) as retweets,
+                           COALESCE(SUM((engagement_data->>'likes')::int), 0) as likes
+                    FROM posting_queue
+                    WHERE platform = 'x' AND status = 'posted'
+                    AND posted_at > NOW() - INTERVAL '24 hours'
+                """)
+                sns_all = await conn.fetchrow("""
+                    SELECT COUNT(*) as posted,
+                           COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
+                           COUNT(*) FILTER (WHERE status = 'failed') as failed
+                    FROM posting_queue
+                    WHERE scheduled_at > NOW() - INTERVAL '24 hours'
+                """)
+                note_today = await conn.fetchval("""
+                    SELECT COUNT(*) FROM product_packages
+                    WHERE platform = 'note' AND status = 'published'
+                    AND published_at > NOW() - INTERVAL '24 hours'
+                """)
+                ab_results = await conn.fetchval("""
+                    SELECT COUNT(*) FROM event_log
+                    WHERE event_type = 'sns.ab_test_result'
+                    AND created_at > NOW() - INTERVAL '24 hours'
+                """)
+                msg = (
+                    f"📊 拡散KPI（直近24h）\n"
+                    f"X: {x_eng['posted'] or 0}投稿 / リプ{x_eng['replies'] or 0} / RT{x_eng['retweets'] or 0} / いいね{x_eng['likes'] or 0}\n"
+                    f"SNS全体: 投稿{sns_all['posted'] or 0} / 却下{sns_all['rejected'] or 0} / 失敗{sns_all['failed'] or 0}\n"
+                    f"note: {note_today or 0}本公開\n"
+                    f"A/Bテスト: {ab_results or 0}件評価完了"
+                )
+                await notify_discord(msg)
+                logger.info("拡散KPI日次通知送信")
+        except Exception as e:
+            logger.error(f"拡散KPI通知失敗: {e}")
 
     async def evaluate_ab_tests_job(self):
         """A/Bテスト評価（両バリアント投稿から24h経過分のみ）"""
