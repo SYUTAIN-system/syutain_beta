@@ -45,8 +45,15 @@ _COST_RATES_JPY_PER_1K = {
 
 # ===== OpenRouter 無料モデル設定 =====
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-# Qwen 3.6 Plus: 深い思考タスク用（38 tok/s、高品質）
-OPENROUTER_QWEN36_MODEL = "qwen/qwen3.6-plus:free"
+# 2026-04-08: Qwen 3.6 Plus:free 廃止。代替モデルチェーン（順にフォールバック）
+# Qwen3 Next 80B > Nemotron 3 Super 120B > Step 3.5 Flash > Gemma 4 31B
+OPENROUTER_CONTENT_MODELS = [
+    "qwen/qwen3-next-80b-a3b-instruct:free",      # Qwen系、日本語強い
+    "nvidia/nemotron-3-super-120b-a12b:free",       # 大型、高品質
+    "stepfun/step-3.5-flash:free",                  # 高速
+    "google/gemma-4-31b-it:free",                   # Gemma 4
+]
+OPENROUTER_QWEN36_MODEL = OPENROUTER_CONTENT_MODELS[0]  # デフォルト
 # Nemotron-3 Nano 30B: chat/chat_light用（184 tok/s、高速）
 OPENROUTER_NEMOTRON30B_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 _openrouter_daily_count = 0
@@ -957,26 +964,37 @@ async def _call_openrouter(prompt: str, system_prompt: str, model: str, max_toke
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    # モデルチェーン: 指定モデルが404/廃止なら代替モデルを順に試す
+    models_to_try = [model]
+    if model in OPENROUTER_CONTENT_MODELS:
+        models_to_try = OPENROUTER_CONTENT_MODELS.copy()
+    elif model == OPENROUTER_QWEN36_MODEL:
+        models_to_try = OPENROUTER_CONTENT_MODELS.copy()
+
     last_error = None
-    for attempt in range(3):
-        try:
-            resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-            _openrouter_record_use()
-            if not resp or not resp.choices:
-                raise ValueError("OpenRouter returned empty choices")
-            return {
-                "text": resp.choices[0].message.content or "",
-                "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
-                "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
-            }
-        except Exception as e:
-            last_error = e
-            err_str = str(e).lower()
-            if "429" in err_str or "rate" in err_str:
-                if attempt < 2:
-                    logger.warning(f"OpenRouter 429 (attempt {attempt+1}/3, model={model}): {str(e)[:100]}. 5秒後リトライ")
-                    await asyncio.sleep(5)
-                    continue
+    for current_model in models_to_try:
+        for attempt in range(3):
+            try:
+                resp = await client.chat.completions.create(model=current_model, messages=messages, max_tokens=max_tokens)
+                _openrouter_record_use()
+                if not resp or not resp.choices:
+                    raise ValueError("OpenRouter returned empty choices")
+                return {
+                    "text": resp.choices[0].message.content or "",
+                    "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
+                    "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
+                }
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if "404" in err_str or "deprecated" in err_str:
+                    logger.warning(f"OpenRouter モデル廃止/404 ({current_model}): {str(e)[:80]}. 次のモデルへ")
+                    break  # 次のモデルへ
+                if "429" in err_str or "rate" in err_str:
+                    if attempt < 2:
+                        logger.warning(f"OpenRouter 429 (attempt {attempt+1}/3, model={current_model}): {str(e)[:100]}. 5秒後リトライ")
+                        await asyncio.sleep(5)
+                        continue
             raise  # 429 以外のエラー、または 3 回リトライ失敗は即 raise
 
     raise last_error or RuntimeError("OpenRouter 3回リトライ後も失敗")

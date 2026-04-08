@@ -1397,10 +1397,24 @@ async def generate_publishable_content(
             if not first_draft or len(first_draft) < _MIN_DRAFT_LENGTH:
                 raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低{_MIN_DRAFT_LENGTH}字必要）")
 
-            # 事実検証チェック (static)
+            # 事実検証チェック (static) + 虚偽箇所自動除去
             factual_issues = _verify_factual_claims(first_draft)
             if factual_issues:
                 logger.warning(f"Stage 3 事実検証: {len(factual_issues)}件の問題 — {factual_issues}")
+                # 虚偽箇所を自動除去（段落単位で削除）
+                _falsity_patterns_for_removal = [
+                    r'(?:Grafana|Prometheus|Datadog|Sentry|NewRelic|Splunk)[^。\n]*[。\n]',
+                    r'[^。\n]*(?:運用チーム|開発チーム|開発メンバー|同僚が|離職率)[^。\n]*[。\n]',
+                    r'[^。\n]*VTuber[^。\n]*(?:支える|支援する|管理する)[^。\n]*[。\n]',
+                ]
+                _removed_count = 0
+                for pattern in _falsity_patterns_for_removal:
+                    matches = re.findall(pattern, first_draft)
+                    for m in matches:
+                        first_draft = first_draft.replace(m, "")
+                        _removed_count += 1
+                if _removed_count > 0:
+                    logger.info(f"Stage 3 虚偽自動除去: {_removed_count}箇所の捏造文を削除")
                 # critical issues（タイムライン矛盾・経歴矛盾）が3件以上なら初稿を棄却
                 critical = [i for i in factual_issues if "[タイムライン矛盾]" in i or "[経歴矛盾]" in i]
                 if len(critical) >= 3:
