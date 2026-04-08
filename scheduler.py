@@ -210,7 +210,7 @@ class SyutainScheduler:
                 self.night_batch_sns_3,
                 CronTrigger(hour=23, minute=0, timezone="Asia/Tokyo"),
                 id="night_batch_sns_3",
-                name="SNS生成3: 予備（23:00）",
+                name="SNS生成3: X予備（23:00）",
                 replace_existing=True,
             )
             self._scheduler.add_job(
@@ -218,6 +218,14 @@ class SyutainScheduler:
                 CronTrigger(hour=23, minute=30, timezone="Asia/Tokyo"),
                 id="night_batch_sns_4",
                 name="SNS生成4: Threads7件（23:30）",
+                replace_existing=True,
+            )
+            # 不足分自動補充（24:00 = 翌日00:00）
+            self._scheduler.add_job(
+                self.night_batch_sns_missing,
+                CronTrigger(hour=0, minute=0, timezone="Asia/Tokyo"),
+                id="night_batch_sns_missing",
+                name="SNS不足分自動補充（00:00）",
                 replace_existing=True,
             )
 
@@ -3557,6 +3565,24 @@ class SyutainScheduler:
     async def night_batch_sns_4(self):
         await self._run_sns_batch(4)
 
+    async def night_batch_sns_missing(self):
+        """00:00 不足分自動補充 — 全バッチ完了後に不足を検出して補充"""
+        try:
+            from brain_alpha.sns_batch import generate_missing_posts, JST
+            result = await generate_missing_posts(target_date=datetime.now(tz=JST))
+            inserted = result.get("inserted", 0)
+            if inserted > 0:
+                logger.info(f"SNS不足分補充: {inserted}件生成")
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(f"📝 SNS不足分を{inserted}件補充しました")
+                except Exception:
+                    pass
+            else:
+                logger.info("SNS不足分補充: 全プラットフォーム充足済み")
+        except Exception as e:
+            logger.error(f"SNS不足分補充失敗: {e}")
+
     async def _generate_daily_content_impl(self, slot_name: str, theme_hint: str, extra_kwargs: dict = None):
         """日次コンテンツ生成共通実装: 5段パイプラインでnote記事候補を1本生成"""
         try:
@@ -3596,7 +3622,16 @@ class SyutainScheduler:
             except Exception as _skip_err:
                 logger.debug(f"note日次チェック失敗（続行）: {_skip_err}")
 
-            effective_theme = theme_hint if theme_hint else f"【{_layer_name}】{_layer_theme}"
+            # テーマは地層名のみ。説明文はcontent_pipelineが実データから具体化する
+            # 旧: f"【{_layer_name}】{_layer_theme}" → 説明文がそのままタイトルになる問題
+            _layer_short_themes = {
+                "記録層（週報）": "SYUTAINβ週報: 今週の全数字公開",
+                "事件層": "SYUTAINβで直近に起きた具体的な出来事",
+                "情報層（intel駆動）": "情報収集パイプラインが見つけた最新の話題",
+                "知見層": "SYUTAINβの運用で得たノウハウ",
+                "思想層": "AIと人間の境界線についての問い",
+            }
+            effective_theme = theme_hint if theme_hint else _layer_short_themes.get(_layer_name, f"{_layer_name}の記事")
             kwargs = {"content_type": "note_article", "target_length": 6000, "theme": effective_theme}
             if extra_kwargs:
                 kwargs.update(extra_kwargs)

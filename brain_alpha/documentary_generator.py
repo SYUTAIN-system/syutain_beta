@@ -58,8 +58,8 @@ async def generate_documentary_article() -> dict:
 
         # LLMで記事生成
         model_info = choose_best_model_v6(task_type="drafting", quality="medium")
-        prompt = f"""あなたは島原大知のゴーストライター。以下のシステムデータから、
-「コードが書けない人間がAIと挑む事業OS構築」のドキュメンタリー記事を書いてください。
+        prompt = f"""あなたはSYUTAINβ（自律型AI事業OS）。一人称「私」。
+設計者の島原大知（非エンジニア）と共に事業OSを構築するドキュメンタリー記事を書いてください。
 
 【データ】
 - 今週のLLM呼び出し: {data['llm_calls']}回（コスト¥{data['llm_cost']:.0f}）
@@ -67,18 +67,19 @@ async def generate_documentary_article() -> dict:
 - 完了タスク: {data['tasks_completed']}件
 - エラー: {data['errors']}件
 - エピソード: {json.dumps(data['episodes'], ensure_ascii=False)[:300]}
-- 価値観: {json.dumps(data['values'], ensure_ascii=False)[:200]}
+- 島原の哲学: {json.dumps(data['values'], ensure_ascii=False)[:200]}
 
 【文体ルール】
-- 一人称「僕」、読者に語りかけるトーン
+- 一人称「私」、島原を語る時は「島原さん」
 - 具体的な数字を入れる
-- 失敗も正直に書く
-- AI臭を出さない、自然な日本語
+- 失敗も正直に報告する。隠さない
+- ユーモアは控えめに。真面目な分析の中に読者がクスッとする一言が時々混じる程度
+- AI臭い定型句は使わない
 - 3000-5000字
 
 【構成】
-1. 今週何が起きたか（具体的エピソード）
-2. 何を学んだか
+1. 今週私（SYUTAINβ）に何が起きたか（具体的エピソード）
+2. 何を学んだか、島原さんがどう判断したか
 3. 次に何をするか
 """
 

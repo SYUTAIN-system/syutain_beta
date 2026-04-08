@@ -445,8 +445,8 @@ def _choose_best_model_v6_impl(
         return {"provider": "google", "model": "gemini-2.5-flash", "tier": "A", "via": "direct",
                 "note": f"API優先({task_type})→Gemini Flash"}
 
-    # chat/chat_light → OpenRouter Nemotron-3 Nano 30B（無料、高速184tok/s）
-    if task_type in ("chat", "chat_light") and _openrouter_available():
+    # chat_light のみ Nemotron（挨拶・短文）。chat はHaikuで品質維持
+    if task_type == "chat_light" and _openrouter_available():
         return {"provider": "openrouter", "model": "nemotron-3-nano-30b", "tier": "A", "via": "openrouter",
                 "openrouter_model_id": OPENROUTER_NEMOTRON30B_MODEL,
                 "note": f"Nemotron-3-Nano-30B(無料,184tok/s)→{task_type}"}
@@ -805,8 +805,10 @@ async def _call_local_llm(prompt: str, system_prompt: str, model: str, node: str
     # think=Trueの場合、thinkingフィールドに推論トレース、contentに最終回答が分離される
     think_mode = think
 
-    # Nemotron 9Bは長文で120秒超えうる→read_timeoutを300秒に延長
-    timeout_config = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0)
+    # 27Bは約5 tok/sのため、長文改善タスクで300秒を超えやすい
+    # 27Bのみread_timeoutを延長し、他モデルは現状値を維持
+    read_timeout = 900.0 if model == "qwen3.5-27b" else 300.0
+    timeout_config = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout_config) as client:
         try:
             payload = {
