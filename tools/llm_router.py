@@ -48,8 +48,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 # 2026-04-08: Qwen 3.6 Plus:free 廃止。代替モデルチェーン（順にフォールバック）
 # Qwen3 Next 80B > Nemotron 3 Super 120B > Step 3.5 Flash > Gemma 4 31B
 OPENROUTER_CONTENT_MODELS = [
-    "google/gemma-4-31b-it:free",                   # Gemma 4 31B: 最速1.8s、日本語良好
-    "nvidia/nemotron-3-super-120b-a12b:free",       # Nemotron Super: 大型5.6s
+    # Gemma 4は429が頻発するため2番目に。SNS30件一括生成で全滅した教訓 (2026-04-08)
+    "nvidia/nemotron-3-super-120b-a12b:free",       # Nemotron Super: 大型5.6s、429少ない
+    "google/gemma-4-31b-it:free",                   # Gemma 4 31B: 高品質だが429頻発
     "qwen/qwen3-next-80b-a3b-instruct:free",       # Qwen3 Next: 429出やすいが日本語強い
     "stepfun/step-3.5-flash:free",                  # Step Flash: フォールバック
 ]
