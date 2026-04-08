@@ -2486,21 +2486,24 @@ async def evaluate_ab_tests() -> list[dict]:
     eval_results = []
     try:
         async with get_connection() as conn:
-            # 24h以上前に投稿されたA/Bテストペアを集計
+            # 両バリアントとも投稿から24h以上経過したA/Bテストペアを集計
+            # (バリアントBはAの2時間後に投稿されるため、Bの経過時間で判定)
             tests = await conn.fetch(
                 """SELECT ab_test_id,
                        json_agg(json_build_object(
                            'variant', ab_variant,
                            'engagement_data', engagement_data,
                            'content', LEFT(content, 80),
+                           'posted_at', posted_at,
                            'id', id
                        )) as variants
                    FROM posting_queue
                    WHERE ab_test_id IS NOT NULL
                      AND status = 'posted'
-                     AND posted_at < NOW() - INTERVAL '24 hours'
                    GROUP BY ab_test_id
-                   HAVING COUNT(*) = 2"""
+                   HAVING COUNT(*) = 2
+                     AND MIN(posted_at) < NOW() - INTERVAL '24 hours'
+                     AND MAX(posted_at) < NOW() - INTERVAL '24 hours'"""
             )
 
             for test in tests:
