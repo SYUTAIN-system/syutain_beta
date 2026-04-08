@@ -271,6 +271,15 @@ class SyutainScheduler:
                 replace_existing=True,
                 misfire_grace_time=60,
             )
+            # Xトレンドミーム検出（毎日 20:00 JST — SNSバッチ22:00の2時間前）
+            self._scheduler.add_job(
+                self.detect_x_trending_memes,
+                CronTrigger(hour=20, minute=0, timezone="Asia/Tokyo"),
+                id="detect_x_trending_memes",
+                name="Xトレンドミーム検出（20:00）",
+                replace_existing=True,
+            )
+
             # note記事素材収集（07:00 JST — 記事生成の30分前に素材を蓄積）
             self._scheduler.add_job(
                 self.note_material_collect,
@@ -1744,6 +1753,41 @@ class SyutainScheduler:
                 logger.info("A/Bテスト評価: 評価対象なし")
         except Exception as e:
             logger.error(f"A/Bテスト評価失敗: {e}")
+
+    async def detect_x_trending_memes(self):
+        """Grok X検索で今日のトレンド構文/ミームを検出してintel_itemsに保存"""
+        try:
+            import random, json
+            from tools.grok_client import search_x
+            from tools.db_pool import get_connection
+
+            # 抽象的なクエリをランダムで選ぶ（毎日違う角度で検索）
+            queries = [
+                "今日のXで一番面白い投稿パターンは？みんなが真似してるネタ",
+                "今Xで流行ってるネタ、パロってるやつ、大喜利のお題、面白い現象",
+                "日本のXで今バズってる構文、ミーム、テンプレ、ネタツイ",
+                "Xで今日トレンドになってる面白い投稿形式やフォーマット",
+                "みんなが真似してる投稿、流行りの大喜利、ネットミーム、バズ構文",
+            ]
+            query = random.choice(queries)
+            result = await search_x(query)
+            text = result.get("text", "")
+            cost = result.get("cost_jpy", 0)
+
+            if text and len(text) > 100:
+                async with get_connection() as conn:
+                    await conn.execute(
+                        """INSERT INTO intel_items (title, summary, source, category, review_flag, importance_score, metadata)
+                           VALUES ($1, $2, 'x_trending_meme', 'meme_trend', 'actionable', 8, $3)""",
+                        f"Xトレンドミーム検出 ({datetime.now().strftime('%Y-%m-%d')})",
+                        text[:2000],
+                        json.dumps({"query": query, "cost_jpy": cost, "date": datetime.now().strftime("%Y-%m-%d")}, ensure_ascii=False),
+                    )
+                logger.info(f"Xトレンドミーム検出完了: {len(text)}字 (¥{cost:.2f})")
+            else:
+                logger.warning("Xトレンドミーム検出: 結果が短い")
+        except Exception as e:
+            logger.error(f"Xトレンドミーム検出失敗: {e}")
 
     async def diffusion_kpi_daily(self):
         """拡散実行書「毎日見る数字」をDiscord通知"""

@@ -384,6 +384,21 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
     except Exception:
         pass
 
+    # 9. トレンドミーム（本日検出分）
+    try:
+        meme_items = await conn.fetch(
+            """SELECT summary FROM intel_items
+            WHERE source = 'x_trending_meme'
+            AND created_at > NOW() - INTERVAL '24 hours'
+            ORDER BY created_at DESC LIMIT 1"""
+        )
+        if meme_items:
+            # ミーム情報から最初の200字だけ抽出
+            meme_text = (meme_items[0]['summary'] or '')[:200]
+            materials.append(f"[今日のXトレンド] {meme_text}")
+    except Exception:
+        pass
+
     if not materials:
         materials.append("[フォールバック] SYUTAINβの直近の運用状況を1つだけ報告")
 
@@ -1191,6 +1206,19 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     except Exception:
         pass
 
+    # ユーモア構造ガイド + トレンドミーム注入
+    humor_injection = ""
+    try:
+        from strategy.japanese_humor_patterns import build_humor_prompt, build_meme_context
+        humor_injection = build_humor_prompt(platform, account)
+        # intel_itemsからトレンドミーム素材を取得（本日分のみ）
+        if materials:
+            _meme_materials = [m for m in (materials or []) if "トレンド" in m or "ミーム" in m or "大喜利" in m]
+            if _meme_materials:
+                humor_injection += "\n" + "\n".join(f"- {m[:150]}" for m in _meme_materials[:2])
+    except Exception:
+        pass
+
     # バズ・トレンド注入（参考素材、関連あれば取り入れる）
     buzz_injection = ""
     if buzz_prompt:
@@ -1324,6 +1352,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
+            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"{few_shot_text}\n"
@@ -1368,6 +1397,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
+            f"{humor_injection}"
             f"{buzz_injection}"
             f"{_abnormal_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
@@ -1394,6 +1424,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
+            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
@@ -1419,6 +1450,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
+            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
