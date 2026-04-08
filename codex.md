@@ -82,3 +82,47 @@ Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry
 - Qiita/Zenn: independent tech article pipeline + auto-publish + SNS announce
 - SNS batch5: 00:00 missing post auto-fill
 - SNS batch3: X backup at 23:00 (dedup fills only missing posts)
+
+## Improvement Targets & KPIs (Codex改善指標)
+
+Codexが自律改善を行う際、以下の指標を基準に判断すること。
+
+### SNS投稿品質
+| 指標 | 現状 | 目標 | 計測方法 |
+|------|------|------|---------|
+| 品質スコア平均 | 0.63-0.73 | 0.75+ | posting_queue.quality_score AVG |
+| 却下率 | ~30% | 15%以下 | rejected / total |
+| テーマ多様性 | 5カテゴリ | 5カテゴリ均等 | theme_category分布 |
+| 虚偽検出率 | 要計測 | 0% | falsity_blocked / total |
+| LLM数字固着 | 頻発 | 10投稿に1回以下 | 「LLM呼び出し」を含む投稿比率 |
+| アカウント声一致 | 要計測 | shimahara+0.03以上 / syutain+0.03以上 | check_account_voice AVG |
+
+### note記事品質
+| 指標 | 現状 | 目標 | 計測方法 |
+|------|------|------|---------|
+| 日次公開数 | 0-1本/日 | 1本/日安定 | product_packages(note, published) per day |
+| 品質スコア | 0.80-0.84 | 0.85+ | content_pipeline quality_score |
+| 事実チェック通過率 | ~30% | 70%+ | fabrication_risk < 0.6 の比率 |
+| 実データ注入量 | 3,800字 | 4,000字+ | _collect_system_data_for_article 出力 |
+| 一人称一致（私） | 95% | 100% | 「僕」混入ゼロ |
+
+### システム安定性
+| 指標 | 現状 | 目標 | 計測方法 |
+|------|------|------|---------|
+| LLM ReadTimeout | 3-4件/日 | 1件/日以下 | event_log(llm.error) |
+| OpenRouter 429 | 頻発 | モデルチェーンで自動回避 | llm_router WARNING count |
+| SNS投稿配信率 | 80%+ | 95%+ | posted / (posted + pending + failed) |
+| Bluesky 400エラー | 0件 | 0件維持 | event_log(sns.post_failed, bluesky) |
+
+### 改善の方向性
+1. **品質向上**: プロンプト改善、素材選定精度向上、few-shot例の更新
+2. **多様性**: テーマエンジンのカテゴリバランス調整、固着検知の精度向上
+3. **虚偽防止**: フィルターパターン追加、生成プロンプトの制約強化
+4. **コスト効率**: ローカルLLM比率の維持、無料モデルの活用最大化
+5. **安定性**: タイムアウト対策、フォールバックチェーンの最適化
+
+### Codex改善時の原則
+- **壊すな**: 動いているものを壊さない。改善は漸進的に
+- **測れ**: 改善前後で上記KPIを比較。数字で効果を示す
+- **戻せ**: 変更は小さく。100行以内。問題があれば即リバート
+- **記録しろ**: 何を変えたか、なぜ変えたかをevent_logに記録
