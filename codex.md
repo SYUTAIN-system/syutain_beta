@@ -68,11 +68,17 @@ Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry
 - Timezone: all scheduled_at must be JST-aware (timezone(timedelta(hours=9)))
 - Destructive ACTIONs: never via LLM free-text, only regex direct route or ACTION tag
 
-## Recent Changes (2026-04-07)
-- Fixed: SNS scheduled_at stored in UTC → now JST-aware
-- Fixed: factbook injecting all facts → now theme-relevant only
-- Fixed: Stage 4 rewrite using local LLM → now uses cloud LLM
-- Added: theme engine for SNS content diversification
-- Added: content_pipeline → product_packages auto-insertion
-- Added: posting_queue dedup guard
-- Removed: sns_draft from OpenRouter task routing (local LLM only)
+## Recent Changes (2026-04-08)
+- SNS V2: material-based generation (8 sources, max 7 per post)
+- SNS V2: falsity filter → detect → fix → recheck loop (not just reject)
+- SNS V2: account voice check (shimahara/syutain score adjustment)
+- SNS V2: hashtags generated in post-processing, not by LLM
+- Article: SYUTAINβ perspective (一人称「私」), shimahara narration rules
+- Article: seed bank for "rumination" process, 5-layer rotation enforced
+- Article: note_material_collector pre-collects materials at 07:00
+- Article: fact checker relaxed (3+ critical to reject, number drift OK)
+- LLM: Qwen 3.6 Plus:free deprecated → model chain (Gemma4 → Nemotron → Qwen3 → Step)
+- LLM: chat task restored to Claude Haiku (not Nemotron Nano)
+- Qiita/Zenn: independent tech article pipeline + auto-publish + SNS announce
+- SNS batch5: 00:00 missing post auto-fill
+- SNS batch3: X backup at 23:00 (dedup fills only missing posts)
