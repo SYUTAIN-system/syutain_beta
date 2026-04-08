@@ -1,8 +1,9 @@
 # Codex Instructions for SYUTAINβ
 
 ## Project
-SYUTAINβ is a 62K+ line distributed autonomous AI business OS running on 4 nodes (ALPHA macOS + BRAVO/CHARLIE/DELTA Ubuntu).
+SYUTAINβ is a 65K+ line (112K total incl. web/docs) distributed autonomous AI business OS running on 4 nodes (ALPHA macOS + BRAVO/CHARLIE/DELTA Ubuntu).
 Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry support).
+SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/individual.
 
 ## Rules
 1. NEVER modify: agents/os_kernel.py, tools/emergency_kill.py, agents/approval_manager.py, tools/loop_guard.py, .env, credentials.json, token.json, CLAUDE.md
@@ -62,21 +63,25 @@ Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry
 5. shimahara_fields — business/startup/marketing/culture
 
 ## Architecture Notes
-- LLM routing: choose_best_model_v6() — local LLM first, articles use free cloud
-- SNS posts: local LLM only (nemotron-jp / qwen3.5:9b), NOT OpenRouter
-- Articles: OpenRouter Qwen 3.6 Plus (free) → Gemini Flash fallback
+- LLM routing: choose_best_model_v6() — gpt-4o-mini for SNS+articles, local for light tasks
+- SNS + articles: gpt-4o-mini via OpenRouter (¥136/month). Fallback: qwen3-235b → Gemini Flash
+- 4 account-specific prompts: shimahara X (humor 40%/honest 95%) / syutain X (75%/90% + memes) / Bluesky (150 char, Build in Public) / Threads (empathy, no money talk)
 - Timezone: all scheduled_at must be JST-aware (timezone(timedelta(hours=9)))
 - Destructive ACTIONs: never via LLM free-text, only regex direct route or ACTION tag
 
-## Recent Changes (2026-04-08)
-- SNS V2: material-based generation (8 sources, max 7 per post)
-- SNS V2: falsity filter → detect → fix → recheck loop (not just reject)
-- SNS V2: account voice check (shimahara/syutain score adjustment)
-- SNS V2: hashtags generated in post-processing, not by LLM
-- Article: SYUTAINβ perspective (一人称「私」), shimahara narration rules
-- Article: seed bank for "rumination" process, 5-layer rotation enforced
-- Article: note_material_collector pre-collects materials at 07:00
-- Article: fact checker relaxed (3+ critical to reject, number drift OK)
+## Recent Changes (2026-04-09)
+- SNS V3: 4 account-specific prompts (shimahara/syutain/bluesky/threads)
+- SNS V3: gpt-4o-mini for all SNS+article generation (was free models)
+- SNS V3: 70 abnormal patterns + 40 opening patterns + 1000 variation combos
+- SNS V3: exclusive choice per post: abnormal 45% / meme structure 30% / slang 25%
+- SNS V3: identity separation rules (SYUTAINβ ≠ shimahara, no "当社/弊社")
+- SNS V3: material matching (effect number check, proper noun check removed)
+- SNS V3: retry 3→5, missing fill at 00:00 + 02:00
+- SNS V3: Bluesky 300→150 chars, Threads no money talk
+- SNS V3: 257 meme/slang assets (niconico 30 + 2ch 38 + comedy 21 + anime 75 + structures 40 + net 53)
+- Article: Stage 4 rewrite narrator fix (was "shimahara voice" → now "SYUTAINβ voice")
+- Article: gpt-4o-mini for note_article/note_draft
+- Sensitive strategy files removed from git (SOUL.md, meme vocab, humor patterns, diffusion plan)
 - LLM: Qwen 3.6 Plus:free deprecated → model chain (Gemma4 → Nemotron → Qwen3 → Step)
 - LLM: chat task restored to Claude Haiku (not Nemotron Nano)
 - Qiita/Zenn: independent tech article pipeline + auto-publish + SNS announce
