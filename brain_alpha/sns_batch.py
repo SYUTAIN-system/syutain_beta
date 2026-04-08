@@ -1206,11 +1206,16 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     except Exception:
         pass
 
-    # ユーモア構造ガイド + トレンドミーム注入
+    # ユーモア構造ガイド + パターン選択 + トレンドミーム注入
     humor_injection = ""
     try:
         from strategy.japanese_humor_patterns import build_humor_prompt, build_meme_context
+        from strategy.humor_combination_patterns import pick_pattern, format_pattern_prompt
         humor_injection = build_humor_prompt(platform, account)
+        # 投稿パターンを1つ選んでプロンプトに注入
+        _humor_pattern = pick_pattern(theme_category="", platform=platform, account=account)
+        if _humor_pattern:
+            humor_injection += format_pattern_prompt(_humor_pattern)
         # intel_itemsからトレンドミーム素材を取得（本日分のみ）
         if materials:
             _meme_materials = [m for m in (materials or []) if "トレンド" in m or "ミーム" in m or "大喜利" in m]
