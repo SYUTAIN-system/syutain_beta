@@ -2082,18 +2082,57 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             # テーマ品質追跡に記録
             _track_theme_quality(theme, platform, quality)
 
-            # V2: 虚偽フィルター（正規表現ベース、高速）
-            falsity_issues = check_falsity(draft)
-            if falsity_issues:
-                logger.warning(f"虚偽検出 ({platform}/{account}): {falsity_issues}")
-                results["rejected"] += 1
-                await conn.execute(
-                    """INSERT INTO posting_queue
-                       (platform, account, content, scheduled_at, status, quality_score, theme_category)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
-                    platform, account, draft, scheduled, "falsity_blocked", quality, theme,
-                )
-                continue
+            # V2: 虚偽フィルター → 検出時は修正を試みる（最大2回）
+            for _fix_attempt in range(3):
+                falsity_issues = check_falsity(draft)
+                if not falsity_issues:
+                    break  # 虚偽なし、通過
+
+                if _fix_attempt < 2:
+                    # 虚偽箇所を正規表現で除去
+                    _original_len = len(draft)
+                    for issue in falsity_issues:
+                        if "未使用ツール名" in issue:
+                            draft = _re_falsity.sub(r'(?:Grafana|Prometheus|Datadog|Sentry|NewRelic|Splunk)[^。\n]*[。\n]?', '', draft)
+                        elif "組織捏造" in issue:
+                            draft = _re_falsity.sub(r'[^。\n]*(?:運用チーム|開発チーム|開発メンバー|同僚|離職率|部署|担当者が)[^。\n]*[。\n]?', '', draft)
+                        elif "コーディング捏造" in issue:
+                            draft = _re_falsity.sub(r'[^。\n]*(?:コードを書[いくけ]|プログラミングし|コーディングし)[^。\n]*[。\n]?', '', draft)
+                        elif "VTuber活動捏造" in issue:
+                            draft = _re_falsity.sub(r'[^。\n]*(?:VTuberとして活動|配信し(?:た|て)|VTuberデビュー)[^。\n]*[。\n]?', '', draft)
+                    draft = draft.strip()
+
+                    # 削除後に短すぎたらLLMで補完
+                    _min_len = 30 if platform == "x" else 50
+                    if len(draft) < _min_len:
+                        try:
+                            _fix_result = await call_llm(
+                                prompt=f"以下の投稿文を自然に書き直してください。虚偽（{', '.join(falsity_issues)}）を含まないように。テーマ: {theme}\n\n元の文: {draft}\n\n書き直した投稿文のみを出力:",
+                                system_prompt=system_prompt,
+                                model_selection=model_sel,
+                            )
+                            draft = _fix_result.get("text", draft).strip()
+                        except Exception:
+                            pass
+
+                    if len(draft) != _original_len:
+                        logger.info(f"虚偽修正 attempt {_fix_attempt+1} ({platform}/{account}): {falsity_issues} → {_original_len}字→{len(draft)}字")
+                else:
+                    # 3回目も虚偽が残る → リジェクト
+                    logger.warning(f"虚偽修正失敗 ({platform}/{account}): {falsity_issues}")
+                    results["rejected"] += 1
+                    await conn.execute(
+                        """INSERT INTO posting_queue
+                           (platform, account, content, scheduled_at, status, quality_score, theme_category)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                        platform, account, draft, scheduled, "falsity_blocked", quality, theme,
+                    )
+                    break
+            else:
+                # forループが正常完了（breakなし = 虚偽なしで通過）
+                pass
+            if falsity_issues and _fix_attempt >= 2:
+                continue  # リジェクト済み、次の投稿へ
 
             # V2: アカウント一致チェック（スコア調整）
             voice_adj = check_account_voice(draft, platform, account)
