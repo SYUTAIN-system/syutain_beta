@@ -388,11 +388,15 @@ _PERSONA_KEYWORDS = [
 
 
 # 多軸品質評価（SNS投稿向け）
-def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
-    """SNS投稿の品質を7軸で算出（0.0-1.0）
+def _score_multi_axis(text: str, persona_keywords: list[str] = None,
+                      theme: str = "", theme_category: str = "",
+                      platform: str = "", account: str = "") -> float:
+    """SNS投稿の品質を10軸で算出（0.0-1.0）
 
-    各軸は実際の投稿品質の差が反映されるよう設計。
-    旧版の問題: AI臭さ(ほぼ1.0)、具体性(ほぼ0.0)、独自性(ほぼ1.0)で分散なし。
+    V2改善 (2026-04-08):
+    - テーマ関連性の軸を追加（テーマに沿った内容かどうか）
+    - 事実密度がLLM数字で稼げる問題を修正（テーマ外の運用数字は加点しない）
+    - ペルソナ一致をアカウント別に評価（shimahara思考特性語/syutain自己認識語）
     """
     if not text or len(text) < 10:
         return 0.0
@@ -471,23 +475,32 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     emotion_count = sum(1 for m in emotion_markers if m in text)
     human_score += min(0.3, emotion_count * 0.10)
 
-    # --- 軸2: 島原大知/SYUTAINβらしさ (0-1, w=0.17) ---
-    persona_score = 0.25  # ベースライン（0.1→0.25: キーワード0でも文脈的にペルソナ関連の可能性）
-    if persona_keywords:
-        matches = sum(1 for kw in persona_keywords if kw in text)
-        # 1-2マッチで大幅UP、3以上はキャップ
-        if matches >= 3:
-            persona_score = 0.9
-        elif matches == 2:
-            persona_score = 0.7
-        elif matches == 1:
-            persona_score = 0.5
-    # SYUTAINβ特有のコンテキスト
-    syutain_context = ["事業OS", "収益", "パイプライン", "エージェント", "ノード",
-                       "デジタルツイン", "贖罪", "VTuber支援", "8年"]
+    # --- 軸2: アカウント別ペルソナ一致 (0-1, w=0.17) ---
+    persona_score = 0.25  # ベースライン
+    if platform == "x" and account == "shimahara":
+        # 島原アカウント: 思考特性語で評価
+        _shimahara_voice = ["構造", "境界", "正直", "本質", "裏側", "設計", "壊れ",
+                            "人", "具体", "現実", "でも", "だが", "僕"]
+        matches = sum(1 for kw in _shimahara_voice if kw in text)
+        persona_score = min(1.0, 0.25 + matches * 0.08)
+    elif account in ("syutain", "syutain_beta"):
+        # SYUTAINβアカウント: 自己認識語で評価
+        _syutain_voice = ["私", "記録", "検出", "分析", "報告", "実行", "島原さん",
+                          "event_log", "設計者", "判断", "…"]
+        matches = sum(1 for kw in _syutain_voice if kw in text)
+        persona_score = min(1.0, 0.25 + matches * 0.08)
+    else:
+        # 汎用: 従来のキーワードマッチ
+        if persona_keywords:
+            matches = sum(1 for kw in persona_keywords if kw in text)
+            if matches >= 3: persona_score = 0.9
+            elif matches == 2: persona_score = 0.7
+            elif matches == 1: persona_score = 0.5
+    # SYUTAINβ共通コンテキスト（全アカウント共通で加点）
+    syutain_context = ["事業OS", "パイプライン", "エージェント", "ノード"]
     for ctx in syutain_context:
         if ctx in text:
-            persona_score = min(1.0, persona_score + 0.15)
+            persona_score = min(1.0, persona_score + 0.10)
 
     # --- 軸3: 完結性 (0-1, w=0.20) ---
     # 文が自然に終わっているか、途中で切れていないか
@@ -645,13 +658,21 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     money_count = len(_re_fd.findall(r'[¥￥]\s*\d+|\d+\s*円', text))
 
     fact_density_score = 0.1  # ベースライン（最低）
+
+    # V2: LLM数字固着防止 — syutain_ops以外では運用数字（呼び出し回数/コスト/行数）を減点
+    _ops_number_patterns = _re_fd.findall(r'(?:LLM|呼び出し|コスト|¥|行数|Python)\s*[\d,]+', text)
+    _is_ops_theme = theme_category == "syutain_ops" or "運用" in theme or "SYUTAINβ" in theme
+    if _ops_number_patterns and not _is_ops_theme:
+        # テーマ外で運用数字を入れている → 加点しない（固着防止）
+        number_count = max(0, number_count - len(_ops_number_patterns))
+
     if number_count >= 3: fact_density_score += 0.35
     elif number_count >= 2: fact_density_score += 0.25
     elif number_count >= 1: fact_density_score += 0.15
     if system_term_count >= 3: fact_density_score += 0.30
     elif system_term_count >= 2: fact_density_score += 0.20
     elif system_term_count >= 1: fact_density_score += 0.10
-    if money_count >= 1: fact_density_score += 0.15
+    if money_count >= 1 and _is_ops_theme: fact_density_score += 0.15  # 金額もops以外では加点しない
     fact_density_score = min(1.0, fact_density_score)
 
     # === 軸9: 情景密度ペナルティ — 情景語の過剰使用を検出 ===
@@ -666,15 +687,34 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None) -> float:
     if scene_density > 0.5 and fact_density_score < 0.3:
         hard_fail = True
 
-    # 重み配分: fact_density最大(0.20)、structure/human/persona各0.14、completeness 0.14、engagement/ai各0.10、readability 0.04
+    # --- 軸10: テーマ関連性 (0-1, w=0.12) ---
+    theme_relevance = 0.3  # ベースライン
+    if theme:
+        _theme_words = [w for w in theme.replace("【", "").replace("】", "").split() if len(w) >= 2][:5]
+        _theme_hits = sum(1 for tw in _theme_words if tw in text)
+        theme_relevance = min(1.0, 0.3 + _theme_hits * 0.15)
+    # テーマカテゴリに対応するキーワードチェック
+    _cat_keywords = {
+        "ai_tech_trend": ["AI", "モデル", "トレンド", "最新", "技術"],
+        "creator_media": ["映像", "クリエイター", "VTuber", "ドローン", "写真", "広告"],
+        "philosophy_bip": ["設計", "哲学", "判断", "Build", "Public", "境界"],
+        "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "委譲"],
+        "syutain_ops": ["バグ", "修正", "エラー", "運用", "デプロイ", "障害"],
+    }
+    if theme_category and theme_category in _cat_keywords:
+        _cat_hits = sum(1 for ck in _cat_keywords[theme_category] if ck in text)
+        theme_relevance = min(1.0, theme_relevance + _cat_hits * 0.10)
+
+    # 重み配分V2: テーマ関連性追加、他を微調整
     score = (
-        fact_density_score * 0.20 +
+        fact_density_score * 0.16 +   # 0.20→0.16（LLM数字固着緩和）
+        theme_relevance * 0.12 +       # 新規: テーマ関連性
         structure_score * 0.14 +
-        human_score * 0.14 +
+        human_score * 0.12 +           # 0.14→0.12
         persona_score * 0.14 +
-        completeness * 0.14 +
-        engagement * 0.10 +
-        ai_score * 0.10 +
+        completeness * 0.12 +          # 0.14→0.12
+        engagement * 0.08 +            # 0.10→0.08
+        ai_score * 0.08 +              # 0.10→0.08
         readability * 0.04
     )
     score = round(max(0.0, min(1.0, score)), 3)
@@ -1771,7 +1811,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             continue
 
                         # 検証6: 品質スコア
-                        candidate_quality = _score_multi_axis(candidate_draft, persona_keywords=_PERSONA_KEYWORDS)
+                        candidate_quality = _score_multi_axis(candidate_draft, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
 
                         # 0.50未満は完全却下
                         if candidate_quality < 0.50:
@@ -1850,7 +1890,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                                any(retry_head in p for p in recent_posts):
                                 continue
 
-                            retry_quality = _score_multi_axis(retry_draft, persona_keywords=_PERSONA_KEYWORDS)
+                            retry_quality = _score_multi_axis(retry_draft, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
                             if retry_quality >= 0.50:
                                 candidates.append((retry_draft, retry_quality))
                         except Exception:
@@ -1899,7 +1939,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             refined, platform=platform, account=account,
                         )
                         if ng_refined["passed"] and refined_factual_ok:
-                            refined_quality = _score_multi_axis(refined, persona_keywords=_PERSONA_KEYWORDS)
+                            refined_quality = _score_multi_axis(refined, persona_keywords=_PERSONA_KEYWORDS, theme=theme, theme_category=_theme_detail.get("category", "") if _theme_detail else "", platform=platform, account=account)
                             if refined_quality > quality:
                                 # content_edit_logに精錬記録
                                 try:
