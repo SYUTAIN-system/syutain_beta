@@ -261,6 +261,14 @@ class SyutainScheduler:
                 name="SNS不足分自動補充（00:00）",
                 replace_existing=True,
             )
+            # 不足分自動補充2回目（02:00 — 00:00でも埋まらなかった分を再補充）
+            self._scheduler.add_job(
+                self.night_batch_sns_missing,
+                CronTrigger(hour=2, minute=0, timezone="Asia/Tokyo"),
+                id="night_batch_sns_missing_2",
+                name="SNS不足分自動補充2回目（02:00）",
+                replace_existing=True,
+            )
 
             # 記事シード植付+育成（4時間間隔 — 人間の「反芻」に相当）
             self._scheduler.add_job(

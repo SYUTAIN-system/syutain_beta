@@ -431,16 +431,26 @@ def _choose_best_model_v6_impl(
 
     # === Tier A: APIの方が品質が高いタスク ===
 
+    # === gpt-4o-mini 優先タスク（SNS投稿 + 記事生成）===
+    # 2026-04-08: 無料モデルはプロンプト消化不足でポエム・捏造が頻発。
+    # gpt-4o-mini は指示追従・捏造防止が強い。SNS月93円+記事月43円=月136円。
+    # フォールバック: gpt-4o-mini → qwen3-235b → Gemini Flash
+    _GPT4O_MINI_TASKS = {"sns_draft", "note_article", "note_draft"}
+    if task_type in _GPT4O_MINI_TASKS:
+        return {"provider": "openrouter", "model": "gpt-4o-mini", "tier": "A", "via": "openrouter",
+                "openrouter_model_id": "openai/gpt-4o-mini",
+                "note": f"gpt-4o-mini(有料)→{task_type}", "task_type": task_type}
+
     # OpenRouter Qwen 3.6 Plus（無料、1Mコンテキスト、高品質だが低速）
     # 「考える力」が必要で速度が許容されるタスクのみ。chat等の速度重要タスクは対象外
     _QWEN36_TASKS = {
         "proposal", "proposal_generation", "strategy", "competitive_analysis",  # 深い思考が必要
         "content_final", "note_article_final", "booth_description_final",       # 最終品質
         "complex_analysis", "persona_deep_analysis",                            # 深い分析
-        "note_article", "product_desc", "booth_description", "note_draft",      # コンテンツ生成
+        "product_desc", "booth_description",                                    # コンテンツ生成（note_article/note_draftはgpt-4o-miniに移動）
         # 2026-04-06 追加: ローカル LLM から無料クラウドに移行したタスク
         "content", "analysis", "research",                                      # 記事生成/分析/リサーチ
-        "sns_draft",                                                               # SNS投稿（Gemma4 31B無料で生成）
+        # 2026-04-08: sns_draft は gpt-4o-mini に移動（_SNS_DRAFT_TASKS）
         "drafting",                                                                # ドラフト
         "intel_summary",                                                        # 情報要約
     }
@@ -618,12 +628,27 @@ async def _call_llm_internal(
             try:
                 result = await _call_openrouter(prompt, system_prompt, or_model, max_tokens=max_tokens)
             except Exception as or_err:
-                # OpenRouter :free 失敗 → 3段フォールバックチェーン
-                # 2026-04-07: Qwen 3.6 Plus :free の upstream 429 対策
+                # OpenRouter 失敗 → フォールバックチェーン
                 err_str = str(or_err).lower()
                 is_rate_limit = "429" in err_str or "rate" in err_str
+                _task_hint = (model_selection or {}).get("task_type", "") or kwargs.get("task_type", "")
 
-                if is_rate_limit:
+                if is_rate_limit and _task_hint in ("sns_draft", "note_article", "note_draft"):
+                    # 2026-04-08: gpt-4o-miniタスク: → qwen3-235b → Gemini Flash
+                    logger.warning(f"OpenRouter 429 ({or_model}) {_task_hint} → qwen3-235b フォールバック")
+                    try:
+                        result = await _call_openrouter(prompt, system_prompt, "qwen/qwen3-235b-a22b-2507", max_tokens=max_tokens)
+                        model = "qwen3-235b"
+                        provider = "openrouter"
+                        tier = "A"
+                    except Exception as or2_err:
+                        logger.warning(f"qwen3-235bも失敗: {or2_err} → Gemini Flash フォールバック")
+                        result = await _call_google(prompt, system_prompt, "gemini-2.5-flash")
+                        model = "gemini-2.5-flash"
+                        provider = "google"
+                        tier = "A"
+                elif is_rate_limit:
+                    # 2026-04-07: Qwen 3.6 Plus :free の upstream 429 対策
                     logger.warning(f"OpenRouter 429 ({or_model}) → DeepSeek V3.2 フォールバック")
                     try:
                         result = await _call_deepseek(prompt, system_prompt, "deepseek-v3.2")

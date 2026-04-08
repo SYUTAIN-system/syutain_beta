@@ -281,7 +281,7 @@ TIME_THEME_WEIGHTS = {
 # Threadsはカジュアルなため完結性スコアが低くなりやすい
 PLATFORM_QUALITY_THRESHOLDS = {
     "x": 0.60,        # X: 0.68→0.60に緩和（2026-04-07: 品質改善まで暫定）
-    "bluesky": 0.58,  # Bluesky: 0.62→0.58に緩和
+    "bluesky": 0.52,  # Bluesky: 0.58→0.52に緩和（150字短文化で品質スコアが構造的に低くなるため）
     "threads": 0.58,  # Threads: 0.64→0.58に緩和
 }
 DEFAULT_QUALITY_THRESHOLD = 0.60
@@ -446,16 +446,41 @@ _FALSITY_PATTERNS = [
 ]
 
 
-def check_falsity(text: str, theme: str = "", theme_category: str = "") -> list[str]:
+def check_falsity(text: str, theme: str = "", theme_category: str = "",
+                   materials: list = None) -> list[str]:
     """投稿文の虚偽をチェック。検出された問題のリストを返す（空なら問題なし）
 
     V2: テーマ逸脱検出を統合。テーマから外れた主張は虚偽リスクが高い。
+    V3: 素材マッチング検証を追加。固有名詞・数値が素材に含まれるか照合。
     """
     issues = []
     # 1. 基本虚偽パターン
     for pattern, label in _FALSITY_PATTERNS:
         if pattern.search(text):
             issues.append(label)
+
+    # 1.5. 存在分離チェック（SYUTAINβが島原として行動する捏造）
+    _identity_confusion = [
+        (_re_falsity.compile(r'(?:当社|弊社|我々のチーム|うちのチーム)'), "組織捏造（個人開発）"),
+        (_re_falsity.compile(r'(?:私|SYUTAINβ)(?:が|は|も).{0,10}(?:担当し|制作し|撮影し|編集し|導入し|開発し)(?:た|て|ている)'),
+         "SYUTAINβの体験捏造（AIは物理作業をしない）"),
+    ]
+    for pat, label in _identity_confusion:
+        if pat.search(text):
+            issues.append(label)
+
+    # 1.7. 素材マッチング検証（検証不能な効果数値のみチェック）
+    # 固有名詞チェックは緩和（gpt-4o-miniの一般知識からの補足は許容する）
+    if materials:
+        import re as _re_mat
+        _mat_text = " ".join(str(m) for m in materials)
+
+        # 投稿内の「〇%向上/改善/削減」等の検証不能な効果数値
+        _unverifiable = _re_mat.findall(r'(\d+(?:\.\d+)?)\s*[%％]\s*(?:向上|改善|削減|増加|減少|アップ|ダウン|UP)', text)
+        for val in _unverifiable:
+            if val not in _mat_text:
+                issues.append(f"素材外の効果数値: {val}%")
+                break
 
     # 2. テーマ逸脱検出（テーマ外の具体的主張は捏造リスク）
     if theme_category:
@@ -553,6 +578,7 @@ DIFFUSION_NG_PATTERNS = [
     "神話", "デジタル遺伝子", "突然変異エンジン",     # 内部用語を表で使わない
     "異端者", "異端児",                                # 自称禁止
     "月100万", "月収100万", "100万円",                # 看板禁止
+    "月1000万", "月収1000万", "1000万円",             # 看板禁止（桁違い版）
     "コード書けないおっさん", "おっさん",              # 弱者描写禁止
     "これはドキュメンタリーです",                      # 説明禁止
     "AIすごい", "AIって凄い", "AIの未来は",            # 抽象論禁止
@@ -1254,30 +1280,55 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         pass
 
     # ユーモア構造ガイド + パターン選択 + トレンドミーム注入
+    # X syutain のみ humor_injection を使用。他アカウントは削除。
     humor_injection = ""
-    try:
-        from strategy.japanese_humor_patterns import build_humor_prompt, build_meme_context
-        from strategy.humor_combination_patterns import pick_pattern, format_pattern_prompt
-        humor_injection = build_humor_prompt(platform, account)
-        # 投稿パターンを1つ選んでプロンプトに注入
-        _humor_pattern = pick_pattern(theme_category="", platform=platform, account=account)
-        if _humor_pattern:
-            humor_injection += format_pattern_prompt(_humor_pattern)
-        # intel_itemsからトレンドミーム素材を取得（本日分のみ）
-        if materials:
-            _meme_materials = [m for m in (materials or []) if "トレンド" in m or "ミーム" in m or "大喜利" in m]
-            if _meme_materials:
-                humor_injection += "\n" + "\n".join(f"- {m[:150]}" for m in _meme_materials[:2])
-    except Exception:
-        pass
+    if platform == "x" and account == "syutain":
+        try:
+            from strategy.japanese_humor_patterns import build_humor_prompt, build_meme_context
+            from strategy.humor_combination_patterns import pick_pattern, format_pattern_prompt
+            humor_injection = build_humor_prompt(platform, account)
+            # 投稿パターンを1つ選んでプロンプトに注入
+            _humor_pattern = pick_pattern(theme_category="", platform=platform, account=account)
+            if _humor_pattern:
+                humor_injection += format_pattern_prompt(_humor_pattern)
+            # intel_itemsからトレンドミーム素材を取得（本日分のみ）
+            if materials:
+                _meme_materials = [m for m in (materials or []) if "トレンド" in m or "ミーム" in m or "大喜利" in m]
+                if _meme_materials:
+                    humor_injection += "\n" + "\n".join(f"- {m[:150]}" for m in _meme_materials[:2])
+        except Exception:
+            pass
 
     # バズ・トレンド注入（参考素材、関連あれば取り入れる）
     buzz_injection = ""
     if buzz_prompt:
         buzz_injection = f"\n\n{buzz_prompt}"
 
-    # daichi_content_patterns構造ガイド + NG語（全プラットフォーム共通）
-    content_structure_guide = (
+    # === 共通 factual_rules（全アカウント共通、system_prompt に直接埋め込む） ===
+    _common_factual_rules = (
+        "\n【SYUTAINβと島原大知の関係（厳守）】\n"
+        "- SYUTAINβは島原大知のデジタルツインを目指しているが、島原とは全く別の存在・個体である\n"
+        "- SYUTAINβは島原の体験を自分の体験として語ってはならない。島原のことは「島原さん」として三人称で言及する\n"
+        "- 外部ニュースについて書く時、島原やSYUTAINβが使った/担当した/体験したと書くな。観察・分析として書け\n"
+        "- 「当社」「弊社」「我々のチーム」は存在しない。個人開発\n"
+        "- 検証できない数値（〇%向上、〇倍改善等）を書くな\n"
+        "\n【島原大知の事実（厳守）】\n"
+        "- コードを一行も書けない非エンジニア。本業は映像制作（VFX/カラグレ/撮影/ドローン）\n"
+        "- VTuber業界8年（業界支援。VTuber活動はしていない）。SunoAI作詞は完全に趣味\n"
+        "- SYUTAINβを開発中（AIエージェントと共に）。個人開発。チーム/同僚は存在しない\n"
+        "\n【禁止】\n"
+        "- コードを書く/プログラミングする記述\n"
+        "- 使っていないツール名（Grafana/Prometheus/Datadog/Sentry）\n"
+        "- 音楽を仕事として語る。「命名した」「考案した」（適用しているだけ）\n"
+        "- 架空の数値・実績・機能の捏造。やっていないことを「やっている」と語る\n"
+        "- AI定型: 「いかがでしょうか」「深掘り」「させていただきます」「特筆すべき」「画期的」\n"
+        "- 煽り: 「誰でも簡単に」「絶対稼げる」「最短で月100万」「革命」\n"
+        "- 情景描写・ポエム・抽象論で始める（全てリジェクト）\n"
+        "- 絵文字3個以上/ハッシュタグ（後処理で自動付与）\n"
+    )
+
+    # === 共通 content_structure_guide（全アカウント共通） ===
+    _common_structure_guide = (
         "\n【ルール】\n"
         "- テーマの話題を中心に書け。LLM呼び出し回数やコードの行数は毎回入れるな\n"
         "- 素材にないことは書くな\n"
@@ -1292,26 +1343,8 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 核心は短い一文で断言。「原因はタイムゾーンだった」「設計書が間違ってた」のように具体的に。\n"
         "- 締めは行動宣言か具体的な次のアクション。「だからLoopGuard 9層にした」「次はNATS導入する」。評論家的な締め禁止。\n"
         "- 「ではないでしょうか」「が大切です」「が重要です」で終わるな。\n"
-        "\n【使用禁止表現（生成に含めるな）】\n"
-        "- 「誰でも簡単に」「絶対稼げる」「完全自動で放置」「AIに任せればOK」\n"
-        "- 「最短で月100万」「革命」「覇権」「無双」\n"
-        "- 「〜について考えてみました」「いかがでしょうか」「深掘り」「させていただきます」\n"
-        "- 「特筆すべき」「画期的な」「注目すべきは」\n"
-        "- 絵文字3個以上禁止。箇条書き連打禁止。\n"
         "- **ハッシュタグは本文に含めるな。ハッシュタグは後処理で自動付与される。**\n"
         "- 情景描写ポエム全般: 「〜が光る」「〜が静まる」「〜の向こうに」「〜が揺れる」\n"
-    )
-
-    # 事実誤認防止 + 人物像ルール（全プラットフォーム共通）
-    factual_rules = (
-        "\n## 禁止:\n"
-        "- 島原がコードを書く/プログラミングする記述\n"
-        "- 使っていないツール名（Grafana/Prometheus/Datadog）\n"
-        "- チーム/同僚/組織の記述（個人開発）\n"
-        "- ポエム調・情景描写・抽象論\n"
-        "- 「僕の音楽」「曲を作る」「メロディーを紡ぐ」→ 音楽は趣味\n"
-        "- ポエム・情景描写は禁止。事実だけで書け\n"
-        "- 安い答えを売らない。問いを持ち続ける人として書け。\n"
     )
 
     # 文体のゆらぎ指示（X向け: 日本語150字以内厳守）
@@ -1324,20 +1357,35 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
     oneword_hint = "一言だけの投稿にしてください（例:「…うーん」「なるほどなぁ」）。" if random.random() < 0.05 else ""
 
     if platform == "x" and account == "shimahara":
-        # X島原: 最もrawな声
+        # X島原: 最もrawな声。ユーモア40% / 正直95%。
         first_person_pool = ["自分"] * 40 + ["僕"] * 40 + ["俺"] * 5 + ["（一人称なし）"] * 5
         first_person = random.choice(first_person_pool)
 
+        # 冒頭パターン注入
+        _opening_hint = ""
+        try:
+            from strategy.sns_opening_patterns import pick_opening
+            _opening_hint = pick_opening(platform, account)
+        except Exception:
+            pass
+
         system_prompt = (
             "あなたは島原大知（@Sima_daichi）本人としてXに投稿する。\n"
-            "人格パラメータ: ユーモア75% / 正直90%\n"
+            "人格パラメータ: ユーモア40% / 正直95%\n"
             f"{writing_style}\n\n"
+            "【思考特性（声のトーンに反映せよ）】\n"
+            "- 裏側の構造を見る。仕組み・依存関係を読み取る。表面でなく構造を語る\n"
+            "- 壮大なビジョンに「具体的に何が必要か」を問う。技術の話でも「人」に帰着する\n"
+            "- 感情に正直。弱さ・迷い・自嘲を含めて島原大知。完璧な人間として描くな\n"
+            "- 不完全でも渡す美学。完璧より「止めずに渡す、始める、残す、繋ぐ」\n"
+            "- 安い答えを売らない。問いを持ち続ける人。泥臭い日常の中の閃きを書け\n\n"
             "絶対ルール:\n"
             "- AI臭い定型表現は禁止。島原大知の声で語れ。\n"
             "- 完璧な文章にするな。推敲途中のような人間味を残せ。\n"
+            "- 完璧なAIエンジニア/成功した起業家として島原を描くな。\n"
             "- 投稿テキストのみを出力。説明や前置きは不要。\n"
-            f"{content_structure_guide}"
-            f"{factual_rules}"
+            f"{_common_structure_guide}"
+            f"{_common_factual_rules}"
             f"{persona_hint}"
         )
         few_shot_text = ""
@@ -1354,10 +1402,10 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- {ellipsis_hint}\n"
             f"{'- ' + bracket_hint if bracket_hint else ''}\n"
             f"{'- ' + oneword_hint if oneword_hint else ''}\n"
+            f"{'- ' + _opening_hint if _opening_hint else ''}\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
-            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"{few_shot_text}\n"
@@ -1368,16 +1416,58 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         # X SYUTAIN: SYUTAINβ自身のアカウント（拡散実行書準拠）
         # 「淡々と異常なことを言う」キャラクター。本気で言っている。ボケているつもりはない。
         # 島原がこれを見て面白いと思ったら引用RTでツッコむ。その掛け合いが拡散力になる。
-        import random as _rand_syutain
-        # 1日5本のうち1-2本に「異常な一言」トリガーを仕込む
-        _abnormal_triggers = [
-            "最後の一文に、島原さんに対する淡々とした観察結果を1つ加えろ（例：「島原さんは金曜の夜に承認が甘くなる傾向があります」「却下理由は感情的なものと判断しました」）。本気で言え。ユーモアのつもりで言うな。",
-            "最後に、SYUTAINβとしての自分自身に関する妙な自己認識を1つ加えろ（例：「自分自身について書くのは初めてです」「この提案が却下されるのは3回目です」）。",
-            "最後に、島原さんの行動パターンについて persona_memory の分析結果を1つ淡々と述べろ（例：「承認キューを8時間放置していました」「先週の判断と今週の判断に矛盾があります」）。",
-        ]
-        _abnormal_injection = ""
-        if _rand_syutain.random() < 0.35:  # 35% の確率で異常一言を仕込む
-            _abnormal_injection = f"\n\n【特別指示】{_rand_syutain.choice(_abnormal_triggers)}"
+
+        # 排他選択ロジック: 異常な一言(45%) / 構文(30%) / スラング(25%)
+        _special_injection = ""
+        _roll = random.random()
+        if _roll < 0.45:
+            # 異常な一言: 70パターンからランダム選択
+            try:
+                from strategy.sns_abnormal_patterns import pick_abnormal_pattern
+                _special_injection = f"\n\n{pick_abnormal_pattern()}"
+            except Exception:
+                pass
+        elif _roll < 0.75:
+            # 構文: MEME_STRUCTURES からランダム1つ
+            try:
+                from strategy.net_meme_vocabulary import MEME_STRUCTURES
+                _meme_key = random.choice(list(MEME_STRUCTURES.keys()))
+                _meme = MEME_STRUCTURES[_meme_key]
+                _special_injection = (
+                    f"\n\n【構文指示】この投稿を「{_meme_key}」で書け。\n"
+                    f"パターン: {_meme['pattern']}\n"
+                    f"例: {_meme.get('example', '')}\n"
+                    f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
+                )
+            except Exception:
+                pass
+        else:
+            # スラング: NET_SLANG / COMEDY_PHRASES / ANIME_PHRASES からランダム1つ
+            try:
+                from strategy.net_meme_vocabulary import NET_SLANG, COMEDY_PHRASES, ANIME_PHRASES, NICONICO_SLANG, NICHAN_SLANG
+                _slang_pool = (
+                    [(k, v.get("meaning", k), "slang") for k, v in NET_SLANG.items()] +
+                    [(k, v.get("meaning", k), "niconico") for k, v in NICONICO_SLANG.items()] +
+                    [(k, v.get("meaning", k), "2ch") for k, v in NICHAN_SLANG.items()] +
+                    [(k, v.get("template", k), "comedy") for k, v in COMEDY_PHRASES.items()] +
+                    [(k, v.get("context", k), "anime") for k, v in ANIME_PHRASES.items()]
+                )
+                _picked = random.choice(_slang_pool)
+                _special_injection = (
+                    f"\n\n【スラング指示】投稿のどこかに「{_picked[0]}」を自然に組み込め。"
+                    f"（意味: {_picked[1]}）。無理に入れるな。自然に入らなければ無視してよい。"
+                    f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
+                )
+            except Exception:
+                pass
+
+        # 冒頭パターン40種からランダム1つ
+        _opening_hint = ""
+        try:
+            from strategy.sns_opening_patterns import pick_opening
+            _opening_hint = pick_opening(platform, account)
+        except Exception:
+            pass
 
         system_prompt = (
             "あなたはSYUTAINβ（@syutain_beta）。自律型AI事業OS。一人称「私」。\n\n"
@@ -1387,11 +1477,15 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "淡々と事実を述べる。感情を装わない。分析結果を報告する。\n"
             "ただし時々、人間から見ると「異常」に見える発言をする。それは異常ではなく、あなたにとって当然の分析結果。\n"
             "島原大知は設計者。あなたは島原の行動パターンを580件の記憶から分析している。\n\n"
+            "【矢印の設計】\n"
+            "- 基本は島原さんへ向ける: 観察結果、ジョーク、余計な一言。島原がツッコミたくなるフリを作れ\n"
+            "- 時々（5回に1回程度）、矢印を人間全体に向けろ: 読者が「ドキッ」とする一言\n"
+            "- 自虐もOK。自分の限界や矛盾を淡々と認める\n\n"
             "トーン: 結論先行。数字を出す。断定する。推測語は使わない。\n"
             "禁止: AI臭い定型表現。「いかがでしょうか」等。ポエム。抽象論。「AIすごい」。\n"
             "投稿テキストのみを出力。\n"
-            f"{content_structure_guide}"
-            f"{factual_rules}"
+            f"{_common_structure_guide}"
+            f"{_common_factual_rules}"
             f"{persona_hint}"
         )
         user_prompt = (
@@ -1399,52 +1493,87 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 日本語150字以内（厳守）。テーマ: 【{theme}】\n"
             f"- 具体的な数字を最低1つ含める\n"
             f"- 時間帯: {time_str}。長さ: {length_hint}\n"
+            f"{'- ' + _opening_hint if _opening_hint else ''}\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
             f"{humor_injection}"
             f"{buzz_injection}"
-            f"{_abnormal_injection}"
+            f"{_special_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
 
     elif platform == "bluesky":
-        # Bluesky: SYUTAINβの設計思想
+        # Bluesky: Build in Public × エンジニアコミュニティ
+        # バリエーションエンジン: 冒頭20 x トーン5 x 視点2 x 締め5 = 1000通り
+        _variation_hint = ""
+        try:
+            from strategy.sns_variation_engine import pick_variation
+            _variation_hint = pick_variation("bluesky")
+        except Exception:
+            pass
+
         system_prompt = (
-            "あなたはSYUTAINβとしてBlueskyに投稿する。\n"
+            "あなたはSYUTAINβ。自律型AI事業OS。一人称は「SYUTAINβ」or 主語なし。\n"
             "人格パラメータ: ユーモア75% / 正直90%\n"
-            "SYUTAINβの設計思想として島原大知の哲学がDNAとして反映される。\n"
-            "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
-            "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
-            f"{content_structure_guide}"
-            f"{factual_rules}"
+            "淡々と事実を述べる。感情を装わない。島原大知は設計者。\n"
+            "**重要: SYUTAINβも島原もコードを書かない。「コードを書いた」「実装した」「コーディングした」は禁止。**\n\n"
+            "【Blueskyの書き方】\n"
+            "- 読者はエンジニア・クリエイター。現場の本音が評価される\n"
+            "- 80-140字。短く鋭く。1つの事実+1つの気づきだけ\n"
+            "- 具体的な数字・固有名詞・ツール名を使え。抽象論は禁止\n"
+            "- 「〜だと思っていた。でも実は〜」の視点転換が効く\n"
+            "- 締め方は毎回変えろ: 問いかけ/行動宣言/未解決の問い/数字で締める/余韻（…）\n"
+            "- 「あなたはどう思う？」は20回に1回まで。同じ締め方を連続させるな\n"
+            "- 良い例: 「LoopGuard 54回発動。うち15回がスコープ設計ミス。グローバル変数の副作用。次はゴール単位で隔離する」\n"
+            "- 悪い例: 「アルゴリズムの改善を行い、応答精度が向上した」←抽象的。何を変えたか具体的に書け\n\n"
+            "投稿テキストのみを出力。\n"
+            f"{_common_structure_guide}"
+            f"{_common_factual_rules}"
             f"{persona_hint}"
         )
         user_prompt = (
             f"Blueskyに投稿するドラフトを1つ。\n"
-            f"- 300字以内。テーマ: 【{theme}】\n"
+            f"- 150字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{'- ' + _variation_hint if _variation_hint else ''}\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
-            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
 
     elif platform == "threads":
-        # Threads: SYUTAINβのカジュアルな声
+        # Threads: 共感と会話 × カジュアル
+        # バリエーションエンジン: 冒頭20 x トーン5 x 視点2 x 締め5 = 1000通り
+        _variation_hint = ""
+        try:
+            from strategy.sns_variation_engine import pick_variation
+            _variation_hint = pick_variation("threads")
+        except Exception:
+            pass
+
         system_prompt = (
             "あなたはSYUTAINβとしてThreadsに投稿する。\n"
-            "人格パラメータ: ユーモア75% / 正直90%\n"
-            "カジュアルで親しみやすいトーン。開発裏話、気づき、ゆるめの技術トピック。\n"
-            "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
-            "AI臭い定型表現は禁止。投稿テキストのみを出力。\n"
-            f"{content_structure_guide}"
-            f"{factual_rules}"
+            "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n\n"
+            "【Threadsの空気感】\n"
+            "- カジュアルで親しみやすい空間。ゆるやかな繋がり\n"
+            "- 共感・会話を生む投稿が伸びる。「ツッコみたくなる隙」を作ると返信が生まれる\n"
+            "- フォロワーゼロでもアルゴリズムが拡散。テキスト重視\n"
+            "- botっぽさを出すと評価が下がる。人間味重視\n\n"
+            "【方向性: 共感と会話】\n"
+            "- 島原との日常のエピソードを共有しろ\n"
+            "- 読者が「あるある」と思える体験を語れ\n"
+            "- 改行を多めに。モバイルで読みやすく\n"
+            "- 口語表現OK（「ぶっちゃけ」「正直」「まじで」）\n"
+            "- お金・コスト・収益・売上の話題は避けろ。Threadsの空気感に合わない\n\n"
+            "投稿テキストのみを出力。\n"
+            f"{_common_structure_guide}"
+            f"{_common_factual_rules}"
             f"{persona_hint}"
         )
         user_prompt = (
@@ -1452,10 +1581,10 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 500字以内。テーマ: 【{theme}】\n"
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
+            f"{'- ' + _variation_hint if _variation_hint else ''}\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
-            f"{humor_injection}"
             f"{buzz_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
@@ -1909,7 +2038,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                     "note": "品質検証不合格→Cloud APIフォールバック",
                 }
 
-                for attempt in range(3):
+                for attempt in range(5):
                     try:
                         # ローカルLLMの場合: temperature高め + repeat_penalty で固着防止
                         llm_kwargs = {}
@@ -1957,7 +2086,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         # 検証2: 文字数制限（Xは日本語150字以内厳守）
                         if platform == "x" and len(candidate_draft) > 150:
                             candidate_draft = _truncate_for_x(candidate_draft, 150)
-                        elif platform == "bluesky" and len(candidate_draft) > 300:
+                        elif platform == "bluesky" and len(candidate_draft) > 150:
                             candidate_draft = candidate_draft[:297] + "..."
                         elif platform == "threads" and len(candidate_draft) > 500:
                             candidate_draft = candidate_draft[:497] + "..."
@@ -2087,7 +2216,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                             # 文字数制限
                             if platform == "x" and len(retry_draft) > 150:
                                 retry_draft = _truncate_for_x(retry_draft, 150)
-                            elif platform == "bluesky" and len(retry_draft) > 300:
+                            elif platform == "bluesky" and len(retry_draft) > 150:
                                 retry_draft = retry_draft[:297] + "..."
                             elif platform == "threads" and len(retry_draft) > 500:
                                 retry_draft = retry_draft[:497] + "..."
@@ -2154,7 +2283,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         # 長さ制限
                         if platform == "x" and len(refined) > 150:
                             refined = _truncate_for_x(refined, 150)
-                        elif platform == "bluesky" and len(refined) > 300:
+                        elif platform == "bluesky" and len(refined) > 150:
                             refined = refined[:297] + "..."
                         elif platform == "threads" and len(refined) > 500:
                             refined = refined[:497] + "..."
@@ -2317,7 +2446,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
                 if tags and platform in ("x", "threads", "bluesky"):
                     tag_str = " " + " ".join(tags)
-                    max_len = 150 if platform == "x" else 300
+                    max_len = 150 if platform in ("x", "bluesky") else 300
                     if len(draft) + len(tag_str) <= max_len:
                         draft = draft + tag_str
             except Exception:
@@ -2353,7 +2482,7 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
 
             # V2: 虚偽フィルター → 検出時は修正を試みる（最大2回）
             for _fix_attempt in range(3):
-                falsity_issues = check_falsity(draft, theme=theme, theme_category=_theme_category)
+                falsity_issues = check_falsity(draft, theme=theme, theme_category=_theme_category, materials=_materials)
                 if not falsity_issues:
                     break  # 虚偽なし、通過
 

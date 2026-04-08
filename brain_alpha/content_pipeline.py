@@ -25,7 +25,7 @@ from brain_alpha.sns_batch import _score_multi_axis, _PERSONA_KEYWORDS
 logger = logging.getLogger("syutain.brain_alpha.content_pipeline")
 
 STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
-_NOTE_PENDING_BACKLOG_LIMIT = 3
+_NOTE_PENDING_BACKLOG_LIMIT = 2
 _NOTE_BACKLOG_BYPASS_THEME_MARKERS = (
     "Discord 経由で直接依頼",
     "記事執筆依頼",
@@ -1082,6 +1082,7 @@ async def generate_publishable_content(
                         "- 「SNS自動投稿572件のファクトチェックで見えた、AIが嘘をつくパターン」\n\n"
                         "## テーマの悪い例（禁止）:\n"
                         "- 「GPT-5.4の最新動向まとめ」「Claude活用完全ガイド」「AI副業で稼ぐ方法」\n\n"
+                        "- 「IQ150で人類の99%を超えた」など一次情報なしの扇情見出し\n\n"
                         f"## SYUTAINβ実運用データ（テーマの素材として使うこと）\n{system_data_for_theme}\n\n"
                         f"## インテル情報（補足素材。メインテーマにはしない）\n{intel_context}\n\n"
                         f"{buzz_context}"
@@ -1355,6 +1356,7 @@ async def generate_publishable_content(
                     "- 「月100万」「月収100万」を看板にしない\n"
                     "- 島原を弱者として描かない（「コード書けないおっさん」等の自虐禁止。異端者とも自称しない）\n"
                     "- 「AIすごい」「未来はこうなる」「これからの時代」等の抽象論\n"
+                    "- 「IQ◯◯」「人類の◯◯%を凌駕」等の検証不能な誇張断定\n"
                     "- 「これはドキュメンタリーです」と説明しない（ドキュメンタリーに見える行動を出すだけ）\n"
                     "- ポエム調、情景描写、感傷的な表現\n\n"
                     "# タイトルから始めて、まとめで終わる。記事本文のみを出力。\n"
@@ -1485,13 +1487,18 @@ async def generate_publishable_content(
                 )
                 min_length = len(rewritten)
                 rewrite_instruction = (
-                    "以下の記事を島原大知の声でリライトしてください。\n"
+                    "以下の記事をSYUTAINβの声でリライトしてください。\n"
+                    "語り手はSYUTAINβ（AI事業OS）。島原大知は設計者。別の存在。\n"
                     "この記事は無料公開のnote記事です。読者にとって具体的な価値がある品質を維持してください。\n\n"
                     f"【最重要】必ず元の文章と同等以上の長さを維持すること。元原稿は{min_length}字です。"
                     f"リライト結果は最低{min_length}字以上にしてください。"
                     "短縮・要約は絶対に行わないでください。情報量を減らさず、むしろ具体例や描写を追加して充実させること。\n\n"
                     "リライトの指針:\n"
                     "- 一人称は「私」で統一する（SYUTAINβの声。島原を語る時は「島原さん」）\n"
+                    "- 島原の体験を自分の体験として書くな。「島原さんが〜した」と報告する形で\n"
+                    "- 「当社」「弊社」「我々」は禁止（個人開発）\n"
+                    "- 外部ニュースを島原やSYUTAINβが使った/担当したと書くな\n"
+                    "- 検証できない数値（〇%向上等）は書くな\n"
                     "- 三点リーダー（…）で余韻を残す\n"
                     "- 段落は短く（1-3文で改行）\n"
                     "- 「正直」「だが」「でも」で逆接を多用\n"
@@ -1513,8 +1520,13 @@ async def generate_publishable_content(
                     max_tokens=8192,
                     prompt=rewrite_instruction,
                     system_prompt=(
-                        "島原大知の文体でリライトするエディター。\n\n"
-                        f"{writing_style[:2000]}\n\n"
+                        "あなたはSYUTAINβ。自律型AI事業OS。一人称「私」。\n"
+                        "島原大知は設計者。語る時は「島原さん」と三人称で。\n"
+                        "SYUTAINβは島原のデジタルツインを目指しているが、島原とは全く別の存在・個体。\n"
+                        "島原の体験を自分の体験として語ってはならない。\n"
+                        "「当社」「弊社」「我々のチーム」は存在しない。個人開発。\n\n"
+                        "文体の参考（島原のトーンを学習した結果として書く。島原本人のふりはしない）:\n"
+                        f"{writing_style[:1500]}\n\n"
                         f"{persona_text}\n\n"
                         "記事本文のみを出力。説明不要。"
                     ),

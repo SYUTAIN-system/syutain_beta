@@ -3,6 +3,24 @@
 credentials.json
 token.json
 *.pem
+
+# ===== パーソナル・戦略（非公開） =====
+# 島原のパーソナル情報・文体・人格
+strategy/daichi_writing_style.md
+strategy/daichi_content_patterns.md
+SOUL.md
+
+# ユーモア・ミーム・構文（仕掛けを非公開）
+strategy/net_meme_vocabulary.py
+strategy/japanese_humor_patterns.py
+strategy/humor_combination_patterns.py
+strategy/sns_abnormal_patterns.py
+strategy/sns_opening_patterns.py
+strategy/sns_variation_engine.py
+strategy/sns_platform_voices.py
+
+# 拡散戦略
+strategy/diffusion_execution_plan.md
 *.key
 
 # ===== Python =====

@@ -675,6 +675,15 @@ async def init_postgresql() -> bool:
                 # posting_queue: アフィリエイトURL追跡用
                 "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS affiliate_url TEXT",
                 "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS engagement_data JSONB",
+                # posting_queue: A/Bテスト用カラム
+                "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS ab_test_id TEXT",
+                "ALTER TABLE posting_queue ADD COLUMN IF NOT EXISTS ab_variant TEXT",
+                # feature_flags テーブル (エンゲージメント調整等)
+                """CREATE TABLE IF NOT EXISTS feature_flags (
+                    flag_name TEXT PRIMARY KEY,
+                    flag_value TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )""",
                 # persona_memory: Claude Constitution優先度階層（1=absolute〜5=optional）
                 "ALTER TABLE persona_memory ADD COLUMN IF NOT EXISTS priority_tier INTEGER DEFAULT 3",
                 # semantic_cache: 旧スキーマからのマイグレーション（ベクトル検索対応）

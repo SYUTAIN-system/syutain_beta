@@ -30,6 +30,7 @@
 import json
 import logging
 import random
+import re
 from typing import Optional
 
 logger = logging.getLogger("syutain.sns_theme_engine")
@@ -73,6 +74,9 @@ _SYUTAIN_OPS_ANGLES = [
     "ready記事が詰まった日に優先順位をどう決めたか",
     "同じ数字の投稿が増えた日にテーマ設計を見直した話",
     "自動化を止める判断をした理由",
+    "失敗率が上がった日に再試行条件を分離した話",
+    "新記事を出した日の反応を見て次に直したこと",
+    "数字を3つ並べず、結論を1つに絞る運用へ変えた理由",
 ]
 
 # creator_media テーマの静的候補（intel がない場合のフォールバック）
@@ -80,11 +84,12 @@ _CREATOR_FALLBACK = [
     {"topic": "AI映像制作ツールの現在地", "angle": "Runway/Sora/Kling等の実体験ベース比較", "category": "creator_media"},
     {"topic": "VTuber業界のAI活用", "angle": "モデリング/配信/マネジメントのどこにAIが入るか", "category": "creator_media"},
     {"topic": "ドローン×AIの可能性", "angle": "空撮/検査/農業での実用例", "category": "creator_media"},
-    {"topic": "AI迎撃ドローン映像を見て引いた理由", "angle": "演算が構図を決める時代にクリエイターが残す価値", "category": "creator_media"},
+    {"topic": "AIドローン映像の倫理課題", "angle": "演算が構図を決める時代にクリエイターが残す判断", "category": "creator_media"},
     {"topic": "AIが6万行を書いた時、人間は何を設計するか", "angle": "設計書の書き直しから見えた責任境界", "category": "creator_media"},
     {"topic": "写真のAI編集", "angle": "Lightroom AI/Topaz等の実体験", "category": "creator_media"},
     {"topic": "広告制作とAI", "angle": "コピー生成/ビジュアル生成の現場", "category": "creator_media"},
     {"topic": "映画制作のAI革命", "angle": "プリプロ/VFX/カラグレのどこが変わるか", "category": "creator_media"},
+    {"topic": "新記事公開までの制作フロー", "angle": "詰まりやすい工程をどう短縮したか", "category": "creator_media"},
 ]
 
 # philosophy_bip テーマの静的候補
@@ -97,6 +102,8 @@ _PHILOSOPHY_FALLBACK = [
     {"topic": "設計書を25回書き直した話", "angle": "なぜドキュメントファーストが必須だったか", "category": "philosophy_bip"},
     {"topic": "AIエージェントの失敗パターン", "angle": "Gartner/McKinseyの予測と自分の実体験の交差", "category": "philosophy_bip"},
     {"topic": "完璧を待たずに公開する判断", "angle": "デッドコード207個あっても出す理由", "category": "philosophy_bip"},
+    {"topic": "反復作業だけAIに預ける線引き", "angle": "責任と裁量を人間側に残す設計", "category": "philosophy_bip"},
+    {"topic": "数字は最適化できるが責任は委譲できない", "angle": "運用自動化で最後に残る人間の仕事", "category": "philosophy_bip"},
 ]
 
 # shimahara_fields テーマの静的候補
@@ -108,7 +115,23 @@ _SHIMAHARA_FALLBACK = [
     {"topic": "メディアの未来", "angle": "AIがコンテンツを生成する時代の人間の役割", "category": "shimahara_fields"},
     {"topic": "文化産業とテクノロジー", "angle": "クリエイターがAIを使いこなす vs AIに置き換えられる", "category": "shimahara_fields"},
     {"topic": "起業の新しい形", "angle": "コードゼロで56000行のシステムを作る時代", "category": "shimahara_fields"},
+    {"topic": "新記事告知の型を見直した話", "angle": "タイトル+具体1指標+URLの構成に揃えた理由", "category": "shimahara_fields"},
 ]
+
+
+_UNSAFE_THEME_PATTERNS = [
+    # 軍事・攻撃系（ハレーションを招きやすい）
+    re.compile(r"(敵位置|迎撃|攻撃|戦闘|殺傷|ミサイル|軍事|警告信号|防衛)"),
+    # 誇張・扇情系（一次情報なし断定を誘発）
+    re.compile(r"(IQ\s*\d+|99\.?\d*%|人類を凌駕|急騰|最強|無双|覇権|完全自動で放置|絶対)"),
+    # 品質低下しやすい過度な煽り語
+    re.compile(r"(人類は追いつけない|君たち人類|革命確定)"),
+]
+
+
+def _is_safe_theme(topic: str, angle: str = "") -> bool:
+    text = f"{topic} {angle}"
+    return not any(p.search(text) for p in _UNSAFE_THEME_PATTERNS)
 
 
 async def build_theme_pool(
@@ -152,9 +175,12 @@ async def build_theme_pool(
                 meta = json.loads(r["metadata"]) if isinstance(r["metadata"], str) else (r["metadata"] or {})
             except Exception:
                 pass
+            angle = (meta.get("note_angle") or meta.get("sns_angle") or r.get("summary", ""))[:200]
+            if not _is_safe_theme(topic, angle):
+                continue
             pool.append({
                 "topic": topic,
-                "angle": (meta.get("note_angle") or meta.get("sns_angle") or r.get("summary", ""))[:200],
+                "angle": angle,
                 "source_url": (r.get("url") or "")[:300],
                 "key_data": (r.get("summary") or "")[:200],
                 "category": "ai_tech_trend",
@@ -179,9 +205,12 @@ async def build_theme_pool(
                 topic = (r["title"] or "")[:100]
                 if topic in used or not topic:
                     continue
+                angle = (r.get("summary") or "")[:200]
+                if not _is_safe_theme(topic, angle):
+                    continue
                 pool.append({
                     "topic": topic,
-                    "angle": (r.get("summary") or "")[:200],
+                    "angle": angle,
                     "source_url": (r.get("url") or "")[:300],
                     "key_data": "",
                     "category": "ai_tech_trend",
@@ -209,9 +238,12 @@ async def build_theme_pool(
             topic = (r["title"] or "")[:100]
             if topic in used or not topic:
                 continue
+            angle = (r.get("summary") or "")[:200]
+            if not _is_safe_theme(topic, angle):
+                continue
             pool.append({
                 "topic": topic,
-                "angle": (r.get("summary") or "")[:200],
+                "angle": angle,
                 "source_url": (r.get("url") or "")[:300],
                 "key_data": "",
                 "category": "creator_media",
@@ -228,6 +260,9 @@ async def build_theme_pool(
         if not candidates:
             break
         chosen = random.choice(candidates)
+        if not _is_safe_theme(chosen.get("topic", ""), chosen.get("angle", "")):
+            used.add(chosen["topic"])
+            continue
         pool.append({**chosen, "source_url": "", "key_data": "", "hashtags": ["#クリエイター", "#映像制作"]})
         used.add(chosen["topic"])
 
@@ -273,6 +308,8 @@ async def build_theme_pool(
             except Exception:
                 pass
             if philosophy:
+                if not _is_safe_theme(f"島原の思考: {msg[:60]}", msg[:200]):
+                    continue
                 pool.append({
                     "topic": f"島原の思考: {msg[:60]}",
                     "angle": msg[:200],
@@ -291,6 +328,9 @@ async def build_theme_pool(
             break
         chosen = random.choice(phil_items)
         phil_items.remove(chosen)
+        if not _is_safe_theme(chosen.get("topic", ""), chosen.get("angle", "")):
+            used.add(chosen["topic"])
+            continue
         pool.append({**chosen, "source_url": "", "key_data": "", "hashtags": ["#BuildInPublic", "#非エンジニア"]})
         used.add(chosen["topic"])
 
@@ -309,9 +349,12 @@ async def build_theme_pool(
             topic = (r["title"] or "")[:100]
             if topic in used or not topic:
                 continue
+            angle = (r.get("summary") or "")[:200]
+            if not _is_safe_theme(topic, angle):
+                continue
             pool.append({
                 "topic": topic,
-                "angle": (r.get("summary") or "")[:200],
+                "angle": angle,
                 "source_url": (r.get("url") or "")[:300],
                 "key_data": "",
                 "category": "shimahara_fields",
@@ -327,6 +370,9 @@ async def build_theme_pool(
         if not candidates:
             break
         chosen = random.choice(candidates)
+        if not _is_safe_theme(chosen.get("topic", ""), chosen.get("angle", "")):
+            used.add(chosen["topic"])
+            continue
         pool.append({**chosen, "source_url": "", "key_data": "", "hashtags": ["#経営", "#起業"]})
         used.add(chosen["topic"])
 
