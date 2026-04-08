@@ -94,8 +94,8 @@ async def nurture_seeds(conn) -> int:
                 if len(kw) < 3:
                     continue
                 related_events = await conn.fetch(
-                    """SELECT id, event_type, detail FROM event_log
-                    WHERE detail ILIKE $1
+                    """SELECT id, event_type, payload::text as detail FROM event_log
+                    WHERE payload::text ILIKE $1
                     AND created_at > NOW() - INTERVAL '48 hours'
                     AND id != ALL($2::int[])
                     LIMIT 3""",
@@ -208,7 +208,7 @@ async def auto_plant_from_events(conn) -> int:
 
     # 直近24hの注目イベントからシードを植える
     events = await conn.fetch(
-        """SELECT id, event_type, category, detail FROM event_log
+        """SELECT id, event_type, category, payload::text as detail FROM event_log
         WHERE created_at > NOW() - INTERVAL '24 hours'
         AND category NOT IN ('heartbeat', 'routine')
         AND (event_type LIKE '%error%' OR event_type LIKE '%fail%'

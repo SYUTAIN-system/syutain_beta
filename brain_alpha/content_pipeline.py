@@ -168,6 +168,9 @@ def _verify_factual_claims(content: str) -> list[str]:
         (r'島原.{0,10}(?:VTuber(?:として|活動|デビュー))', "島原はVTuber活動者ではない（業界支援側）"),
         (r'島原.{0,10}(?:エンジニア(?:として|の経験|出身))', "島原は非エンジニア"),
         (r'島原.{0,10}(?:プログラム(?:を書|ミング)|コーディング)', "島原はコードを書けない"),
+        (r'VTuber.{0,20}(?:支える|支援する|管理する)(?:システム|仕組み)', "SYUTAINβはVTuber支援システムではない"),
+        (r'(?:Grafana|Prometheus|Datadog|Sentry|NewRelic|Splunk)', "使っていないツール名"),
+        (r'(?:運用チーム|開発チーム|開発メンバー|同僚が|離職率)', "組織捏造（個人開発）"),
     ]
     for pattern, msg in false_claims:
         if re.search(pattern, content):
