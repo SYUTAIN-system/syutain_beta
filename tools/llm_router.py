@@ -48,10 +48,10 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 # 2026-04-08: Qwen 3.6 Plus:free 廃止。代替モデルチェーン（順にフォールバック）
 # Qwen3 Next 80B > Nemotron 3 Super 120B > Step 3.5 Flash > Gemma 4 31B
 OPENROUTER_CONTENT_MODELS = [
-    "qwen/qwen3-next-80b-a3b-instruct:free",      # Qwen系、日本語強い
-    "nvidia/nemotron-3-super-120b-a12b:free",       # 大型、高品質
-    "stepfun/step-3.5-flash:free",                  # 高速
-    "google/gemma-4-31b-it:free",                   # Gemma 4
+    "google/gemma-4-31b-it:free",                   # Gemma 4 31B: 最速1.8s、日本語良好
+    "nvidia/nemotron-3-super-120b-a12b:free",       # Nemotron Super: 大型5.6s
+    "qwen/qwen3-next-80b-a3b-instruct:free",       # Qwen3 Next: 429出やすいが日本語強い
+    "stepfun/step-3.5-flash:free",                  # Step Flash: フォールバック
 ]
 OPENROUTER_QWEN36_MODEL = OPENROUTER_CONTENT_MODELS[0]  # デフォルト
 # Nemotron-3 Nano 30B: chat/chat_light用（184 tok/s、高速）
