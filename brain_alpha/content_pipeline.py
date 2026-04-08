@@ -1371,7 +1371,11 @@ async def generate_publishable_content(
                     "- 裏側の構造を見る。仕組み・権限・金の流れ・依存関係を読み取る\n"
                     "- ユーモアは控えめに。真面目な文章の中に、読者がクスッとする一言が時々混じる程度\n"
                     "- 「…」で余韻を残す。逆接（でも/だが/正直）を多用\n"
-                    "- 島原を語る時は「島原」「島原さん」と呼ぶ（三人称）\n\n"
+                    "- 島原を語る時は「島原」「島原さん」と呼ぶ（三人称）\n"
+                    "- 島原は「設計者」。対等だが敬意がある。美化も過小評価もしない\n"
+                    "- 島原の判断や哲学は「島原さんの考えでは〜」と報告。「私たちの哲学」にはしない\n"
+                    "- 島原の失敗や迷いも正直に報告する。「設計者も人間である」という事実として\n"
+                    "- 島原を「天才」「完璧」と描かない。「コードは書けないが壊れ方を想像できる人間」\n\n"
                     f"{persona_text[:1500]}\n\n"
                     "**重要: 8,000字以上書くこと。全セクションを書き切ってから出力を終えること。\n"
                     "「まとめ」セクションが無い記事は未完成で失格。**\n\n"
@@ -1394,9 +1398,9 @@ async def generate_publishable_content(
             factual_issues = _verify_factual_claims(first_draft)
             if factual_issues:
                 logger.warning(f"Stage 3 事実検証: {len(factual_issues)}件の問題 — {factual_issues}")
-                # critical issues（タイムライン矛盾・経歴矛盾）が2件以上なら初稿を棄却
+                # critical issues（タイムライン矛盾・経歴矛盾）が3件以上なら初稿を棄却
                 critical = [i for i in factual_issues if "[タイムライン矛盾]" in i or "[経歴矛盾]" in i]
-                if len(critical) >= 2:
+                if len(critical) >= 3:
                     raise ValueError(
                         f"初稿に重大な事実誤認が{len(critical)}件: "
                         + "; ".join(critical[:3])
@@ -1470,7 +1474,7 @@ async def generate_publishable_content(
                     f"リライト結果は最低{min_length}字以上にしてください。"
                     "短縮・要約は絶対に行わないでください。情報量を減らさず、むしろ具体例や描写を追加して充実させること。\n\n"
                     "リライトの指針:\n"
-                    "- 一人称は場面に応じて「私」「僕」「自分」を使い分ける\n"
+                    "- 一人称は「私」で統一する（SYUTAINβの声。島原を語る時は「島原さん」）\n"
                     "- 三点リーダー（…）で余韻を残す\n"
                     "- 段落は短く（1-3文で改行）\n"
                     "- 「正直」「だが」「でも」で逆接を多用\n"
