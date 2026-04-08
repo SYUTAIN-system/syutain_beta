@@ -240,7 +240,7 @@ _LOCAL_OK_TASKS = {
     "data_extraction",    # 構造化抽出、ローカルで十分
     "batch_process",      # 大量処理、コスト重視
     "bulk_draft",         # 大量ドラフト
-    "sns_draft",          # SNS投稿（Nemotron Nanoでは長いプロンプトが処理できない、ローカル9Bで十分）
+    # sns_draft はOpenRouterのGemma 4 31B(無料)で生成（ローカル9Bではプロンプト消化不足）
 }
 
 # APIの方が品質が高いタスク → Gemini Flash（無料枠）優先
@@ -439,7 +439,7 @@ def _choose_best_model_v6_impl(
         "note_article", "product_desc", "booth_description", "note_draft",      # コンテンツ生成
         # 2026-04-06 追加: ローカル LLM から無料クラウドに移行したタスク
         "content", "analysis", "research",                                      # 記事生成/分析/リサーチ
-        # sns_draft はローカルLLMで十分（OpenRouter 429で全バッチが遅延する問題回避）
+        "sns_draft",                                                               # SNS投稿（Gemma4 31B無料で生成）
         "drafting",                                                                # ドラフト
         "intel_summary",                                                        # 情報要約
     }
