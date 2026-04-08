@@ -82,6 +82,10 @@ Designer: 島原大知 (non-engineer, 15yr video production, 8yr VTuber industry
 - Qiita/Zenn: independent tech article pipeline + auto-publish + SNS announce
 - SNS batch5: 00:00 missing post auto-fill
 - SNS batch3: X backup at 23:00 (dedup fills only missing posts)
+- Quality score V2: 10-axis with theme relevance, account-specific persona eval
+- Fact checker: 4-layer (DB match → intel cross-ref → Tavily search → primary source verify)
+- Falsity filter: detect → fix → recheck loop (not just reject)
+- Theme-aware falsity: off-topic claims flagged, LLM numbers only scored in ops theme
 
 ## Improvement Targets & KPIs (Codex改善指標)
 
