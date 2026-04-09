@@ -16,7 +16,7 @@
 カテゴリ:
     1. syutain_ops     — SYUTAINβ の運用 (max 2件/日、固着防止)
     2. ai_tech_trend   — AI/テック最新動向 (Grok X リサーチ, intel_items)
-    3. creator_media   — 映像/VTuber/ドローン/写真/広告/メディア
+    3. creator_media   — 映像/AITuber/ドローン/写真/広告/メディア（VTuber業界の話題は避ける）
     4. philosophy_bip   — Build in Public 哲学、設計判断、教訓
     5. shimahara_fields — 経営/起業/マーケ/文化 (島原さんの拡張関連分野)
 
@@ -82,7 +82,7 @@ _SYUTAIN_OPS_ANGLES = [
 # creator_media テーマの静的候補（intel がない場合のフォールバック）
 _CREATOR_FALLBACK = [
     {"topic": "AI映像制作ツールの現在地", "angle": "Runway/Sora/Kling等の実体験ベース比較", "category": "creator_media"},
-    {"topic": "VTuber業界のAI活用", "angle": "モデリング/配信/マネジメントのどこにAIが入るか", "category": "creator_media"},
+    {"topic": "AITuber/AI配信者の技術と可能性", "angle": "AIが配信者として活動する技術基盤と課題", "category": "creator_media"},
     {"topic": "ドローン×AIの可能性", "angle": "空撮/検査/農業での実用例", "category": "creator_media"},
     {"topic": "AIドローン映像の倫理課題", "angle": "演算が構図を決める時代にクリエイターが残す判断", "category": "creator_media"},
     {"topic": "AIが6万行を書いた時、人間は何を設計するか", "angle": "設計書の書き直しから見えた責任境界", "category": "creator_media"},
@@ -227,8 +227,8 @@ async def build_theme_pool(
     try:
         creator_items = await conn.fetch(
             """SELECT title, summary, url, metadata FROM intel_items
-               WHERE (category IN ('creator', 'media', 'video', 'vtuber', 'drone', 'photo')
-                      OR keyword ILIKE '%映像%' OR keyword ILIKE '%VTuber%'
+               WHERE (category IN ('creator', 'media', 'video', 'aituber', 'drone', 'photo')
+                      OR keyword ILIKE '%映像%' OR keyword ILIKE '%AITuber%'
                       OR keyword ILIKE '%ドローン%' OR keyword ILIKE '%写真%')
                AND created_at > NOW() - INTERVAL '72 hours'
                ORDER BY importance_score DESC LIMIT $1""",

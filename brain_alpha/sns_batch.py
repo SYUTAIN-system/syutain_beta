@@ -195,7 +195,7 @@ THEME_POOL = [
     "SYUTAINβの直近24時間で起きた具体的な出来事",
     "Grok X検索で見つけた最新AI動向（具体的なURL付き）",
     "映像制作×AI: 具体的なツール名と使用体験",
-    "VTuber業界のAI活用: 具体的な事例",
+    "AITuber/AI配信者の技術と可能性",
     "ドローン/写真とAIの組み合わせ: 実体験ベース",
     "Build in Public: 今週の具体的な数字と変化",
     "非エンジニアがAIエージェントを使う時の具体的な壁",
@@ -273,14 +273,14 @@ TIME_THEME_WEIGHTS = {
     "morning": {"ビジネス": 3, "AI技術": 2, "開発進捗": 2},
     "afternoon": {"日常": 2, "雑談": 2, "カメラ/写真": 1},
     "evening": {"AI技術": 2, "映画/映像": 2, "開発進捗": 2},
-    "night": {"哲学/思考": 3, "自己内省": 2, "VTuber業界": 2},
+    "night": {"哲学/思考": 3, "自己内省": 2, "AITuber": 2},
 }
 
 # === プラットフォーム別品質閾値（Strategy: 平台固有の特性に合わせた閾値） ===
 # Blueskyは短文のため persona_score / structure_score が低くなりやすい
 # Threadsはカジュアルなため完結性スコアが低くなりやすい
 PLATFORM_QUALITY_THRESHOLDS = {
-    "x": 0.60,        # X: 0.68→0.60に緩和（2026-04-07: 品質改善まで暫定）
+    "x": 0.58,        # X: 0.60→0.58に緩和（2026-04-09: ミーム/構文入れると品質スコアが下がる構造的問題のため）
     "bluesky": 0.52,  # Bluesky: 0.58→0.52に緩和（150字短文化で品質スコアが構造的に低くなるため）
     "threads": 0.58,  # Threads: 0.64→0.58に緩和
 }
@@ -295,7 +295,9 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
 
     # 1. intel_items からテーマ関連を検索（Grok/情報収集パイプライン由来）
     try:
-        keywords = [w for w in theme.replace("【", "").replace("】", "").split() if len(w) >= 2][:3]
+        import re as _re_kw
+        _particles = _re_kw.split(r'[のでをにがはともへやかる、。\s]+', theme.replace("【", "").replace("】", ""))
+        keywords = [w.strip() for w in _particles if 2 <= len(w.strip()) <= 10][:5]
         for kw in keywords:
             intels = await conn.fetch(
                 """SELECT title, summary, url FROM intel_items
@@ -313,20 +315,49 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
                     materials.append(line)
             if len(materials) >= 2:
                 break
+        # キーワードでヒットしなければ、importance_score上位を無条件で取得
+        if not any("[外部情報]" in m for m in materials):
+            try:
+                fallback_intels = await conn.fetch(
+                    """SELECT title, summary, url FROM intel_items
+                    WHERE created_at > NOW() - INTERVAL '72 hours'
+                    AND review_flag IN ('actionable', 'reviewed')
+                    ORDER BY importance_score DESC LIMIT 3"""
+                )
+                for i in fallback_intels:
+                    line = f"[外部情報] {i['title']}: {(i['summary'] or '')[:150]}"
+                    if i.get('url'):
+                        line += f" ({i['url'][:100]})"
+                    if line not in materials:
+                        materials.append(line)
+            except Exception:
+                pass
     except Exception:
         pass
 
-    # 2. event_log から具体的な出来事（直近24h）
+    # 2. event_log から具体的な出来事（直近24h）— node系以外を優先
     try:
+        # node系以外の出来事を優先
         events = await conn.fetch(
             """SELECT event_type, category, payload FROM event_log
             WHERE created_at > NOW() - INTERVAL '24 hours'
-            AND category NOT IN ('heartbeat', 'routine')
+            AND category NOT IN ('heartbeat', 'routine', 'node')
             ORDER BY created_at DESC LIMIT 3"""
         )
         for e in events:
             payload_str = str(e['payload'] or '')[:150]
             materials.append(f"[出来事] {e['category']}/{e['event_type']}: {payload_str}")
+        # node系は1件だけ追加（バリエーション用）
+        if len([m for m in materials if "[出来事]" in m]) < 2:
+            node_event = await conn.fetchrow(
+                """SELECT event_type, category, payload FROM event_log
+                WHERE created_at > NOW() - INTERVAL '24 hours'
+                AND category = 'node'
+                ORDER BY created_at DESC LIMIT 1"""
+            )
+            if node_event:
+                payload_str = str(node_event['payload'] or '')[:150]
+                materials.append(f"[出来事] node/{node_event['event_type']}: {payload_str}")
     except Exception:
         pass
 
@@ -475,8 +506,8 @@ def check_falsity(text: str, theme: str = "", theme_category: str = "",
         import re as _re_mat
         _mat_text = " ".join(str(m) for m in materials)
 
-        # 投稿内の「〇%向上/改善/削減」等の検証不能な効果数値
-        _unverifiable = _re_mat.findall(r'(\d+(?:\.\d+)?)\s*[%％]\s*(?:向上|改善|削減|増加|減少|アップ|ダウン|UP)', text)
+        # 投稿内の検証不能な効果数値（〇%向上/改善/削減 + 〇%が〜 + 約〇%）
+        _unverifiable = _re_mat.findall(r'(?:約)?(\d+(?:\.\d+)?)\s*[%％]\s*(?:向上|改善|削減|増加|減少|アップ|ダウン|UP|が|を|の)', text)
         for val in _unverifiable:
             if val not in _mat_text:
                 issues.append(f"素材外の効果数値: {val}%")
@@ -940,18 +971,51 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None,
         _cat_hits = sum(1 for ck in _cat_keywords[theme_category] if ck in text)
         theme_relevance = min(1.0, theme_relevance + _cat_hits * 0.10)
 
-    # 重み配分V2: テーマ関連性追加、他を微調整
-    score = (
-        fact_density_score * 0.16 +   # 0.20→0.16（LLM数字固着緩和）
-        theme_relevance * 0.12 +       # 新規: テーマ関連性
-        structure_score * 0.14 +
-        human_score * 0.12 +           # 0.14→0.12
-        persona_score * 0.14 +
-        completeness * 0.12 +          # 0.14→0.12
-        engagement * 0.08 +            # 0.10→0.08
-        ai_score * 0.08 +              # 0.10→0.08
-        readability * 0.04
-    )
+    # --- 軸11: ユーモア密度 (X syutainのみ, 0-1, w=0.12) ---
+    humor_density = 0.45  # ベースライン（ユーモアなしでも旧重みと同等のスコアになるよう調整）
+    if platform == "x" and account == "syutain":
+        try:
+            from strategy.net_meme_vocabulary import NET_SLANG, NICONICO_SLANG, NICHAN_SLANG, COMEDY_PHRASES, ANIME_PHRASES
+            _all_slang = {**NET_SLANG, **NICONICO_SLANG, **NICHAN_SLANG}
+            _slang_hits = sum(1 for k in _all_slang if k in text)
+            if _slang_hits >= 1: humor_density += 0.25
+            _phrase_hits = sum(1 for k in ANIME_PHRASES if k in text) + sum(1 for k in COMEDY_PHRASES if k in text)
+            if _phrase_hits >= 1: humor_density += 0.25
+        except Exception:
+            pass
+        # 構造的ユーモア検出
+        if "…" in text and any(w in text for w in ["だが", "でも", "ただし", "しかし"]):
+            humor_density += 0.15
+        if text.rstrip().endswith(("。", "…")) and len(text) < 80:
+            humor_density += 0.10
+        humor_density = min(1.0, humor_density)
+
+    # 重み配分V3: X syutainはユーモア密度軸を追加、他は従来配分
+    if platform == "x" and account == "syutain":
+        score = (
+            fact_density_score * 0.14 +
+            theme_relevance * 0.10 +
+            structure_score * 0.12 +
+            human_score * 0.10 +
+            persona_score * 0.12 +
+            completeness * 0.10 +
+            engagement * 0.08 +
+            ai_score * 0.08 +
+            readability * 0.04 +
+            humor_density * 0.12
+        )
+    else:
+        score = (
+            fact_density_score * 0.16 +
+            theme_relevance * 0.12 +
+            structure_score * 0.14 +
+            human_score * 0.12 +
+            persona_score * 0.14 +
+            completeness * 0.12 +
+            engagement * 0.08 +
+            ai_score * 0.08 +
+            readability * 0.04
+        )
     score = round(max(0.0, min(1.0, score)), 3)
 
     # ハードフェイル: 中国語混入・名前誤読・AI自己開示・情景過剰 → 上限0.30
@@ -1312,6 +1376,10 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- 外部ニュースについて書く時、島原やSYUTAINβが使った/担当した/体験したと書くな。観察・分析として書け\n"
         "- 「当社」「弊社」「我々のチーム」は存在しない。個人開発\n"
         "- 検証できない数値（〇%向上、〇倍改善等）を書くな\n"
+        "\n【SYUTAINβの能力範囲】\n"
+        "- できる: データ分析・集計、記事/投稿生成、情報収集・トレンド検出、スケジュール管理、島原との対話・記憶・学習\n"
+        "- できない: 物理作業（撮影/編集/モデリング/制作/担当）、人間の体験（見た/食べた/会った）、外部プロジェクトへの参加\n"
+        "- 外部ニュースは「〜が発表された」「〜と報告されている」と観察者として書け\n"
         "\n【島原大知の事実（厳守）】\n"
         "- コードを一行も書けない非エンジニア。本業は映像制作（VFX/カラグレ/撮影/ドローン）\n"
         "- VTuber業界8年（業界支援。VTuber活動はしていない）。SunoAI作詞は完全に趣味\n"
@@ -1324,6 +1392,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- AI定型: 「いかがでしょうか」「深掘り」「させていただきます」「特筆すべき」「画期的」\n"
         "- 煽り: 「誰でも簡単に」「絶対稼げる」「最短で月100万」「革命」\n"
         "- 情景描写・ポエム・抽象論で始める（全てリジェクト）\n"
+        "- VTuber業界の話題は避けろ（AITuber側の話題ならOK）\n"
         "- 絵文字3個以上/ハッシュタグ（後処理で自動付与）\n"
     )
 
@@ -1434,7 +1503,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
                 _meme_key = random.choice(list(MEME_STRUCTURES.keys()))
                 _meme = MEME_STRUCTURES[_meme_key]
                 _special_injection = (
-                    f"\n\n【構文指示】この投稿を「{_meme_key}」で書け。\n"
+                    f"\n\n【構文指示（必須）】この投稿を必ず「{_meme_key}」の構文で書け。\n"
                     f"パターン: {_meme['pattern']}\n"
                     f"例: {_meme.get('example', '')}\n"
                     f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
@@ -1455,8 +1524,24 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
                 _picked = random.choice(_slang_pool)
                 _special_injection = (
                     f"\n\n【スラング指示】投稿のどこかに「{_picked[0]}」を自然に組み込め。"
-                    f"（意味: {_picked[1]}）。無理に入れるな。自然に入らなければ無視してよい。"
+                    f"（意味: {_picked[1]}）。必ず投稿のどこかに組み込め。"
                     f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
+                )
+            except Exception:
+                pass
+
+        # 35%の確率でスラングを追加（メイン要素と同居OK。自然なら2つ入る）
+        if random.random() < 0.35 and "スラング指示" not in _special_injection:
+            try:
+                from strategy.net_meme_vocabulary import NET_SLANG, NICONICO_SLANG, NICHAN_SLANG
+                _extra_pool = (
+                    [(k, v.get("meaning", k)) for k, v in NET_SLANG.items()] +
+                    [(k, v.get("meaning", k)) for k, v in NICONICO_SLANG.items()] +
+                    [(k, v.get("meaning", k)) for k, v in NICHAN_SLANG.items()]
+                )
+                _extra = random.choice(_extra_pool)
+                _special_injection += (
+                    f"\n【追加スラング】自然に入るなら「{_extra[0]}」（意味: {_extra[1]}）も組み込め。無理なら省略OK。"
                 )
             except Exception:
                 pass
@@ -1494,12 +1579,13 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 具体的な数字を最低1つ含める\n"
             f"- 時間帯: {time_str}。長さ: {length_hint}\n"
             f"{'- ' + _opening_hint if _opening_hint else ''}\n"
+            f"{_special_injection}"
+            f"{humor_injection}"
+            f"\n以下の素材から、上記の構文/スラングに最もハマるものを選んで使え:\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
-            f"{humor_injection}"
             f"{buzz_injection}"
-            f"{_special_injection}"
             f"\n直近の投稿（重複禁止）:\n{avoid}\n"
             f"投稿テキストのみを出力。"
         )
