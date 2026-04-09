@@ -388,7 +388,7 @@ async def grok_upcoming_events(days: int = 7, domains: Optional[list[str]] = Non
     if domains is None:
         domains = [
             "AI エージェント / Claude Code / Codex", "映像制作 × AI",
-            "VTuber / ドローン / 写真", "個人開発 / Build in Public",
+            "AITuber / ドローン / 写真", "個人開発 / Build in Public",
             "広告 / マーケ / メディア", "起業 / 経営判断",
         ]
     domain_list = ", ".join(domains[:8])

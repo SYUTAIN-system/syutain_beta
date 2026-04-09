@@ -36,7 +36,7 @@ logger = logging.getLogger("syutain.x_research")
 # 島原大知の関連領域 (これらに親和性が高い話題を優先)
 SHIMAHARA_DOMAINS = [
     "映像制作", "AI映像", "Runway", "Sora", "Veo",
-    "VTuber", "Vライバー", "2D/3D モデル",
+    "AITuber", "2D/3D モデル",
     "ドローン", "空撮", "FPV",
     "写真", "撮影", "ライティング",
     "広告", "マーケティング", "ブランディング",

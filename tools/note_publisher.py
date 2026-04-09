@@ -194,6 +194,14 @@ class NotePublisher:
             body = body_preview + "\n\n" + body_full
         else:
             body = body_preview
+
+        # 最終防衛線: 注意書きが冒頭にない場合は強制追加（全経路で必ず入る）
+        _auto_gen_label = (
+            "> この記事はSYUTAINβ（自律型AI事業OS）が自動生成・公開しました。\n"
+            "> 島原大知が開発したシステムが、人間の介入なしに執筆しています。\n\n"
+        )
+        if not body.lstrip().startswith(">"):
+            body = _auto_gen_label + body
         price = package.get("price_jpy", 0)
         tags = package.get("tags", [])
         if isinstance(tags, str):

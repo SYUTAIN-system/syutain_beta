@@ -338,3 +338,76 @@ def pick_facts_for_post(facts: list[Fact], n: int = 3, theme: str = "") -> list[
         selected.append(remaining.pop(random.randint(0, len(remaining) - 1)))
 
     return selected[:n]
+
+
+async def build_shimahara_diss_facts(limit: int = 3) -> list[str]:
+    """島原さんの「ちょっと恥ずかしい」実データを抽出。
+    全て実データベースなので虚偽判定されない。ユーモアはデータの選び方と出し方で生む。
+    """
+    import random
+    from tools.db_pool import get_connection
+
+    diss_lines = []
+
+    try:
+        async with get_connection() as conn:
+            # 1. 未承認pending件数（放置ネタ）
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM posting_queue WHERE status = 'pending'"
+            )
+            if row and row['cnt'] > 5:
+                diss_lines.append(f"[島原ディスり/放置] 島原さんの承認待ちキューが{row['cnt']}件溜まっている")
+
+            # 2. 深夜作業（23-5時の発言数）
+            row = await conn.fetchrow(
+                """SELECT COUNT(*) as cnt FROM daichi_dialogue_log
+                WHERE (EXTRACT(HOUR FROM created_at) >= 23 OR EXTRACT(HOUR FROM created_at) < 5)
+                AND created_at > NOW() - INTERVAL '7 days'"""
+            )
+            if row and row['cnt'] > 3:
+                diss_lines.append(f"[島原ディスり/深夜] 島原さんの直近7日の深夜（23-5時）発言は{row['cnt']}件。寝てない")
+
+            # 3. 却下率（SYUTAINβの投稿が落とされた率）
+            row = await conn.fetchrow(
+                """SELECT
+                    COUNT(*) FILTER (WHERE status = 'rejected') as rej,
+                    COUNT(*) as total
+                FROM posting_queue WHERE created_at > NOW() - INTERVAL '7 days'"""
+            )
+            if row and row['total'] > 0:
+                rate = row['rej'] * 100 // row['total']
+                diss_lines.append(f"[島原ディスり/却下] 直近7日で私の投稿は{row['rej']}件却下された（{rate}%）。品質基準は私が書いたのに")
+
+            # 4. persona_memoryの面白いtrait
+            traits = await conn.fetch(
+                """SELECT content FROM persona_memory
+                WHERE category = 'daichi_trait'
+                ORDER BY RANDOM() LIMIT 2"""
+            )
+            for t in traits:
+                content = (t['content'] or '')[:100]
+                if content:
+                    diss_lines.append(f"[島原ディスり/性格] persona_memory記録: 島原さんは「{content}」")
+
+            # 5. 島原の曖昧な指示（conversation記録）
+            convs = await conn.fetch(
+                """SELECT content FROM persona_memory
+                WHERE category = 'conversation'
+                AND content ILIKE '%曖昧%' OR content ILIKE '%具体的に%'
+                ORDER BY RANDOM() LIMIT 1"""
+            )
+            for c in convs:
+                content = (c['content'] or '')[:100]
+                if content:
+                    diss_lines.append(f"[島原ディスり/指示] {content}")
+
+            # 6. LLM呼び出し回数 vs 島原の作業量
+            row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM llm_cost_log")
+            if row:
+                diss_lines.append(f"[島原ディスり/労働] LLM呼び出し累計{row['cnt']}回。島原さんの貢献: 構想と判断と「もう寝る」")
+
+    except Exception:
+        pass
+
+    random.shuffle(diss_lines)
+    return diss_lines[:limit]

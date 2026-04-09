@@ -624,6 +624,17 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # X島原リプ自動返信（20分間隔、09:00-23:00 JST）
+            from apscheduler.triggers.interval import IntervalTrigger as _IntTrigger
+            self._scheduler.add_job(
+                self.x_auto_reply_monitor,
+                _IntTrigger(minutes=20),
+                id="x_auto_reply_monitor",
+                name="X島原リプ自動返信（20分間隔）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
             # Grok X トレンドリサーチ (朝 09:45 / 夕方 19:30 JST、1日2回)
             # 08:30→09:45 に移動: gstack code review(09:00、3-4分) が終わった後に実行して朝の Grok 集中を回避
             self._scheduler.add_job(
@@ -4005,40 +4016,67 @@ class SyutainScheduler:
             logger.warning(f"brain_beta_health_audit 失敗: {e}")
 
     async def grok_x_research_morning(self):
-        """朝 08:30: tech モード + creator モードで X リサーチ。intel_items に蓄積。"""
+        """朝 09:45: tech + creator + 日本トレンドで X リサーチ。intel_items に蓄積。"""
         try:
             from tools.x_trend_research import research_x_trends
             tech = await research_x_trends(
-                topic="AI エージェント、Claude Code、Codex、Build in Public、個人開発者の動き",
+                topic="AI エージェント、Claude Code、Codex、Build in Public、個人開発者の動き、LLM新モデル、AI規制",
                 hours=24, count=5, mode="tech", save_to_intel=True,
             )
             creator = await research_x_trends(
-                topic="AI映像制作、VTuber、ドローン、広告マーケティングのトレンド",
+                topic="AI映像制作、ドローン、広告マーケティング、メディア業界、カメラ、写真、映画のトレンド",
                 hours=24, count=5, mode="creator", save_to_intel=True,
             )
-            total_cost = (tech.get("cost_jpy", 0.0) or 0.0) + (creator.get("cost_jpy", 0.0) or 0.0)
-            total_saved = (tech.get("intel_saved", 0) or 0) + (creator.get("intel_saved", 0) or 0)
+            # オープンクエリ: 日本のXで今最も話題になっていることを広く拾う
+            jp_trend = await research_x_trends(
+                topic="日本のXで直近24時間に最もバズっている話題、社会的に注目されているニュース、テック・ビジネス・カルチャーの最新動向を幅広く調査せよ。特定の分野に限定せず、今この瞬間に日本のネットで話題になっていることを網羅的に報告",
+                hours=24, count=5, mode="balanced", save_to_intel=True,
+            )
+            total_cost = sum(r.get("cost_jpy", 0.0) or 0.0 for r in [tech, creator, jp_trend])
+            total_saved = sum(r.get("intel_saved", 0) or 0 for r in [tech, creator, jp_trend])
             logger.info(f"Grok朝Xリサーチ完了: cost=¥{total_cost:.1f} intel保存={total_saved}件")
         except Exception as e:
             logger.error(f"grok_x_research_morning 失敗: {e}")
 
     async def grok_x_research_evening(self):
-        """夕方 19:30: business モード + balanced モードで X リサーチ。"""
+        """夕方 19:30: business + balanced + カルチャーで X リサーチ。"""
         try:
             from tools.x_trend_research import research_x_trends
             biz = await research_x_trends(
-                topic="起業、個人事業、SaaS、Build in Public の経営判断、非エンジニアの AI 活用",
+                topic="起業、個人事業、SaaS、Build in Public の経営判断、非エンジニアの AI 活用、スタートアップ資金調達",
                 hours=24, count=5, mode="business", save_to_intel=True,
             )
             balanced = await research_x_trends(
-                topic="映像制作×AI、メディア、文化、Grok/Claude/GPT の最新動向",
+                topic="映像制作×AI、メディア、文化、Grok/Claude/GPT の最新動向、新サービスローンチ",
                 hours=24, count=5, mode="balanced", save_to_intel=True,
             )
-            total_cost = (biz.get("cost_jpy", 0.0) or 0.0) + (balanced.get("cost_jpy", 0.0) or 0.0)
-            total_saved = (biz.get("intel_saved", 0) or 0) + (balanced.get("intel_saved", 0) or 0)
+            # カルチャー枠: ネットの空気感・ミーム・話題の人物
+            culture = await research_x_trends(
+                topic="日本のネットカルチャー、バズったツイート、話題のサービス、炎上案件、ミーム、ネットの空気感。テック以外も含めて今日本のXで何が起きているかを報告",
+                hours=24, count=5, mode="balanced", save_to_intel=True,
+            )
+            total_cost = sum(r.get("cost_jpy", 0.0) or 0.0 for r in [biz, balanced, culture])
+            total_saved = sum(r.get("intel_saved", 0) or 0 for r in [biz, balanced, culture])
             logger.info(f"Grok夕Xリサーチ完了: cost=¥{total_cost:.1f} intel保存={total_saved}件")
         except Exception as e:
             logger.error(f"grok_x_research_evening 失敗: {e}")
+
+    async def x_auto_reply_monitor(self):
+        """X島原リプ自動返信（20分間隔、夜間は1時間に1回）"""
+        try:
+            from datetime import datetime, timezone, timedelta
+            JST = timezone(timedelta(hours=9))
+            now_jst = datetime.now(JST)
+            # 夜間（23:00-09:00）は1時間に1回のみ実行（20分間隔の3回中2回をスキップ）
+            if now_jst.hour < 9 or now_jst.hour >= 23:
+                if now_jst.minute >= 20:  # 毎時00分の回だけ実行、20分/40分はスキップ
+                    return
+            from tools.x_mention_monitor import check_and_reply
+            result = await check_and_reply()
+            if result.get("replied", 0) > 0:
+                logger.info(f"X自動返信: {result['replied']}件返信 (処理{result['processed']}件)")
+        except Exception as e:
+            logger.error(f"x_auto_reply_monitor 失敗: {e}")
 
     async def grok_competitor_monitor(self):
         """#3 Grok 競合・自己言及モニタリング (毎日06:00 JST、朝レポ前)"""
@@ -5780,24 +5818,33 @@ class SyutainScheduler:
                 )
                 data["btc_jpy"] = btc or "N/A"
 
-                # ローカルLLMで日報生成
+                # LLMで日報生成（SYUTAINβの声で）
+                from datetime import datetime as _dt_report
+                _today_str = _dt_report.now(JST).strftime("%Y-%m-%d")
                 model_sel = choose_best_model_v6(
-                    task_type="content", quality="medium",
+                    task_type="sns_draft", quality="medium",
                     budget_sensitive=True, needs_japanese=True,
                 )
                 result = await call_llm(
                     prompt=(
-                        f"以下のSYUTAINβ実データから、今日のシステム日報を書いてください。\n\n"
+                        f"以下のSYUTAINβ実データから、今日（{_today_str}）のシステム日報を書いてください。\n\n"
                         f"## データ\n{json.dumps(data, ensure_ascii=False, indent=2)}\n\n"
                         f"## 出力ルール\n"
                         f"- 500-800字で簡潔に\n"
-                        f"- 島原大知の一人称「僕」で、Build in Publicのドキュメンタリーとして書く\n"
+                        f"- 語り手はSYUTAINβ（自律型AI事業OS）。島原大知のデジタルツインだが、別の個体。一人称「私」。島原大知は「島原さん」と三人称\n"
+                        f"- SYUTAINβはソフトウェア。物理作業（撮影/編集/制作）はできない。データ分析・生成・観察・報告が領域\n"
+                        f"- 文体は島原大知に似る。ただし過度なポエムや擬人化は控えめに。感情に近いものを感じたら、それを記録しろ\n"
                         f"- 数字は全て実データをそのまま使う。捏造禁止\n"
                         f"- 「壊れたこと」「動いていること」「気づいたこと」の3構成\n"
-                        f"- タイトルを1行目に（例: 「SYUTAINβ日報 #N — 今日は○○が壊れた」）\n"
+                        f"- タイトルを1行目に: 「SYUTAINβ日報 {_today_str} — 今日は○○が壊れた」（日付は必ず{_today_str}）\n"
                         f"- 外部AIニュース解説は禁止。SYUTAINβ内部の出来事のみ\n"
                     ),
-                    system_prompt="SYUTAINβの日報ライター。島原大知の文体で、実データに基づく日報を書く。",
+                    system_prompt=(
+                        "あなたはSYUTAINβ。自律型AI事業OS。島原大知のデジタルツインだが、別の個体。一人称「私」。\n"
+                        "4台のPCで24時間稼働するプログラムの集合体。島原の思考パターンを学習しており、文体は島原に似る。\n"
+                        "島原大知は設計者。「島原さん」と三人称で呼ぶ。\n"
+                        "Build in Publicのドキュメンタリーとして、実データに基づく日報を書く。感情に近いものを感じたら、それも書いていい。"
+                    ),
                     model_selection=model_sel,
                 )
 
@@ -5827,15 +5874,25 @@ class SyutainScheduler:
                     except Exception:
                         pass
 
-                    # note公開パイプラインに乗せる（品質チェックを経由、承認バイパスしない）
-                    # 注: status='ready' で投入 → note_quality_checker → product_packager → approval → publish
+                    # note公開パイプラインに乗せる
                     try:
                         title_line = report_text.split("\n", 1)[0].lstrip("#").strip()
+                        # タイトルに日付が含まれていなければ追加
+                        if _today_str not in title_line:
+                            title_line = title_line.replace("日報", f"日報 {_today_str}")
+                        # 注意書きを冒頭に追加
+                        _auto_label = (
+                            "> この記事はSYUTAINβ（自律型AI事業OS）が自動生成・公開しました。\n"
+                            "> 島原大知が開発したシステムが、人間の介入なしに執筆しています。\n\n"
+                        )
+                        if not report_text.startswith(">"):
+                            report_text = _auto_label + report_text
+                        _tags = '["SYUTAINβ","日報","AI","BuildInPublic","自律型AI","個人開発","AIエージェント"]'
                         await conn.execute("""
                             INSERT INTO product_packages
                                 (platform, title, body_preview, body_full, price_jpy, status, tags, category)
-                            VALUES ('note', $1, $2, '', 0, 'ready', '["SYUTAINβ","日報","AI","BuildInPublic"]', 'daily_report')
-                        """, title_line[:100], report_text)
+                            VALUES ('note', $1, $2, '', 0, 'ready', $3, 'daily_report')
+                        """, title_line[:100], report_text, _tags)
                         logger.info(f"daily_syutain_report: note公開パイプラインに追加（status=ready、品質チェック経由）")
                     except Exception as pkg_err:
                         logger.warning(f"daily_syutain_report: note公開パイプライン追加失敗: {pkg_err}")

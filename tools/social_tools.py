@@ -193,8 +193,9 @@ async def post_to_x(content: str, account: str = "syutain", skip_approval: bool 
         return {"success": False, "reason": str(e)}
 
 
-async def execute_approved_x(content: str, account: str = "syutain") -> dict:
-    """承認済みX投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）"""
+async def execute_approved_x(content: str, account: str = "syutain", in_reply_to_tweet_id: str = None) -> dict:
+    """承認済みX投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）
+    in_reply_to_tweet_id: 指定するとリプライとして投稿"""
     creds = _get_x_credentials(account)
 
     # 日本語150字制限（文が途中で切れないよう文末で切る）
@@ -225,11 +226,14 @@ async def execute_approved_x(content: str, account: str = "syutain") -> dict:
             access_token=creds["access_token"],
             access_token_secret=creds["access_token_secret"],
         )
-        response = client.create_tweet(text=content)
+        tweet_kwargs = {"text": content}
+        if in_reply_to_tweet_id:
+            tweet_kwargs["in_reply_to_tweet_id"] = in_reply_to_tweet_id
+        response = client.create_tweet(**tweet_kwargs)
         tweet_id = response.data.get("id", "") if response.data else ""
         tweet_url = f"https://x.com/{creds['handle'].lstrip('@')}/status/{tweet_id}"
 
-        logger.info(f"X承認済み投稿成功({creds['handle']}): {tweet_id}")
+        logger.info(f"X承認済み投稿成功({creds['handle']}): {tweet_id}{' (reply)' if in_reply_to_tweet_id else ''}")
         try:
             from tools.event_logger import log_event
             await log_event(

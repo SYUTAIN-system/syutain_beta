@@ -16,15 +16,15 @@
 カテゴリ:
     1. syutain_ops     — SYUTAINβ の運用 (max 2件/日、固着防止)
     2. ai_tech_trend   — AI/テック最新動向 (Grok X リサーチ, intel_items)
-    3. creator_media   — 映像/AITuber/ドローン/写真/広告/メディア（VTuber業界の話題は避ける）
+    3. creator_media   — 映像/ドローン/写真/広告/制作プロセス（VTuber業界の話題は避ける）
     4. philosophy_bip   — Build in Public 哲学、設計判断、教訓
     5. shimahara_fields — 経営/起業/マーケ/文化 (島原さんの拡張関連分野)
 
 プラットフォーム別の配分:
-    X @shimahara (4件):  syutain_ops 0, ai_tech 1, creator 1, philosophy 1, shimahara 1
-    X @syutain  (6件):   syutain_ops 1, ai_tech 2, creator 1, philosophy 1, shimahara 1
-    Bluesky    (13件):   syutain_ops 2, ai_tech 3, creator 3, philosophy 3, shimahara 2
-    Threads    (13件):   syutain_ops 1, ai_tech 2, creator 3, philosophy 3, shimahara 4
+    X @shimahara (5件):  syutain_ops 1, ai_tech 1, creator 1, philosophy 2, shimahara 0
+    X @syutain  (8件):   syutain_ops 2, ai_tech 2, creator 1, philosophy 2, shimahara 1
+    Bluesky    (10件):   syutain_ops 2, ai_tech 3, creator 1, philosophy 3, shimahara 1
+    Threads    (7件):    syutain_ops 1, ai_tech 1, creator 1, philosophy 2, shimahara 2
 """
 
 import json
@@ -39,23 +39,23 @@ logger = logging.getLogger("syutain.sns_theme_engine")
 # 2026-04-07 更新: 21本/日体制に合わせた配分
 CATEGORY_DISTRIBUTION = {
     "x_shimahara": {
-        # 島原個人 5本: 体験・違和感・学びを優先
-        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
+        # 島原個人 5本: 体験・違和感・学びを優先（運用の実話を1本は入れる）
+        "syutain_ops": 1, "ai_tech_trend": 1, "creator_media": 1,
         "philosophy_bip": 2, "shimahara_fields": 0,
     },
     "x_syutain": {
-        # SYUTAINβ公式 8本: データ偏重を抑え、原因/設計判断を増やす
-        "syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 2,
-        "philosophy_bip": 1, "shimahara_fields": 2,
-    },
-    "bluesky": {
-        # 技術コミュニティ 10本: 深い洞察
-        "syutain_ops": 1, "ai_tech_trend": 3, "creator_media": 3,
+        # SYUTAINβ公式 8本: 運用実データ + 設計判断を中心に
+        "syutain_ops": 2, "ai_tech_trend": 2, "creator_media": 1,
         "philosophy_bip": 2, "shimahara_fields": 1,
     },
+    "bluesky": {
+        # 技術コミュニティ 10本: 深い洞察 + 再現可能な運用学び
+        "syutain_ops": 2, "ai_tech_trend": 3, "creator_media": 1,
+        "philosophy_bip": 3, "shimahara_fields": 1,
+    },
     "threads": {
-        # カジュアル 7本: 共感+学び。運用メトリクス一辺倒を避ける
-        "syutain_ops": 0, "ai_tech_trend": 1, "creator_media": 2,
+        # カジュアル 7本: 共感+学び。運用実話を薄く混ぜる
+        "syutain_ops": 1, "ai_tech_trend": 1, "creator_media": 1,
         "philosophy_bip": 2, "shimahara_fields": 2,
     },
 }
@@ -77,12 +77,16 @@ _SYUTAIN_OPS_ANGLES = [
     "失敗率が上がった日に再試行条件を分離した話",
     "新記事を出した日の反応を見て次に直したこと",
     "数字を3つ並べず、結論を1つに絞る運用へ変えた理由",
+    "累計呼び出し数とコストを並べ、結論を1つに絞った日",
+    "新記事の告知文を変えて、インプレッション差を検証した記録",
+    "ready記事が詰まった日の公開導線チェック手順",
+    "失敗率を分母付きで見直し、再試行条件を再定義した話",
 ]
 
 # creator_media テーマの静的候補（intel がない場合のフォールバック）
 _CREATOR_FALLBACK = [
     {"topic": "AI映像制作ツールの現在地", "angle": "Runway/Sora/Kling等の実体験ベース比較", "category": "creator_media"},
-    {"topic": "AITuber/AI配信者の技術と可能性", "angle": "AIが配信者として活動する技術基盤と課題", "category": "creator_media"},
+    {"topic": "ライブ配信ワークフローの自動化", "angle": "素材管理・台本生成・切り抜き工程をどう分担するか", "category": "creator_media"},
     {"topic": "ドローン×AIの可能性", "angle": "空撮/検査/農業での実用例", "category": "creator_media"},
     {"topic": "AIドローン映像の倫理課題", "angle": "演算が構図を決める時代にクリエイターが残す判断", "category": "creator_media"},
     {"topic": "AIが6万行を書いた時、人間は何を設計するか", "angle": "設計書の書き直しから見えた責任境界", "category": "creator_media"},
@@ -104,6 +108,7 @@ _PHILOSOPHY_FALLBACK = [
     {"topic": "完璧を待たずに公開する判断", "angle": "デッドコード207個あっても出す理由", "category": "philosophy_bip"},
     {"topic": "反復作業だけAIに預ける線引き", "angle": "責任と裁量を人間側に残す設計", "category": "philosophy_bip"},
     {"topic": "数字は最適化できるが責任は委譲できない", "angle": "運用自動化で最後に残る人間の仕事", "category": "philosophy_bip"},
+    {"topic": "数字は最適化できるが熱量は人間が守る", "angle": "自動化で効率を上げても、意思決定の熱は委譲できない", "category": "philosophy_bip"},
 ]
 
 # shimahara_fields テーマの静的候補
@@ -111,12 +116,17 @@ _SHIMAHARA_FALLBACK = [
     {"topic": "経営判断とAI", "angle": "提案エンジンが出した提案を人間がどう裁くか", "category": "shimahara_fields"},
     {"topic": "個人事業×AI自動化", "angle": "何を委譲して何を握り続けるか", "category": "shimahara_fields"},
     {"topic": "自動化の責任境界", "angle": "AIに委譲しても最終責任は人が持つ設計", "category": "shimahara_fields"},
-    {"topic": "マーケティングのAI化", "angle": "SNS投稿49件/日を自動生成する実験結果", "category": "shimahara_fields"},
+    {"topic": "マーケティングのAI化", "angle": "投稿本数より検証サイクルを優先した時に何が変わるか", "category": "shimahara_fields"},
     {"topic": "メディアの未来", "angle": "AIがコンテンツを生成する時代の人間の役割", "category": "shimahara_fields"},
     {"topic": "文化産業とテクノロジー", "angle": "クリエイターがAIを使いこなす vs AIに置き換えられる", "category": "shimahara_fields"},
     {"topic": "起業の新しい形", "angle": "コードゼロで56000行のシステムを作る時代", "category": "shimahara_fields"},
     {"topic": "新記事告知の型を見直した話", "angle": "タイトル+具体1指標+URLの構成に揃えた理由", "category": "shimahara_fields"},
 ]
+
+_DISALLOWED_TOPIC_MARKERS = (
+    "VTuber", "vtuber", "ホロライブ", "にじさんじ", "kson",
+    "清楚担当", "配信クリップ",
+)
 
 
 _UNSAFE_THEME_PATTERNS = [
@@ -126,11 +136,20 @@ _UNSAFE_THEME_PATTERNS = [
     re.compile(r"(IQ\s*\d+|99\.?\d*%|人類を凌駕|急騰|最強|無双|覇権|完全自動で放置|絶対)"),
     # 品質低下しやすい過度な煽り語
     re.compile(r"(人類は追いつけない|君たち人類|革命確定)"),
+    # ハレーションが多い固有話題（運用方針で除外）
+    re.compile(r"(VTuber|vtuber|ホロライブ|にじさんじ|kson|清楚担当|配信クリップ)"),
 ]
+
+
+def _contains_disallowed_topic(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker.lower() in lower for marker in _DISALLOWED_TOPIC_MARKERS)
 
 
 def _is_safe_theme(topic: str, angle: str = "") -> bool:
     text = f"{topic} {angle}"
+    if _contains_disallowed_topic(text):
+        return False
     return not any(p.search(text) for p in _UNSAFE_THEME_PATTERNS)
 
 
@@ -149,7 +168,7 @@ async def build_theme_pool(
     platform_key = f"{platform}_{account}" if platform == "x" else platform
     distribution = CATEGORY_DISTRIBUTION.get(platform_key, CATEGORY_DISTRIBUTION.get(platform, {}))
     if not distribution:
-        distribution = {"syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 2, "philosophy_bip": 2, "shimahara_fields": 2}
+        distribution = {"syutain_ops": 1, "ai_tech_trend": 2, "creator_media": 1, "philosophy_bip": 2, "shimahara_fields": 2}
 
     pool: list[dict] = []
     used = set(used_today or [])
@@ -176,6 +195,8 @@ async def build_theme_pool(
             except Exception:
                 pass
             angle = (meta.get("note_angle") or meta.get("sns_angle") or r.get("summary", ""))[:200]
+            if _contains_disallowed_topic(topic) or _contains_disallowed_topic(angle):
+                continue
             if not _is_safe_theme(topic, angle):
                 continue
             pool.append({
@@ -206,6 +227,8 @@ async def build_theme_pool(
                 if topic in used or not topic:
                     continue
                 angle = (r.get("summary") or "")[:200]
+                if _contains_disallowed_topic(topic) or _contains_disallowed_topic(angle):
+                    continue
                 if not _is_safe_theme(topic, angle):
                     continue
                 pool.append({
@@ -227,8 +250,8 @@ async def build_theme_pool(
     try:
         creator_items = await conn.fetch(
             """SELECT title, summary, url, metadata FROM intel_items
-               WHERE (category IN ('creator', 'media', 'video', 'aituber', 'drone', 'photo')
-                      OR keyword ILIKE '%映像%' OR keyword ILIKE '%AITuber%'
+               WHERE (category IN ('creator', 'media', 'video', 'drone', 'photo', 'ad')
+                      OR keyword ILIKE '%映像%'
                       OR keyword ILIKE '%ドローン%' OR keyword ILIKE '%写真%')
                AND created_at > NOW() - INTERVAL '72 hours'
                ORDER BY importance_score DESC LIMIT $1""",
@@ -239,6 +262,8 @@ async def build_theme_pool(
             if topic in used or not topic:
                 continue
             angle = (r.get("summary") or "")[:200]
+            if _contains_disallowed_topic(topic) or _contains_disallowed_topic(angle):
+                continue
             if not _is_safe_theme(topic, angle):
                 continue
             pool.append({
@@ -350,6 +375,8 @@ async def build_theme_pool(
             if topic in used or not topic:
                 continue
             angle = (r.get("summary") or "")[:200]
+            if _contains_disallowed_topic(topic) or _contains_disallowed_topic(angle):
+                continue
             if not _is_safe_theme(topic, angle):
                 continue
             pool.append({

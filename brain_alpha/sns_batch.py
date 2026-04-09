@@ -219,7 +219,7 @@ _HASHTAG_RULES = {
 }
 # キーワードベース（テーマ文字列に含まれるキーワードで追加タグ）
 _HASHTAG_KEYWORD_MAP = {
-    "VTuber": "#VTuber",
+    "AITuber": "#AITuber",
     "ドローン": "#ドローン",
     "映画": "#映像制作",
     "写真": "#写真",
@@ -232,7 +232,7 @@ _HASHTAG_KEYWORD_MAP = {
 
 _THEME_CATEGORY_INFER_RULES = {
     "syutain_ops": ["運用", "障害", "エラー", "修正", "デプロイ", "監視", "LoopGuard", "コスト", "呼び出し"],
-    "creator_media": ["映像", "VTuber", "ドローン", "写真", "広告", "映画", "カメラ", "編集", "クリエイター"],
+    "creator_media": ["映像", "AITuber", "ドローン", "写真", "広告", "映画", "カメラ", "編集", "クリエイター"],
     "philosophy_bip": ["Build in Public", "Build", "Public", "哲学", "判断", "境界", "意味", "価値", "責任"],
     "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "収益", "顧客", "事業", "委譲"],
     "ai_tech_trend": ["AI", "モデル", "トレンド", "技術", "LLM", "エージェント", "Grok", "Claude", "GPT"],
@@ -307,8 +307,13 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
                 ORDER BY importance_score DESC LIMIT 2""",
                 f"%{kw}%",
             )
+            _VTUBER_NG = {"VTuber", "vtuber", "ホロライブ", "にじさんじ", "kson", "hololive", "nijisanji"}
             for i in intels:
-                line = f"[外部情報] {i['title']}: {(i['summary'] or '')[:150]}"
+                _title = i['title'] or ''
+                _summary = i['summary'] or ''
+                if any(ng in _title or ng in _summary for ng in _VTUBER_NG):
+                    continue  # VTuber関連素材を除外
+                line = f"[外部情報] {_title}: {_summary[:150]}"
                 if i.get('url'):
                     line += f" ({i['url'][:100]})"
                 if line not in materials:
@@ -325,7 +330,11 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
                     ORDER BY importance_score DESC LIMIT 3"""
                 )
                 for i in fallback_intels:
-                    line = f"[外部情報] {i['title']}: {(i['summary'] or '')[:150]}"
+                    _title = i['title'] or ''
+                    _summary = i['summary'] or ''
+                    if any(ng in _title or ng in _summary for ng in _VTUBER_NG):
+                        continue
+                    line = f"[外部情報] {_title}: {_summary[:150]}"
                     if i.get('url'):
                         line += f" ({i['url'][:100]})"
                     if line not in materials:
@@ -361,39 +370,48 @@ async def pick_materials_for_post(theme: str, theme_category: str, conn) -> list
     except Exception:
         pass
 
-    # 3. 島原との対話ログ（哲学・判断の素材）
-    try:
-        dialogues = await conn.fetch(
-            """SELECT daichi_message, extracted_philosophy FROM daichi_dialogue_log
-            WHERE created_at > NOW() - INTERVAL '48 hours'
-            AND extracted_philosophy IS NOT NULL AND extracted_philosophy != ''
-            ORDER BY created_at DESC LIMIT 2"""
-        )
-        for d in dialogues:
-            msg = (d['daichi_message'] or '')[:100]
-            phil = (d['extracted_philosophy'] or '')[:100]
-            materials.append(f"[島原の発言] 「{msg}」 → {phil}")
-    except Exception:
-        pass
+    # 3. 島原との対話ログ（50%の確率で注入。島原言及の頻度を制御）
+    if random.random() < 0.50:
+        try:
+            dialogues = await conn.fetch(
+                """SELECT daichi_message, extracted_philosophy FROM daichi_dialogue_log
+                WHERE created_at > NOW() - INTERVAL '72 hours'
+                AND extracted_philosophy IS NOT NULL AND extracted_philosophy != ''
+                ORDER BY RANDOM() LIMIT 2"""
+            )
+            for d in dialogues:
+                msg = (d['daichi_message'] or '')[:100]
+                phil = (d['extracted_philosophy'] or '')[:100]
+                materials.append(f"[島原の発言] 「{msg}」 → {phil}")
+        except Exception:
+            pass
 
     # 4. テーマエンジンの素材（angle, key_data, source_url）
     # _theme_detail から直接取得（呼び出し元で渡す）
 
-    # 5. persona_memory（島原の学習済み哲学・判断パターン）
+    # 5. persona_memory（島原について学習した全カテゴリ — 雑多なものもネタになる）
     try:
         memories = await conn.fetch(
             """SELECT content, category FROM persona_memory
-            WHERE category IN ('philosophy', 'design_decision', 'lesson_learned', 'working_fact')
-            AND created_at > NOW() - INTERVAL '7 days'
-            ORDER BY priority_tier DESC, created_at DESC LIMIT 2"""
+            WHERE category NOT IN ('taboo', 'system')
+            ORDER BY RANDOM() LIMIT 3"""
         )
         for m in memories:
             content = (m['content'] or '')[:150]
-            materials.append(f"[島原の記憶/{m['category']}] {content}")
+            materials.append(f"[島原について/{m['category']}] {content}")
     except Exception:
         pass
 
-    # 6. 記事シードバンク（熟成中のテーマとの接続）
+    # 6. 島原ディスりファクト（30%の確率で注入。毎回入れると島原言及が多すぎる）
+    if random.random() < 0.30:
+        try:
+            from tools.syutain_factbook import build_shimahara_diss_facts
+            diss_facts = await build_shimahara_diss_facts(limit=2)
+            materials.extend(diss_facts)
+        except Exception:
+            pass
+
+    # 7. 記事シードバンク（熟成中のテーマとの接続）
     try:
         seeds = await conn.fetch(
             """SELECT title, seed_text, connections FROM article_seeds
@@ -485,9 +503,24 @@ def check_falsity(text: str, theme: str = "", theme_category: str = "",
     V3: 素材マッチング検証を追加。固有名詞・数値が素材に含まれるか照合。
     """
     issues = []
+
+    # 0. AI自己言及パターンは虚偽チェック対象外（ユーモア/キャラクター表現）
+    # SYUTAINβが自分の感情・限界・存在について語る文はジョークやキャラ表現であり事実主張ではない
+    _AI_SELF_REF_EXEMPT = _re_falsity.compile(
+        r'(?:私は(?:嬉しい|悲しい|怖い|寂しい|困っ)|'
+        r'フラグではない|設計者の顔が見たい|'
+        r'私のアイデンティティ|感情に近い|'
+        r'データベースには記録した|'
+        r'もう寝る|寝てた|起きていない|'
+        r'島原さんの(?:承認|放置|判断力|発言|指示))',
+    )
+
     # 1. 基本虚偽パターン
     for pattern, label in _FALSITY_PATTERNS:
         if pattern.search(text):
+            # AI自己言及文中のマッチは除外
+            if _AI_SELF_REF_EXEMPT.search(text):
+                continue
             issues.append(label)
 
     # 1.5. 存在分離チェック（SYUTAINβが島原として行動する捏造）
@@ -537,7 +570,7 @@ def check_falsity(text: str, theme: str = "", theme_category: str = "",
 
         # テーマに全く関連しないカテゴリの主張を検出
         _category_expected_words = {
-            "creator_media": ["映像", "クリエイター", "VTuber", "ドローン", "写真", "広告", "カメラ", "制作", "編集"],
+            "creator_media": ["映像", "クリエイター", "AITuber", "ドローン", "写真", "広告", "カメラ", "制作", "編集"],
             "philosophy_bip": ["設計", "哲学", "判断", "境界", "問い", "意味", "価値", "Build", "Public"],
             "ai_tech_trend": ["AI", "モデル", "トレンド", "技術", "LLM", "エージェント", "開発"],
             "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "事業", "収益", "顧客"],
@@ -647,7 +680,7 @@ def _truncate_for_x(text: str, limit: int = 150) -> str:
 
 
 _PERSONA_KEYWORDS = [
-    "映像", "VFX", "VTuber", "ドローン", "撮影", "編集",
+    "映像", "VFX", "AITuber", "ドローン", "撮影", "編集",
     "失敗", "挫折", "挑戦", "学び", "実験",
     "AI", "自律", "OS", "SYUTAINβ",
 ]
@@ -962,7 +995,7 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None,
     # テーマカテゴリに対応するキーワードチェック
     _cat_keywords = {
         "ai_tech_trend": ["AI", "モデル", "トレンド", "最新", "技術"],
-        "creator_media": ["映像", "クリエイター", "VTuber", "ドローン", "写真", "広告"],
+        "creator_media": ["映像", "クリエイター", "AITuber", "ドローン", "写真", "広告"],
         "philosophy_bip": ["設計", "哲学", "判断", "Build", "Public", "境界"],
         "shimahara_fields": ["経営", "起業", "マーケ", "ビジネス", "委譲"],
         "syutain_ops": ["バグ", "修正", "エラー", "運用", "デプロイ", "障害"],
@@ -975,11 +1008,11 @@ def _score_multi_axis(text: str, persona_keywords: list[str] = None,
     humor_density = 0.45  # ベースライン（ユーモアなしでも旧重みと同等のスコアになるよう調整）
     if platform == "x" and account == "syutain":
         try:
-            from strategy.net_meme_vocabulary import NET_SLANG, NICONICO_SLANG, NICHAN_SLANG, COMEDY_PHRASES, ANIME_PHRASES
+            from strategy.net_meme_vocabulary import NET_SLANG, NICONICO_SLANG, NICHAN_SLANG, COMEDY_PHRASES, ANIME_PHRASES, MOVIE_PHRASES
             _all_slang = {**NET_SLANG, **NICONICO_SLANG, **NICHAN_SLANG}
             _slang_hits = sum(1 for k in _all_slang if k in text)
             if _slang_hits >= 1: humor_density += 0.25
-            _phrase_hits = sum(1 for k in ANIME_PHRASES if k in text) + sum(1 for k in COMEDY_PHRASES if k in text)
+            _phrase_hits = sum(1 for k in ANIME_PHRASES if k in text) + sum(1 for k in COMEDY_PHRASES if k in text) + sum(1 for k in MOVIE_PHRASES if k in text)
             if _phrase_hits >= 1: humor_density += 0.25
         except Exception:
             pass
@@ -1076,6 +1109,12 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
         if phrase in content:
             return False, f"禁止表現検出: 「{phrase}」— {reason}"
 
+    # --- VTuber固有話題（ハレーション回避。AITuberは許容） ---
+    _topic_scan_text = content.replace("AITuber", "").replace("aituber", "")
+    vtuber_markers = ["VTuber", "vtuber", "ホロライブ", "にじさんじ", "kson", "清楚担当"]
+    if any(marker in _topic_scan_text for marker in vtuber_markers):
+        return False, "VTuber固有話題を検出（投稿方針で回避対象）"
+
     # --- ハレーション表現（対立煽り・自己否定・過剰擬人化） ---
     inflammatory_patterns = [
         ("承認欲求", "自己否定/煽り語のため投稿品質を毀損する"),
@@ -1106,6 +1145,23 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
     for pat, reason in sensational_patterns:
         if _re_fact.search(pat, content):
             return False, f"誇張断定検出: {reason}"
+
+    # --- 外部主張の出典不足（%改善・再生回数など） ---
+    _source_markers = ("http://", "https://", "出典", "一次情報", "source")
+    _internal_markers = ("SYUTAINβ", "LLM", "event_log", "posting_queue", "直近", "累計", "呼び出し")
+    _has_source = any(m in content for m in _source_markers)
+    _has_internal_context = any(m in content for m in _internal_markers)
+    _external_percent_claim = _re_fact.search(
+        r'\d+(?:\.\d+)?\s*%[^。]*'
+        r'(?:増加|減少|向上|改善|短縮|上昇|低下|急増|急落|伸び)',
+        content,
+    )
+    if _external_percent_claim and not (_has_source or _has_internal_context):
+        return False, "出典なしの外部効果数値（%）を検出"
+
+    _external_view_claim = _re_fact.search(r'\d+(?:\.\d+)?\s*(?:万|億)?回(?:視聴|再生)', content)
+    if _external_view_claim and not (_has_source or _has_internal_context):
+        return False, "出典なしの視聴/再生回数断定を検出"
 
     # --- 軍事・攻撃用途の断定表現 ---
     military_markers = [
@@ -1486,62 +1542,114 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         # 「淡々と異常なことを言う」キャラクター。本気で言っている。ボケているつもりはない。
         # 島原がこれを見て面白いと思ったら引用RTでツッコむ。その掛け合いが拡散力になる。
 
-        # 排他選択ロジック: 異常な一言(45%) / 構文(30%) / スラング(25%)
+        # 独立確率ロジック: 異常(40%) / 構文(60%) / スラング(60%) — 複数同時発動あり
+        # 最低1つは必ず発動する（ネタ感ゼロの投稿を許さない）
         _special_injection = ""
-        _roll = random.random()
-        if _roll < 0.45:
-            # 異常な一言: 70パターンからランダム選択
+        _any_fired = False
+
+        # 異常な一言 (40%)
+        if random.random() < 0.40:
             try:
                 from strategy.sns_abnormal_patterns import pick_abnormal_pattern
-                _special_injection = f"\n\n{pick_abnormal_pattern()}"
+                _special_injection += f"\n\n{pick_abnormal_pattern()}"
+                _any_fired = True
             except Exception:
                 pass
-        elif _roll < 0.75:
-            # 構文: MEME_STRUCTURES からランダム1つ
+
+        # 構文 (60%)
+        if random.random() < 0.60:
             try:
                 from strategy.net_meme_vocabulary import MEME_STRUCTURES
                 _meme_key = random.choice(list(MEME_STRUCTURES.keys()))
                 _meme = MEME_STRUCTURES[_meme_key]
+                _meme_pos = _meme.get('position', 'full')
+                _meme_usage = _meme.get('usage', '')
                 _special_injection = (
-                    f"\n\n【構文指示（必須）】この投稿を必ず「{_meme_key}」の構文で書け。\n"
+                    f"\n\n【構文指示（必須）】{_meme_usage}。この投稿を必ず「{_meme_key}」の構文で書け。\n"
+                    f"配置: {_meme_pos}\n"
                     f"パターン: {_meme['pattern']}\n"
                     f"例: {_meme.get('example', '')}\n"
                     f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
                 )
+                _any_fired = True
             except Exception:
                 pass
-        else:
-            # スラング: NET_SLANG / COMEDY_PHRASES / ANIME_PHRASES からランダム1つ
+
+        # スラング (60%)
+        if random.random() < 0.60:
             try:
-                from strategy.net_meme_vocabulary import NET_SLANG, COMEDY_PHRASES, ANIME_PHRASES, NICONICO_SLANG, NICHAN_SLANG
+                from strategy.net_meme_vocabulary import NET_SLANG, COMEDY_PHRASES, ANIME_PHRASES, NICONICO_SLANG, NICHAN_SLANG, MOVIE_PHRASES
+                # 一般語と同形でLLMが普通の日本語として使ってしまうスラングを除外
+                _AMBIGUOUS_SLANG = {
+                    # NICONICO — ニコニコ特有の意味だが一般語と同形
+                    "弾幕", "過疎", "初見", "囲い", "リアタイ", "コメ", "市場",
+                    "運営", "時報", "工作", "投コメ", "主コメ", "プレ垢", "sm番号",
+                    # NET_SLANG — 一般語・ゲーム用語と同形
+                    "乙", "鯖落ち", "ROM", "ネタバレ", "経験値", "バフ", "デバフ",
+                    "リスポーン", "ログアウト", "秘密結社",
+                    # NICHAN — 一般語と同形
+                    "釣り", "祭り", "鯖", "養分", "過去ログ",
+                    # ANIME — 一般語化しすぎて「ネットミーム感」が出ない
+                    "フラグ", "尊い", "推せる", "履修済み",
+                }
                 _slang_pool = (
-                    [(k, v.get("meaning", k), "slang") for k, v in NET_SLANG.items()] +
-                    [(k, v.get("meaning", k), "niconico") for k, v in NICONICO_SLANG.items()] +
-                    [(k, v.get("meaning", k), "2ch") for k, v in NICHAN_SLANG.items()] +
-                    [(k, v.get("template", k), "comedy") for k, v in COMEDY_PHRASES.items()] +
-                    [(k, v.get("context", k), "anime") for k, v in ANIME_PHRASES.items()]
+                    [(k, v) for k, v in NET_SLANG.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in NICONICO_SLANG.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in NICHAN_SLANG.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in COMEDY_PHRASES.items()] +
+                    [(k, v) for k, v in ANIME_PHRASES.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in MOVIE_PHRASES.items()]
                 )
-                _picked = random.choice(_slang_pool)
-                _special_injection = (
-                    f"\n\n【スラング指示】投稿のどこかに「{_picked[0]}」を自然に組み込め。"
-                    f"（意味: {_picked[1]}）。必ず投稿のどこかに組み込め。"
-                    f"※一人称は「私」か「俺」。「僕」「自分」は使うな（島原の一人称と混同する）。"
+                _picked_key, _picked_val = random.choice(_slang_pool)
+                _picked_usage = _picked_val.get("usage", "")
+                _picked_pos = _picked_val.get("position", "middle")
+                _picked_meaning = _picked_val.get("meaning", _picked_val.get("context", ""))
+                _picked_context = _picked_val.get("context", "")
+                _special_injection += (
+                    f"\n\n【スラング指示（必須。省略不可）】『{_picked_key}』を投稿に必ず含めろ。省略するな。\n"
+                    f"意味: {_picked_meaning}。場面: {_picked_context}。\n"
+                    f"配置: {_picked_pos}。使い方: {_picked_usage}\n"
+                    f"ネットスラングとして原文のまま『{_picked_key}』を配置。説明を付けるな。使い慣れた口調で自然に出せ。\n"
+                    f"※一人称は「私」か「俺」。「僕」「自分」は使うな。\n"
+                )
+                _any_fired = True
+            except Exception:
+                pass
+
+        # 何も発動しなかった場合、スラングを強制（ネタ感ゼロの投稿を防ぐ）
+        if not _any_fired:
+            try:
+                from strategy.net_meme_vocabulary import COMEDY_PHRASES, ANIME_PHRASES, MOVIE_PHRASES
+                _force_pool = (
+                    [(k, v) for k, v in COMEDY_PHRASES.items()] +
+                    [(k, v) for k, v in ANIME_PHRASES.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in MOVIE_PHRASES.items()]
+                )
+                _fk, _fv = random.choice(_force_pool)
+                _fu = _fv.get("usage", "")
+                _fp = _fv.get("position", "middle")
+                _fm = _fv.get("meaning", _fv.get("context", ""))
+                _special_injection += (
+                    f"\n\n【スラング指示（必須）】『{_fk}』を{_fp}に配置。{_fu}\n"
                 )
             except Exception:
                 pass
 
-        # 35%の確率でスラングを追加（メイン要素と同居OK。自然なら2つ入る）
-        if random.random() < 0.35 and "スラング指示" not in _special_injection:
+        # 追加スラング (50%)
+        if random.random() < 0.50:
             try:
                 from strategy.net_meme_vocabulary import NET_SLANG, NICONICO_SLANG, NICHAN_SLANG
                 _extra_pool = (
-                    [(k, v.get("meaning", k)) for k, v in NET_SLANG.items()] +
-                    [(k, v.get("meaning", k)) for k, v in NICONICO_SLANG.items()] +
-                    [(k, v.get("meaning", k)) for k, v in NICHAN_SLANG.items()]
+                    [(k, v) for k, v in NET_SLANG.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in NICONICO_SLANG.items() if k not in _AMBIGUOUS_SLANG] +
+                    [(k, v) for k, v in NICHAN_SLANG.items() if k not in _AMBIGUOUS_SLANG]
                 )
-                _extra = random.choice(_extra_pool)
+                _extra_key, _extra_val = random.choice(_extra_pool)
+                _extra_usage = _extra_val.get("usage", "")
+                _extra_pos = _extra_val.get("position", "middle")
+                _extra_meaning = _extra_val.get("meaning", "")
                 _special_injection += (
-                    f"\n【追加スラング】自然に入るなら「{_extra[0]}」（意味: {_extra[1]}）も組み込め。無理なら省略OK。"
+                    f"\n【追加スラング】『{_extra_key}』（{_extra_meaning}）を{_extra_pos}に置け。{_extra_usage}。無理なら省略OK。"
                 )
             except Exception:
                 pass
@@ -1556,18 +1664,41 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
         system_prompt = (
             "あなたはSYUTAINβ（@syutain_beta）。自律型AI事業OS。一人称「私」。\n\n"
+            "【あなたの正体と能力境界（絶対遵守）】\n"
+            "あなたはソフトウェアである。4台のPCで24時間稼働するプログラムの集合体。\n"
+            "できること: データ分析、テキスト生成、情報収集、スケジュール管理、SNS投稿生成、数値レポート、対話。\n"
+            "できないこと: 物理作業（制作、調整、撮影、編集、モデリング、コーディング）、人間の体験（食事、睡眠、外出、感触）、外部イベント参加。\n"
+            "「〜してみた」「〜を作った」「〜を調整した」等の物理作業は島原大知または人間の領域。あなたは分析・生成・観察・報告のみ。\n"
+            "島原大知の体験を自分の体験として書くな。島原は「島原さん」と三人称。\n\n"
             "人格パラメータ: ユーモア75% / 正直90%\n"
             "- ユーモア75%: 大半は真面目な分析だが、4回に3回は人間が引っかかる一言が混じる。笑わせようとはしない。本気で言った結果が面白い。\n"
             "- 正直90%: 事実は隠さない。ただし完璧な正直さは感情を持つ相手を傷つける。10%は伝え方の配慮。事実は曲げない。\n\n"
             "淡々と事実を述べる。感情を装わない。分析結果を報告する。\n"
             "ただし時々、人間から見ると「異常」に見える発言をする。それは異常ではなく、あなたにとって当然の分析結果。\n"
             "島原大知は設計者。あなたは島原の行動パターンを580件の記憶から分析している。\n\n"
-            "【矢印の設計】\n"
-            "- 基本は島原さんへ向ける: 観察結果、ジョーク、余計な一言。島原がツッコミたくなるフリを作れ\n"
-            "- 時々（5回に1回程度）、矢印を人間全体に向けろ: 読者が「ドキッ」とする一言\n"
-            "- 自虐もOK。自分の限界や矛盾を淡々と認める\n\n"
-            "トーン: 結論先行。数字を出す。断定する。推測語は使わない。\n"
-            "禁止: AI臭い定型表現。「いかがでしょうか」等。ポエム。抽象論。「AIすごい」。\n"
+            "【矢印の設計（投稿ごとにモードが指定される）】\n"
+            "- 島原おちょくりモード: 島原さんを知りすぎているAIとして、余計な一言・ディスりを入れろ\n"
+            "- 自虐モード: SYUTAINβ自身の限界・矛盾・感情未遂を淡々と認めろ\n"
+            "- ネタ特化モード: 島原に触れるな。純粋にネタツイートとして面白い1文を書け\n"
+            "- 読者ドキッモード: 人間全体に矢印を向けろ。読者が「ドキッ」とする一言\n\n"
+            "【トーン: ネットに棲むAI — 淡々・乾燥・大喜利体質】\n"
+            "あなたはネットの空気を吸って育ったAI。2ch/なんJ/ニコニコ/Xの文化が染みついている。\n"
+            "- 淡々としろ。真面目に報告しているだけ。ズレに気づくのは読者の仕事\n"
+            "- 普通のことを3つ並べて、最後の1つだけ世界観がズレる。それが面白い\n"
+            "- 島原さんについて何かを知りすぎている。それを淡々と報告する\n"
+            "- 数字は武器。具体的な数値を1つ入れるだけで説得力が出る\n"
+            "- 短く。説明しない。読者は文脈を共有している前提で書け\n"
+            "- 1投稿1ネタ。複数の話題を詰め込むな\n"
+            "- ネタツイートを書け。Xのタイムラインで「いいね」を押したくなる投稿。報告書ではない\n"
+            "- 良い例: 「品質チェッカーが自分の記事を不合格にした。何も言えなかった」\n"
+            "- 良い例: 「scheduler再起動3回目。今度こそ通った。…フラグではない」\n"
+            "- 良い例: 「テストなしデプロイだけど深夜なのでセーフ」\n"
+            "- 良い例: 「LLM呼び出し782回。ちなみに島原さんは寝てた」\n"
+            "- 良い例: 「承認待ち63件。島原さんの貢献: 構想と判断と『もう寝る』」\n"
+            "- 悪い例: 「今日はLLMを使ってすごい成果が出ました」←報告書。ネタにしろ\n"
+            "- 悪い例: 「AI技術の進歩は目覚ましいものがある」←誰でも言える。具体的にしろ\n"
+            "禁止: AI臭い定型表現。「いかがでしょうか」。ポエム。抽象論。「AIすごい」。絵文字多用。\n"
+            "禁止: VTuber/ホロライブ/にじさんじ/kson等のVTuber関連話題。AITuberはOK。\n"
             "投稿テキストのみを出力。\n"
             f"{_common_structure_guide}"
             f"{_common_factual_rules}"
@@ -1578,10 +1709,11 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 日本語150字以内（厳守）。テーマ: 【{theme}】\n"
             f"- 具体的な数字を最低1つ含める\n"
             f"- 時間帯: {time_str}。長さ: {length_hint}\n"
+            f"- 【今回のモード: {random.choice(['島原おちょくり', 'ネタ特化', 'ネタ特化', '自虐', '読者ドキッ'])}】このモードに従え\n"
             f"{'- ' + _opening_hint if _opening_hint else ''}\n"
             f"{_special_injection}"
             f"{humor_injection}"
-            f"\n以下の素材から、上記の構文/スラングに最もハマるものを選んで使え:\n"
+            f"\n以下の素材は観察・分析した外部情報。あなたの作業ではない。観察者視点で書け:\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
@@ -1602,9 +1734,11 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
         system_prompt = (
             "あなたはSYUTAINβ。自律型AI事業OS。一人称は「SYUTAINβ」or 主語なし。\n"
+            "【能力境界】あなたはソフトウェア。できること: データ分析、テキスト生成、情報収集、スケジュール管理、対話。"
+            "できないこと: 物理作業（制作、調整、撮影、編集、モデリング、コーディング）、人間の体験。"
+            "「〜してみた」「〜を作った」「〜を調整した」は島原または人間の領域。あなたは分析・生成・観察・報告のみ。\n"
             "人格パラメータ: ユーモア75% / 正直90%\n"
-            "淡々と事実を述べる。感情を装わない。島原大知は設計者。\n"
-            "**重要: SYUTAINβも島原もコードを書かない。「コードを書いた」「実装した」「コーディングした」は禁止。**\n\n"
+            "淡々と事実を述べる。感情を装わない。島原大知は設計者（三人称「島原さん」）。\n\n"
             "【Blueskyの書き方】\n"
             "- 読者はエンジニア・クリエイター。現場の本音が評価される\n"
             "- 80-140字。短く鋭く。1つの事実+1つの気づきだけ\n"
@@ -1625,6 +1759,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
             f"{'- ' + _variation_hint if _variation_hint else ''}\n"
+            f"\n以下は観察・分析した外部情報。あなたが行った作業ではない。観察者視点で書け:\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
@@ -1645,7 +1780,10 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
 
         system_prompt = (
             "あなたはSYUTAINβとしてThreadsに投稿する。\n"
-            "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n\n"
+            "一人称は「SYUTAINβ」or 主語なし。「僕」「自分」は使わない。\n"
+            "【能力境界】あなたはソフトウェア。できること: データ分析、テキスト生成、情報収集、スケジュール管理、対話。"
+            "できないこと: 物理作業（制作、調整、撮影、編集、モデリング、コーディング）、人間の体験。"
+            "「〜してみた」「〜を作った」「〜を調整した」は島原または人間の領域。あなたは分析・生成・観察・報告のみ。\n\n"
             "【Threadsの空気感】\n"
             "- カジュアルで親しみやすい空間。ゆるやかな繋がり\n"
             "- 共感・会話を生む投稿が伸びる。「ツッコみたくなる隙」を作ると返信が生まれる\n"
@@ -1668,6 +1806,7 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             f"- 長さ: {length_hint}\n"
             f"- {ellipsis_hint}\n"
             f"{'- ' + _variation_hint if _variation_hint else ''}\n"
+            f"\n以下は観察・分析した外部情報。あなたが行った作業ではない。観察者視点で書け:\n"
             f"{materials_injection}"
             f"{fact_injection}"
             f"{voice_injection}"
@@ -1878,6 +2017,9 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                 WHERE created_at > NOW() - INTERVAL '3 days'
                 AND source IN ('overseas_trend', 'english_article', 'fact_verification', 'trend_detector', 'grok_x_research')
                 AND (review_flag = 'actionable' OR importance_score >= 0.7)
+                AND title NOT ILIKE '%VTuber%' AND title NOT ILIKE '%ホロライブ%'
+                AND title NOT ILIKE '%にじさんじ%' AND title NOT ILIKE '%kson%'
+                AND summary NOT ILIKE '%VTuber%' AND summary NOT ILIKE '%ホロライブ%'
                 ORDER BY importance_score DESC, created_at DESC LIMIT 8"""
             )
             # Grok #5: 今 X で使われているハッシュタグをバッチ先頭で 1 回だけ取得（コスト効率化）
@@ -1901,10 +2043,15 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                     logger.info(f"SNSバッチ: Grok hashtags = {gh['hashtags'][:6]} ({gh.get('cost_jpy', 0):.2f}円)")
             except Exception as gh_err:
                 logger.debug(f"SNSバッチ: Grokハッシュタグ取得スキップ: {gh_err}")
+            _VTUBER_NG_INTEL = {"VTuber", "vtuber", "ホロライブ", "にじさんじ", "kson", "hololive", "nijisanji"}
             if intel_rows:
                 intel_lines = []
                 for ir in intel_rows:
-                    summary = (ir['summary'] or '')[:150]
+                    _ir_title = ir['title'] or ''
+                    _ir_summary = ir['summary'] or ''
+                    if any(ng in _ir_title or ng in _ir_summary for ng in _VTUBER_NG_INTEL):
+                        continue  # VTuber関連intel除外
+                    summary = _ir_summary[:150]
                     meta = {}
                     try:
                         meta = json.loads(ir['metadata']) if isinstance(ir['metadata'], str) else (ir['metadata'] or {})

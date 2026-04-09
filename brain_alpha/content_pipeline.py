@@ -25,7 +25,8 @@ from brain_alpha.sns_batch import _score_multi_axis, _PERSONA_KEYWORDS
 logger = logging.getLogger("syutain.brain_alpha.content_pipeline")
 
 STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
-_NOTE_PENDING_BACKLOG_LIMIT = 2
+# note_auto_publish は 1日1本上限のため、pending は 1 件までに抑える。
+_NOTE_PENDING_BACKLOG_LIMIT = 1
 _NOTE_BACKLOG_BYPASS_THEME_MARKERS = (
     "Discord 経由で直接依頼",
     "記事執筆依頼",
@@ -1396,6 +1397,62 @@ async def generate_publishable_content(
             # API 予算超過時にローカルのみで記事パイプラインが完全停止するのを防ぐため、
             # 閾値を 4000 字に下げる。品質は Stage 4 リライト + Stage 4.5 セルフ批評で補う。
             _MIN_DRAFT_LENGTH = 4000
+            length_recovery_attempts = 0
+            if first_draft and len(first_draft) < _MIN_DRAFT_LENGTH:
+                # Stage 3.1: 文字数不足時の追記再生成（短文失敗の救済）
+                # 2026-04-09: 2400-3800字で打ち切られるケースが連続したため、
+                # 初稿を即失敗にせず「不足分のみ追記」させる。
+                for ext_attempt in range(2):
+                    missing = _MIN_DRAFT_LENGTH - len(first_draft)
+                    if missing <= 0:
+                        break
+                    try:
+                        continuation_model_sel = model_sel_draft
+                        # ローカル打ち切り時はAPIへ寄せる（再失敗の連鎖を防止）
+                        if continuation_model_sel.get("provider") == "local":
+                            continuation_model_sel = {
+                                "provider": "openrouter",
+                                "model": "gpt-4o-mini",
+                                "tier": "A",
+                                "via": "openrouter",
+                                "openrouter_model_id": "openai/gpt-4o-mini",
+                                "note": "Stage3 length recovery",
+                            }
+                        tail_context = first_draft[-1400:]
+                        continuation_res = await call_llm(
+                            max_tokens=8192,
+                            prompt=(
+                                "以下のnote記事は途中で打ち切られている。"
+                                "既存部分を繰り返さず、未記載部分を追記して完成させてください。\n\n"
+                                f"- テーマ: {selected_theme}\n"
+                                f"- 現在の本文長: {len(first_draft)}字\n"
+                                f"- 最低必要文字数: {_MIN_DRAFT_LENGTH}字（不足: {missing}字）\n"
+                                "- 追記パートのみ出力（# タイトルと既存見出しの再掲は禁止）\n"
+                                "- 既存本文の最後と自然につながる形で開始する\n"
+                                "- 末尾は「## まとめ」まで書き切る\n\n"
+                                f"## 構成案\n{outline}\n\n"
+                                f"## 既存本文の末尾\n{tail_context}"
+                            ),
+                            system_prompt=(
+                                "あなたはnote記事の追記エディター。"
+                                "不足分を具体例・手順・数字で補い、重複なく完結させる。"
+                                "追記本文のみを出力。"
+                            ),
+                            model_selection=continuation_model_sel,
+                        )
+                        continuation_text = _sanitize_article_output((continuation_res.get("text", "") or "").strip())
+                        if continuation_text.startswith("# "):
+                            continuation_text = "\n".join(continuation_text.splitlines()[1:]).strip()
+                        if not continuation_text or len(continuation_text) < 120:
+                            continue
+                        first_draft = (first_draft.rstrip() + "\n\n" + continuation_text.lstrip()).strip()
+                        length_recovery_attempts += 1
+                        logger.info(
+                            f"Stage 3 追記再生成: attempt={ext_attempt + 1}, "
+                            f"length={len(first_draft)}字"
+                        )
+                    except Exception as ext_err:
+                        logger.debug(f"Stage 3 追記再生成スキップ: {ext_err}")
             if not first_draft or len(first_draft) < _MIN_DRAFT_LENGTH:
                 raise ValueError(f"初稿が短すぎる（{len(first_draft)}字、記事は最低{_MIN_DRAFT_LENGTH}字必要）")
 
@@ -1460,7 +1517,7 @@ async def generate_publishable_content(
                 "name": "初稿",
                 "status": "success",
                 "model": model_sel_draft.get("model", "unknown"),
-                "detail": f"{len(first_draft)}字",
+                "detail": f"{len(first_draft)}字 (length_recovery={length_recovery_attempts})",
             })
         except Exception as e:
             logger.error(f"Stage 3 失敗: {e}")
