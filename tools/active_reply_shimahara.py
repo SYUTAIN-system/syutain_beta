@@ -360,7 +360,9 @@ async def run_active_reply_cycle() -> dict:
                 pass
         else:
             stats["errors"] += 1
-            err = result.get("error", "unknown")
+            # execute_approved_x は {"success": False, "reason": ...} を返す。
+            # 古い "error" キーも一応 fallback で見る。
+            err = result.get("reason") or result.get("error") or "unknown"
             try:
                 from tools.db_pool import get_connection
                 async with get_connection() as conn:

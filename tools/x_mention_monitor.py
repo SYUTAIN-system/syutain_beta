@@ -868,7 +868,8 @@ async def _proactive_reply_sakata() -> dict:
             except Exception:
                 pass
         else:
-            err = result.get("error", "unknown")
+            # execute_approved_x は {"success": False, "reason": ...} を返す
+            err = result.get("reason") or result.get("error") or "unknown"
             logger.warning(f"friend proactive: X 投稿失敗 tweet_id={tweet_id}: {err}")
             try:
                 from tools.db_pool import get_connection
@@ -1132,7 +1133,8 @@ async def _proactive_reply_shimahara_posts() -> dict:
             except Exception:
                 pass
         else:
-            err = result.get("error", "unknown")
+            # execute_approved_x は {"success": False, "reason": ...} を返す
+            err = result.get("reason") or result.get("error") or "unknown"
             logger.warning(f"島原 proactive: X 投稿失敗 tweet_id={tweet_id}: {err}")
             try:
                 from tools.db_pool import get_connection

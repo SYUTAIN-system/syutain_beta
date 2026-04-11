@@ -298,7 +298,8 @@ async def run_boost_cycle() -> dict:
                 stats["reason"] = "daily_cap_reached"
                 break
         else:
-            err = result.get("error", "unknown")
+            # execute_approved_x は {"success": False, "reason": ...} を返す
+            err = result.get("reason") or result.get("error") or "unknown"
             logger.warning(f"boost 投稿失敗: {err}")
             try:
                 async with get_connection() as conn:
