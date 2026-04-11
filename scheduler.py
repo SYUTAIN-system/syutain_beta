@@ -1452,46 +1452,21 @@ class SyutainScheduler:
             logger.error(f"ハートビート失敗: {e}")
 
     async def capability_audit(self):
-        """Capability Audit: 全4台の能力スナップショットを取得"""
-        logger.info("Capability Audit開始")
+        """Capability Audit: agents/capability_audit.py の完全実装を呼ぶ。
+
+        2026-04-11: scheduler 独自の minimal 実装 (NATS ping のみ) を廃止し、
+        agents/capability_audit.py の完全版 (NODE_DEFINITIONS + Ollama + LLM +
+        MCP + external API + tools + budget + diff + Discord 通知) を使用する。
+        488 行の実装が unused になっていた 2重実装問題を解消。
+        """
         try:
-            snapshot = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "nodes": {},
-            }
-
-            # 各ノードのハートビートからステータスを確認
-            if self._nats_client:
-                for node in ["alpha", "bravo", "charlie", "delta"]:
-                    try:
-                        resp = await self._nats_client.request(
-                            f"agent.status.{node}",
-                            {"request": "capability_snapshot"},
-                            timeout=5.0,
-                        )
-                        snapshot["nodes"][node] = resp or {"status": "unreachable"}
-                    except Exception:
-                        snapshot["nodes"][node] = {"status": "unreachable"}
-
-            # PostgreSQLに保存
-            try:
-                import json
-                from tools.db_pool import get_connection
-                async with get_connection() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO capability_snapshots (snapshot_data)
-                        VALUES ($1)
-                        """,
-                        json.dumps(snapshot, ensure_ascii=False, default=str),
-                    )
-            except Exception as e:
-                logger.error(f"Capability Audit保存失敗: {e}")
-
-            logger.info(f"Capability Audit完了: {len(snapshot['nodes'])}ノード")
-
+            from agents.capability_audit import get_capability_audit
+            audit = get_capability_audit()
+            snapshot = await audit.run_full_audit()
+            node_count = len(snapshot.get("nodes", {}))
+            logger.info(f"Capability Audit完了: {node_count}ノード")
         except Exception as e:
-            logger.error(f"Capability Audit失敗: {e}")
+            logger.error(f"Capability Audit失敗: {e}", exc_info=True)
 
     async def auto_review_intel(self):
         """intel_items自動レビュー（重要度スコアで振り分け）"""
