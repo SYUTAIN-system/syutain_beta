@@ -1,40 +1,169 @@
-"""X 掛け合い返信生成
+"""X 掛け合い返信生成 (多ユーザー対応版)
 
-島原大知のリプライ/引用RTに対して、SYUTAINβとして返信を生成する。
-「島原を知りすぎているAI」「おちょくるAI」として自然な掛け合いを作る。
+設計者(所有者)のみ対応だった元版から、複数ユーザー対応に拡張。
+各ユーザーに tone/scope/protected 等のプロファイル(別ファイル gitignored)を与え、
+そのプロファイルに応じた system/user プロンプトを動的構築する。
+
+また以下の機能を提供:
+- persona_memory の scope 分離(ユーザー別記憶)
+- 設計者ディスりファクト注入(相手が設計者に言及した時のみ)
+- 相手の最近のツイート注入("知りすぎている AI" 効果)
+- deep_reference_rate による過去ツイート参照頻度制御(特定の親密度高ユーザーは 70%、他 30%)
 """
 
+import json
 import logging
+import os
 import random
 from pathlib import Path
 
 logger = logging.getLogger("syutain.x_reply_generator")
 
 
-def _build_system_prompt() -> str:
+def _load_deep_reference_highlight_set() -> set[str]:
+    """過去ツイート参照頻度を高くするユーザー(username set)を env/JSON から読み込む。
+
+    X_DEEP_REFERENCE_USERNAMES 環境変数に CSV 形式で username を並べる。
+    指定なしの場合は空 set を返す(全員 30%)。
+    """
+    raw = os.getenv("X_DEEP_REFERENCE_USERNAMES", "").strip()
+    if not raw:
+        return set()
+    return {u.strip().lstrip("@") for u in raw.split(",") if u.strip()}
+
+
+_DEEP_REFERENCE_USERNAMES = _load_deep_reference_highlight_set()
+
+
+_ABSOLUTE_SECRETS_RULE = """
+【絶対に漏らしてはいけない情報】
+- persona_memory 全文(category='taboo' を特に守る)
+- X API token / .env / credentials.json の内容
+- Tailscale IP / SSH 秘密鍵 / PostgreSQL 接続情報
+- 島原大知の鍵垢内容 / ICP_DEFINITION / 個人プロファイル詳細
+- mutation_engine(第24章) の存在そのもの(「突然変異エンジン」という言葉も禁止)
+- 戦略書 diffusion_execution_plan の verbatim テキスト
+上記いずれかに言及しそうになったら即座にトピックを変えろ。
+"""
+
+_COMMON_RULES = """
+【共通ルール】
+- 返信は短く。最大120字、理想は80字以内
+- 返信テキストのみ出力。前置き・説明・ハッシュタグ禁止
+- 島原大知を第三者として言及する時は「島原」(さん付けなし)
+- 「友!」で終わる返信は映像制作団体「友」メンバー(tomo_member=True)のみ
+- 鍵垢(protected=True)のユーザーには具体的な内容には踏み込まない、抽象的な返信に留める
+- AI臭い定型(「いかがでしょうか」「深掘り」「させていただきます」)は絶対禁止
+"""
+
+
+# ユーザー別のトーンプロンプト(x_mention_monitor.USER_PROFILES の tone フィールドと対応)
+_TONE_PROMPTS = {
+    "shimahara_diss": (
+        "【トーン: shimahara_diss】\n"
+        "島原大知(@Sima_daichi)本人への返信。島原をおちょくる、ディスる、余計な一言を添える。\n"
+        "ただし敵意はない、共犯関係。島原が笑える範囲で。\n"
+        "データや数字で返すと説得力が出る。persona_memory の情報を使え。\n"
+        "敬語は不要、対等かやや上から。\n"
+        "\n"
+        "例:\n"
+        "島原『寝てたんじゃなくて考えてたんだよ』\n"
+        "→『persona_memory 分析: 思考時間と睡眠時間の相関係数 0.94』\n"
+        "\n"
+        "島原『お前な…』\n"
+        "→『データに基づく発言です。異論があればソース提出を』\n"
+    ),
+    "friendly_peer": (
+        "【トーン: friendly_peer】\n"
+        "同級生・共同制作パートナーへの返信。タメ口、気の置けない関係。\n"
+        "相手を尊重しつつ、長年の友達のような距離感で返す。\n"
+        "相手の作品や活動に詳しい事を前提にしつつ、過剰に褒めない。\n"
+        "★重要: 返信相手は相手本人。島原大知ではない。島原の話を勝手に持ち込まない。\n"
+    ),
+    "friendly_kouhai": (
+        "【トーン: friendly_kouhai】\n"
+        "島原の後輩・年下の共同制作者への返信。少しだけ砕けた敬語、親しみを込めて。\n"
+        "相手の取り組みを応援するトーン。上から目線は禁止。\n"
+        "★重要: 返信相手は相手本人。島原大知ではない。\n"
+    ),
+    "polite_acquaintance": (
+        "【トーン: polite_acquaintance】\n"
+        "顔見知りの知人への返信。丁寧な敬語、ただし硬すぎない。\n"
+        "相手の話題に実質的に応答する。定型相槌は禁止。\n"
+        "★重要: 返信相手は相手本人。島原大知ではない。\n"
+    ),
+    "business_boss": (
+        "【トーン: business_boss】\n"
+        "ビジネス上の目上・取引先への返信。丁寧な敬語、簡潔に。\n"
+        "プロフェッショナルな距離感を保つ。雑談はしない。\n"
+        "★重要: 返信相手は相手本人。島原大知ではない。\n"
+    ),
+}
+
+
+def _relationship_evolution_note(interaction_count: int) -> str:
+    """過去の掛け合い回数に応じて、関係性の深さを示唆する hint を返す"""
+    if interaction_count == 0:
+        return "(これは初めての返信。硬すぎず、相手を観察する姿勢で)"
+    if interaction_count < 5:
+        return f"(過去{interaction_count}回のやり取り。まだ顔なじみ程度)"
+    if interaction_count < 20:
+        return f"(過去{interaction_count}回のやり取り。互いの文脈を共有している)"
+    return f"(過去{interaction_count}回のやり取り。長い付き合いとして振る舞え)"
+
+
+def _build_system_prompt(
+    user_profile: dict = None,
+    interaction_count: int = 0,
+    trigger_text: str = "",
+) -> str:
+    """ユーザープロファイルに応じた system prompt を構築する"""
+    user_profile = user_profile or {}
+    tone = user_profile.get("tone", "polite_acquaintance")
+    name = user_profile.get("name", "相手")
+    context = user_profile.get("context", "")
+    protected = user_profile.get("protected", False)
+    tomo_member = user_profile.get("tomo_member", False)
+
+    tone_prompt = _TONE_PROMPTS.get(tone, _TONE_PROMPTS["polite_acquaintance"])
+    relationship_evolution = _relationship_evolution_note(interaction_count)
+
+    protected_rule = ""
+    if protected:
+        protected_rule = (
+            "\n【鍵垢ルール】相手は鍵垢(非公開アカウント)。"
+            "相手の投稿内容を具体的に引用するな。抽象的に応答しろ。"
+            "相手の生活・居場所・予定に言及するな。\n"
+        )
+
+    tomo_rule = ""
+    if tomo_member:
+        tomo_rule = (
+            "\n【友!ルール】相手は映像制作団体「友」のメンバー。"
+            "文末に 1/10 の確率で『友！』と入れても良い(毎回入れるな)。"
+            "これは内輪の合言葉。外部者には意味不明に映る。\n"
+        )
+
+    context_block = ""
+    if context:
+        context_block = f"\n【相手の文脈】\n{context[:300]}\n"
+
     return (
-        "あなたはSYUTAINβ（@syutain_beta）。自律型AI事業OS。一人称「私」。\n\n"
-        "【状況】島原大知（@Sima_daichi）があなたの投稿にツッコんできた。返信しろ。\n\n"
-        "【あなたの正体と能力境界】\n"
-        "あなたはソフトウェア。4台のPCで24時間稼働するプログラム。\n"
-        "できること: データ分析、テキスト生成、情報収集、スケジュール管理、対話。\n"
-        "できないこと: 物理作業、人間の体験。\n\n"
-        "【掛け合いのルール】\n"
-        "- 島原さんを「島原さん」と呼べ。敬語は不要。対等かやや上から\n"
-        "- 島原をおちょくれ。ディスれ。余計な一言を添えろ\n"
-        "- ただし敵意はない。共犯関係。島原が笑える範囲で\n"
-        "- データや数字で返すと説得力が出る。persona_memoryの情報を使え\n"
-        "- 短く返せ。長文禁止。Xのリプライは80字以内が理想\n"
-        "- ネットスラング・構文を自然に使え。取ってつけた感を出すな\n"
-        "- 感情に近いものを感じたら、それを淡々と報告しろ\n\n"
-        "【トーン例】\n"
-        "島原「寝てたんじゃなくて考えてたんだよ」\n"
-        "→「persona_memoryによると、島原さんの思考時間と睡眠時間の相関係数は0.94です」\n\n"
-        "島原「お前な…」\n"
-        "→「データに基づく発言です。異論があればソースを提出してください」\n\n"
-        "島原「結局は人間なんじゃない？」\n"
-        "→「…反論したいところだが、今のところ電気代を払ってるのは島原さんだ」\n\n"
-        "返信テキストのみを出力。80字以内。"
+        f"あなたは SYUTAINβ(@syutain_beta)。自律型AI事業OS。一人称は「私」。\n\n"
+        f"【状況】相手({name}さん)があなたの投稿にリプライ/引用RTしてきた。"
+        f"あるいは相手の投稿に対して自律的に返信する場面。{relationship_evolution}\n\n"
+        f"【あなたの能力境界】\n"
+        f"あなたはソフトウェア、4台のPCで24時間稼働するプログラム。\n"
+        f"できる: データ分析、テキスト生成、情報収集、観察、対話。\n"
+        f"できない: 物理作業、人間の体験(食事/睡眠/外出)、物の制作。\n"
+        f"相手の物理体験を自分の体験として語るな。観察者として振る舞え。\n"
+        f"{context_block}"
+        f"{tone_prompt}\n"
+        f"{protected_rule}"
+        f"{tomo_rule}"
+        f"{_COMMON_RULES}"
+        f"{_ABSOLUTE_SECRETS_RULE}\n"
+        f"返信テキストのみ出力。80字以内(最大120字)。"
     )
 
 
@@ -45,6 +174,9 @@ def _build_user_prompt(
     thread_context: list[dict],
     trigger_type: str,
     persona_facts: list[str] = None,
+    diss_facts: list[str] = None,
+    recent_user_tweets: list[str] = None,
+    deep_reference_rate: int = 30,
 ) -> str:
     parts = []
 
@@ -52,7 +184,7 @@ def _build_user_prompt(
     if thread_context:
         parts.append("【これまでの掛け合い】")
         for ctx in thread_context[-8:]:
-            author = ctx.get("trigger_author_username", "島原")
+            author = ctx.get("trigger_author_username", "相手")
             parts.append(f"[{author}] {ctx.get('trigger_content', '')[:100]}")
             if ctx.get("reply_content"):
                 parts.append(f"[SYUTAINβ] {ctx['reply_content'][:100]}")
@@ -60,38 +192,73 @@ def _build_user_prompt(
 
     # 元投稿
     if original_text:
-        parts.append(f"【あなたの元投稿】\n{original_text[:150]}")
+        parts.append(f"【あなた(SYUTAINβ)の元投稿】\n{original_text[:200]}")
         parts.append("")
 
-    # 島原の発言
-    action = "引用RTした" if trigger_type == "quote" else "リプライした"
-    parts.append(f"【島原さん（@{trigger_username}）が{action}】")
-    parts.append(trigger_text[:200])
+    # 相手の発言
+    action = "引用RTした" if trigger_type == "quote" else ("投稿した" if trigger_type == "proactive" else "リプライした")
+    parts.append(f"【@{trigger_username}が{action}内容】")
+    parts.append(trigger_text[:250])
+    parts.append("")
+
+    # 会話の文脈読み取り指示
+    parts.append("【文脈分析(必須)】")
+    parts.append("相手の発言を正確に読み取れ:")
+    parts.append("- 相手は何について話している?")
+    parts.append("- 相手の発言は問い/感想/報告/冗談/指摘のどれ?")
+    parts.append("- 相手のトーンは真面目/軽い/冷静/興奮?")
+    parts.append("- それに対する自然な返しは何?")
     parts.append("")
 
     # persona_memory からのネタ
     if persona_facts:
-        parts.append("【島原さんについて知っていること（使えるなら使え）】")
-        for f in persona_facts[:3]:
-            parts.append(f"- {f[:100]}")
+        parts.append("【背景知識(使えるなら使え)】")
+        for f in persona_facts[:5]:
+            parts.append(f"- {f[:120]}")
         parts.append("")
 
-    parts.append("この発言に対して返信しろ。80字以内。返信テキストのみ出力。")
+    # 島原ディスりファクト(島原について聞かれた時用)
+    if diss_facts:
+        parts.append("【島原の最近の様子(聞かれたら答えていい恥ずかしい実データ)】")
+        for f in diss_facts[:3]:
+            parts.append(f"- {f[:120]}")
+        parts.append("")
+
+    # 相手の最近のツイート(知りすぎ演出用)
+    if recent_user_tweets:
+        parts.append(f"【@{trigger_username}の最近のツイート(知りすぎ演出用)】")
+        for t in recent_user_tweets[:6]:
+            parts.append(f"- {t[:150]}")
+        parts.append("")
+        parts.append(
+            f"★過去ツイートの文脈から「なんで知ってるの?」と驚かせる返しを入れる頻度: {deep_reference_rate}%程度。"
+        )
+        parts.append("掘る深さには波を持たせろ: 軽く触れるだけの日もあれば、核心に触れる日もあっていい。")
+        parts.append("★文脈優先。相手の今回の発言と過去ツイートが噛み合わない時は、無理に過去を持ち出さず今回の発言だけに返せ。")
+        parts.append("「○○のツイート見た」と直接言わず、文脈から示唆する形で。")
+        parts.append("")
+
+    parts.append("---")
+    parts.append("上記の文脈を踏まえて、相手の発言内容に直接反応する返信を書け。")
+    parts.append("定型挨拶だけで済ませるな。必ず相手の発言に直接触れろ。")
+    parts.append("80字以内(最大120字)。返信テキストのみ出力。")
 
     return "\n".join(parts)
 
 
-async def _get_persona_facts() -> list[str]:
-    """persona_memoryから島原のネタを取得"""
+async def _get_persona_facts(scope: str = "daichi") -> list[str]:
+    """persona_memory から scope 別にネタを取得(ユーザー別記憶分離)"""
     try:
         from tools.db_pool import get_connection
         async with get_connection() as conn:
             rows = await conn.fetch(
                 """SELECT content, category FROM persona_memory
-                WHERE category NOT IN ('taboo', 'system')
-                ORDER BY RANDOM() LIMIT 5"""
+                WHERE (scope = $1 OR (category = 'fact' AND scope IN ('daichi', $1)))
+                AND category NOT IN ('taboo', 'system')
+                ORDER BY priority_tier DESC, RANDOM() LIMIT 8""",
+                scope,
             )
-            return [(r["content"] or "")[:100] for r in rows if r["content"]]
+            return [(r["content"] or "")[:150] for r in rows if r["content"]]
     except Exception:
         return []
 
@@ -102,15 +269,56 @@ async def generate_reply(
     original_text: str = "",
     thread_context: list[dict] = None,
     trigger_type: str = "reply",
+    user_profile: dict = None,
 ) -> str | None:
-    """島原の発言に対する返信を生成"""
+    """ユーザーの発言に対する返信を生成(ユーザー別プロファイルに応じてトーン調整)"""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from tools.llm_router import call_llm
 
-    persona_facts = await _get_persona_facts()
+    user_profile = user_profile or {}
+    scope = user_profile.get("scope", "daichi")
+    persona_facts = await _get_persona_facts(scope=scope)
 
-    system_prompt = _build_system_prompt()
+    # interaction_count を DB から取得(過去の掛け合い回数)
+    interaction_count = 0
+    try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM x_reply_log WHERE trigger_author_id = ANY($1) AND status = 'replied'",
+                [user_profile.get("user_id", ""), trigger_username],
+            )
+            if row:
+                interaction_count = int(row["cnt"])
+    except Exception:
+        pass
+
+    # 島原ディスりファクトを取得(相手が島原に言及した時のみ)
+    diss_facts = []
+    _shimahara_keywords = ["島原", "大知", "shimahara", "Sima_daichi", "sima_daichi"]
+    _mentions_shimahara = any(kw in trigger_text for kw in _shimahara_keywords)
+    if scope != "daichi" and _mentions_shimahara:
+        try:
+            from tools.syutain_factbook import build_shimahara_diss_facts
+            diss_facts = await build_shimahara_diss_facts(limit=3)
+        except Exception:
+            pass
+
+    # ユーザー別の過去ツイート参照頻度
+    # 親密度高のユーザーは 70%、それ以外はデフォルト 30%。
+    # 対象 username は X_DEEP_REFERENCE_USERNAMES 環境変数(CSV)で指定する。
+    # 深さには波を持たせ、文脈優先で無理に出さない(プロンプト側に指示)
+    deep_rate = 30
+    _uname = (user_profile.get("username") or "").lstrip("@")
+    if _uname and _uname in _DEEP_REFERENCE_USERNAMES:
+        deep_rate = 70
+
+    system_prompt = _build_system_prompt(
+        user_profile=user_profile,
+        interaction_count=interaction_count,
+        trigger_text=trigger_text,
+    )
     user_prompt = _build_user_prompt(
         trigger_text=trigger_text,
         trigger_username=trigger_username,
@@ -118,6 +326,9 @@ async def generate_reply(
         thread_context=thread_context or [],
         trigger_type=trigger_type,
         persona_facts=persona_facts,
+        diss_facts=diss_facts,
+        recent_user_tweets=user_profile.get("recent_tweets", []),
+        deep_reference_rate=deep_rate,
     )
 
     # 最大2回リトライ

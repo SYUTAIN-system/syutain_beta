@@ -10,6 +10,9 @@ strategy/daichi_writing_style.md
 strategy/daichi_content_patterns.md
 SOUL.md
 
+# X 返信対象ユーザーのプロファイル情報(他人の実名・関係性・事業情報を含む)
+strategy/x_user_profiles.json
+
 # ユーモア・ミーム・構文（仕掛けを非公開）
 strategy/net_meme_vocabulary.py
 strategy/japanese_humor_patterns.py
@@ -53,6 +56,9 @@ logs/
 
 # ===== セキュリティ監査レポート（攻撃面の詳細を含むためローカルのみ） =====
 .gstack/
+
+# ===== 開発レトロ・コンテキスト（内部観測、公開対象外） =====
+.context/
 
 # ===== 運用ファイル（IPを含む）=====
 SYSTEM_STATE.md

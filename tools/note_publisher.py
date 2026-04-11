@@ -729,3 +729,44 @@ async def note_auto_publish_check() -> dict:
         results["errors"].append(str(e))
 
     return results
+
+
+async def reset_publish_url_invalid_packages(min_age_hours: int = 24) -> dict:
+    """status='publish_url_invalid' のパッケージを 'ready' に戻して再公開キューに載せる。
+
+    2026-04-11 島原さん方針「完全自動実行優先」に基づく失敗パッケージの自動救済。
+    前回の公開試行から min_age_hours 経過したものを対象にする(一過性問題のインターバル待ち)。
+    リセットされた package は published_at=NULL + status='ready' に戻るため、
+    note_auto_publish_check が ORDER BY created_at ASC で次回サイクルで拾う。
+    日次公開上限は既存ガードで守られる。
+    """
+    stats = {"reset": 0, "skipped": 0}
+    try:
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT id, title, published_at FROM product_packages
+                   WHERE platform = 'note' AND status = 'publish_url_invalid'
+                     AND (published_at IS NULL OR published_at < NOW() - make_interval(hours => $1))
+                   ORDER BY published_at ASC""",
+                min_age_hours,
+            )
+            if not rows:
+                logger.debug("reset_publish_url_invalid: 対象なし")
+                return stats
+
+            for r in rows:
+                await conn.execute(
+                    """UPDATE product_packages
+                       SET status = 'ready', published_at = NULL
+                       WHERE id = $1""",
+                    r["id"],
+                )
+                stats["reset"] += 1
+                logger.info(
+                    f"publish_url_invalid リセット: pkg={r['id']} "
+                    f"title={(r['title'] or '')[:40]}"
+                )
+    except Exception as e:
+        logger.error(f"publish_url_invalid リセット失敗: {e}")
+
+    return stats

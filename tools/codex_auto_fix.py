@@ -70,25 +70,54 @@ async def run_codex_fix(issue_description: str, files_hint: list[str] = None, ti
     output_file = f"/tmp/codex_fix_{datetime.now().strftime('%H%M%S')}.txt"
     start = datetime.now()
 
-    # 安全装置: 修正前にgit stashで現状を保存
+    # 安全装置: 修正前に作業ツリー全体を data/snapshots/ にフルコピーして保存
+    # 2026-04-11 CRITICAL FIX: 以前は git stash push→pop で保険になっていなかった。
+    # 消失事故の再発を構造的に防ぐため、git を経由しない独立バックアップを作る。
+    snapshot_dir_path = None
     try:
-        stash_proc = await asyncio.create_subprocess_exec(
-            "git", "stash", "push", "-m", f"codex_auto_fix_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        import shutil
+        snapshot_base = os.path.join(PROJECT_DIR, "data", "snapshots", "codex_auto_fix")
+        os.makedirs(snapshot_base, exist_ok=True)
+        snapshot_dir_path = os.path.join(
+            snapshot_base,
+            datetime.now().strftime("%Y%m%d_%H%M%S"),
+        )
+        os.makedirs(snapshot_dir_path, exist_ok=True)
+
+        # git ls-files --others --modified で変更/未追跡ファイルを列挙
+        ls_proc = await asyncio.create_subprocess_exec(
+            "git", "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
             cwd=PROJECT_DIR,
         )
-        stash_out, _ = await stash_proc.communicate()
-        stash_saved = b"No local changes" not in stash_out
-        if stash_saved:
-            logger.info("Codex修正前: git stashで現状を保存")
-            # stash したらすぐ pop して元に戻す（stash はバックアップとして残す）
-            await (await asyncio.create_subprocess_exec(
-                "git", "stash", "pop",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                cwd=PROJECT_DIR,
-            )).communicate()
+        ls_out, _ = await ls_proc.communicate()
+        modified_files = []
+        for line in ls_out.decode().splitlines():
+            if len(line) >= 3:
+                # 最初の3文字は XY スペース, 4文字目以降がパス
+                path = line[3:].strip()
+                # 引用符で囲まれてる場合を剥がす
+                if path.startswith('"') and path.endswith('"'):
+                    path = path[1:-1]
+                if path:
+                    modified_files.append(path)
+
+        for rel_path in modified_files:
+            src = os.path.join(PROJECT_DIR, rel_path)
+            if os.path.isfile(src):
+                dst = os.path.join(snapshot_dir_path, rel_path)
+                os.makedirs(os.path.dirname(dst) or snapshot_dir_path, exist_ok=True)
+                try:
+                    shutil.copy2(src, dst)
+                except Exception as copy_err:
+                    logger.debug(f"snapshot copy失敗 {rel_path}: {copy_err}")
+
+        logger.info(
+            f"Codex修正前: 作業ツリー snapshot を保存 → {snapshot_dir_path} ({len(modified_files)} files)"
+        )
     except Exception as stash_err:
-        logger.debug(f"git stash失敗（続行）: {stash_err}")
+        logger.warning(f"snapshot作成失敗（続行、但し保険無し）: {stash_err}")
+        snapshot_dir_path = None
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -157,30 +186,66 @@ async def run_codex_fix(issue_description: str, files_hint: list[str] = None, ti
             for m in _re_stat.finditer(r'(\d+) (?:insertion|deletion)', stat_text):
                 total_lines += int(m.group(1))
             if total_lines > MAX_LINES_CHANGED:
-                logger.error(f"Codex変更が{total_lines}行（上限{MAX_LINES_CHANGED}行）。全revert")
-                await (await asyncio.create_subprocess_exec(
-                    "git", "checkout", "--", ".",
-                    cwd=PROJECT_DIR,
-                )).wait()
+                # 2026-04-11 CRITICAL FIX: 以前は `git checkout -- .` で全 uncommitted changes を
+                # 破壊していた。前セッションの未コミット作業 2337 行を一緒に消失させる事故があった。
+                # 修正後: 全 checkout は禁止。Codex が触った個別ファイルのみ revert。
+                logger.error(
+                    f"Codex変更が{total_lines}行（上限{MAX_LINES_CHANGED}行）。"
+                    f"files={len(files_changed)} 個別 revert(全 checkout は禁止)"
+                )
+                for _f in files_changed:
+                    try:
+                        _revert = await asyncio.create_subprocess_exec(
+                            "git", "checkout", "HEAD", "--", _f,
+                            cwd=PROJECT_DIR,
+                        )
+                        await _revert.wait()
+                    except Exception as _e:
+                        logger.warning(f"個別 revert 失敗 {_f}: {_e}")
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"⚠️ codex_auto_fix: {total_lines}行 > 上限{MAX_LINES_CHANGED}。"
+                        f"files={files_changed[:5]} を個別revert(全checkout禁止)"
+                    )
+                except Exception:
+                    pass
                 return {
                     "success": False,
-                    "output": f"変更行数が多すぎる ({total_lines} > {MAX_LINES_CHANGED})。全revert",
+                    "output": f"変更行数が多すぎる ({total_lines} > {MAX_LINES_CHANGED})。個別revertのみ",
                     "duration_ms": duration,
                     "files_changed": [],
                 }
         except Exception:
             pass
 
-        # 変更ファイル数が多すぎたら全 revert
+        # 変更ファイル数が多すぎたら Codex が触った個別ファイルのみ revert(全 checkout 禁止)
+        # 2026-04-11 CRITICAL FIX: 前セッション消失事故と同じ理由で全 checkout は廃止
         if len(files_changed) > 10:
-            logger.error(f"Codex が {len(files_changed)} ファイルを変更（上限10）。全 revert")
-            await (await asyncio.create_subprocess_exec(
-                "git", "checkout", "--", ".",
-                cwd=PROJECT_DIR,
-            )).wait()
+            logger.error(
+                f"Codex が {len(files_changed)} ファイルを変更（上限10）。"
+                f"個別 revert のみ実行(全 checkout は禁止)"
+            )
+            for _f in files_changed:
+                try:
+                    _revert2 = await asyncio.create_subprocess_exec(
+                        "git", "checkout", "HEAD", "--", _f,
+                        cwd=PROJECT_DIR,
+                    )
+                    await _revert2.wait()
+                except Exception as _e:
+                    logger.warning(f"個別 revert 失敗 {_f}: {_e}")
+            try:
+                from tools.discord_notify import notify_discord
+                await notify_discord(
+                    f"⚠️ codex_auto_fix: {len(files_changed)} ファイル変更 > 上限10。"
+                    f"個別 revert 実行(全 checkout 禁止)"
+                )
+            except Exception:
+                pass
             return {
                 "success": False,
-                "output": f"変更ファイル数が多すぎる ({len(files_changed)} > 10)。全 revert",
+                "output": f"変更ファイル数が多すぎる ({len(files_changed)} > 10)。個別revertのみ",
                 "duration_ms": duration,
                 "files_changed": [],
             }

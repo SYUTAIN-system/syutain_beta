@@ -15,9 +15,14 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 
 ## Key Files
 - app.py: FastAPI server (~3,685 lines, 64 endpoints, JWT auth)
-- scheduler.py: Job scheduler (~5,400 lines, 66+ jobs)
+- scheduler.py: Job scheduler (6,500+ lines as of 2026-04-11, 130+ jobs)
 - CLAUDE.md: 32 absolute rules
 - Brain-β: bots/discord_bot.py + bot_conversation.py + bot_actions.py (破壊的ACTION直接ルート必須)
+- Strategy automation: tools/strategy_plan_parser.py + strategy_plan_executor.py + strategy_week_selector.py + strategy_book_loader.py
+- X monetization: tools/x_monetization_tracker.py (tracks 広告収益分配+サブスク要件)
+- X algorithm opt: tools/x_boost_loop.py (first-30min conversation chain boost)
+- Design book: docs/SYUTAINβ_完全設計書_V25_V30統合.md (3434 lines, all chapters)
+- Strategy book (gitignored): strategy/diffusion_execution_plan.md (718 lines, Day 1-7)
 
 ## Don't
 - Access .env or any credentials
@@ -68,6 +73,67 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 - 4 account-specific prompts: shimahara X (humor 40%/honest 95%) / syutain X (75%/90% + memes) / Bluesky (150 char, Build in Public) / Threads (empathy, no money talk)
 - Timezone: all scheduled_at must be JST-aware (timezone(timedelta(hours=9)))
 - Destructive ACTIONs: never via LLM free-text, only regex direct route or ACTION tag
+
+## Recent Changes (2026-04-11)
+
+### Strategy automation (戦略書完全自動実行)
+- `tools/strategy_book_loader.py` (new): runtime loader for `strategy/diffusion_execution_plan.md` (gitignored). Parses Day 1-7, pinned post A/B, KPI targets, callout nicknames. Contains zero verbatim strategy text — all from book at runtime.
+- `tools/strategy_plan_parser.py`: sync loader output to `strategy_plan_items` table (idempotent)
+- `tools/strategy_plan_executor.py`: daily 09:05 JST, picks today's pending items, resolves dynamic values from DB (python_lines/llm_calls/api_total etc), routes x_post→posting_queue / note_article→product_packages / reply_day→skip
+- `tools/strategy_week_selector.py`: Monday 03:00 JST, analyzes last week's top-3 posts, LLM identifies emotion axis, generates 7 days of Day N+1 to N+7 scripts
+
+### Note publication bug fix
+- `scheduler.py:note_quality_check`: `publish_verdict='publish_ready'` drafts are now inserted into `product_packages` (status='ready'). Previously drafts sat in files with no pipeline path to publication.
+- `tools/note_publisher.py:reset_publish_url_invalid_packages()`: resets `publish_url_invalid` packages to 'ready' after 24h for retry. Job runs daily 00:30 JST.
+
+### Orphan draft retry
+- `brain_alpha/note_quality_checker.py:retry_limbo_stage2()`: finds `final_status='checked'` + `stage2_verdict IS NULL` records, re-runs stage2. Called from `note_quality_check` every 30min.
+
+### SNS false-positive fact-check fix
+- `brain_alpha/sns_batch.py`: decimal→% conversion (0.60→60%) added with exclusions. `check_falsity` and `_check_sns_factual` now have score marker exemption (スコア/品質/精度/ギャップ etc).
+
+### X 2026 Algorithm Optimization (MAJOR)
+- Research: reply×13.5 weight, first 30-min single strongest factor, external links near-zero distribution, conversation chain = 150x like weight
+- `sns_batch.py`: shimahara+syutain `system_prompts` updated with X 2026 rules (1-line hook, no URLs in body, OOB viral targeting, real-measured numbers only)
+- `sns_batch.py`: automatic URL strip for x/bluesky/threads posts
+- `sns_batch.py`: posting slot times reallocated to JST peak
+- `tools/x_boost_loop.py` (new): runs every 7 min, finds posted tweets from last 20 min, auto cross-replies shimahara↔syutain_beta to trigger conversation chain within first 30min. Daily cap 6, UNIQUE constraint dedup.
+
+### X 自動返信 proactive expansion (multi-user)
+- `tools/x_mention_monitor.py`: `USER_PROFILES` is now loaded at runtime from `strategy/x_user_profiles.json` (gitignored). Each profile has tone/scope/protected/tomo_member/context.
+- Added `_proactive_reply_sakata()` (friend user, configurable rate, daily cap) and `_proactive_reply_shimahara_posts()` (owner, higher rate)
+- 4-layer dedup: API exclude=retweets,replies + `_is_already_replied` + UNIQUE(trigger_tweet_id) + `_record_reply(posting)` pre-write
+- `brain_alpha/x_reply_generator.py`: rewritten for multi-user with `user_profile` parameter. `deep_reference_rate` — set via `X_DEEP_REFERENCE_USERNAMES` env var; listed users get 70%, others 30%.
+- Target user IDs and usernames are sourced from env vars / gitignored JSON — no personally-identifying info in source code.
+
+### Active reply automation (戦略書Day 3)
+- `tools/active_reply_shimahara.py` (new): runs 10:30/14:30/18:30 JST. Uses intel_items grok_x_research X URLs filtered by AI/video/VTuber keywords. Excludes self-accounts. Daily cap 5.
+
+### Pinned post A/B rotation
+- `tools/pinned_post_ab_test.py` (new): Monday 09:10 JST. A/B variants loaded runtime from strategy_book_loader. X API v2 Free doesn't support direct pin API, rotates via posting_queue insertion.
+
+### Monitoring jobs
+- `tools/pdl_monitor.py` (new): hourly PDL worker health check
+- `tools/codex_auth_monitor.py` (new): daily 10:00 JST, alerts on 5 days or less remaining
+
+### X Monetization Tracker
+- `tools/x_monetization_tracker.py` (new): tracks 広告収益分配 (500K imp/3mo) and サブスクリプション (2000 verified followers + 500K imp/3mo). Integrated into `kpi_audit_weekly` Monday 07:30.
+
+### Fact-based mandate
+- User directive 2026-04-11: "事実ベースで虚偽内容や誇張は可能な限り控える"
+- All content generation must use DB-measured values, not strategy book snapshot numbers
+
+### CRITICAL FIX: codex_auto_fix destructive revert eliminated (2026-04-11)
+**Root cause of 2026-04-11 05:19 2337-line data loss incident**:
+- `codex_auto_fix.py` line 160 used `git checkout -- .` which wiped ALL uncommitted changes when Codex diff exceeded 100 lines
+- Because `git diff --stat` counts ALL uncommitted work (not just Codex's), the 2000+ line pre-session work triggered the limit and got wiped
+
+**Fixes applied**:
+- `tools/codex_auto_fix.py`: `git checkout -- .` replaced with per-file `git checkout HEAD -- f` (only reverts Codex's own changes)
+- `tools/codex_auto_fix.py`: line count calculation now uses `git diff --stat -- files_changed` (only Codex's files)
+- `tools/codex_auto_fix.py`: git stash→pop safety removed, replaced with independent snapshot to `data/snapshots/codex_auto_fix/` (git-independent backup)
+- `tools/codex_content_optimizer.py`: same fix applied
+- Discord alert added when revert happens
 
 ## Recent Changes (2026-04-09)
 - SNS V3: 4 account-specific prompts (shimahara/syutain/bluesky/threads)
@@ -133,5 +199,9 @@ Codexが自律改善を行う際、以下の指標を基準に判断すること
 ### Codex改善時の原則
 - **壊すな**: 動いているものを壊さない。改善は漸進的に
 - **測れ**: 改善前後で上記KPIを比較。数字で効果を示す
-- **戻せ**: 変更は小さく。100行以内。問題があれば即リバート
+- **戻せ**: 変更は小さく。100行以内。問題があれば即リバート (個別ファイル単位で。`git checkout -- .` 等の全checkout は絶対禁止)
 - **記録しろ**: 何を変えたか、なぜ変えたかをevent_logに記録
+
+<!-- AUTO-STATS-START -->
+<!-- このセクションは scheduler.py:update_codex_stats によって毎日09:35 JSTに自動更新されます。手動編集禁止。 -->
+<!-- AUTO-STATS-END -->

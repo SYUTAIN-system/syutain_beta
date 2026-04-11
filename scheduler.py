@@ -545,6 +545,26 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
+            # 戦略書Day自動実行（毎朝09:05 JST、strategy_plan_items の該当Dayを posting_queue/product_packages に投入）
+            self._scheduler.add_job(
+                self.strategy_plan_execution,
+                CronTrigger(hour=9, minute=5, timezone="Asia/Tokyo"),
+                id="strategy_plan_execution",
+                name="戦略書Day自動実行（毎朝09:05）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # 戦略書Week自動選定（毎週月曜03:00 JST、前週エンゲージメント分析→翌週7日分の自動生成）
+            self._scheduler.add_job(
+                self.strategy_week_selection,
+                CronTrigger(day_of_week="mon", hour=3, minute=0, timezone="Asia/Tokyo"),
+                id="strategy_week_selection",
+                name="戦略書Week自動選定（月曜03:00）",
+                replace_existing=True,
+                misfire_grace_time=1800,
+            )
+
             # 競合分析（日曜 03:00 JST）
             self._scheduler.add_job(
                 self.competitive_analysis,
@@ -951,6 +971,15 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # codex.md 自動統計セクション更新（毎日09:35 JST、AUTO-STATSマーカー内を最新情報で上書き+git push）
+            self._scheduler.add_job(
+                self.update_codex_stats,
+                CronTrigger(hour=9, minute=35, timezone="Asia/Tokyo"),
+                id="update_codex_stats",
+                name="codex.md 自動統計更新（毎日09:35）",
+                replace_existing=True,
+            )
+
             # プラットフォーム別バズ検出（2時間間隔）— トレンド便乗投稿の素材収集
             self._scheduler.add_job(
                 self.detect_platform_buzz,
@@ -1127,6 +1156,76 @@ class SyutainScheduler:
                 name="note.com自動公開チェック（30分）",
                 replace_existing=True,
                 misfire_grace_time=30,
+            )
+
+            # publish_url_invalid 自動リセット（毎日00:30 JST、24h経過した失敗パッケージを ready に戻して再公開キューへ）
+            self._scheduler.add_job(
+                self.note_reset_invalid_packages,
+                CronTrigger(hour=0, minute=30, timezone="Asia/Tokyo"),
+                id="note_reset_invalid",
+                name="publish_url_invalid 自動リセット（毎日00:30）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # PDL Worker 健全性監視（1時間間隔）
+            self._scheduler.add_job(
+                self.pdl_health_monitor,
+                IntervalTrigger(hours=1),
+                id="pdl_health_monitor",
+                name="PDL Worker 健全性監視（1時間）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # Codex ChatGPT Plus 認証期限監視（毎日10:00 JST、残り5日以下でアラート）
+            self._scheduler.add_job(
+                self.codex_auth_check,
+                CronTrigger(hour=10, minute=0, timezone="Asia/Tokyo"),
+                id="codex_auth_check",
+                name="Codex認証期限監視（毎日10:00）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # 能動的リプ自動化（10:30 / 14:30 / 18:30 JST、1日5件上限）
+            self._scheduler.add_job(
+                self.active_reply_shimahara,
+                CronTrigger(hour="10,14,18", minute=30, timezone="Asia/Tokyo"),
+                id="active_reply_shimahara",
+                name="能動的リプ自動化（10:30/14:30/18:30）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # X 30分boost loop（7分間隔、直近20分のposted投稿に shimahara↔syutain_beta 相互返信で conversation chain 発火）
+            self._scheduler.add_job(
+                self.x_boost_30min,
+                IntervalTrigger(minutes=7),
+                id="x_boost_30min",
+                name="X 30分boost loop（7分間隔）",
+                replace_existing=True,
+                misfire_grace_time=120,
+            )
+
+            # 固定ポストA/Bローテーション（毎週月曜09:10 JST）
+            self._scheduler.add_job(
+                self.pinned_post_ab_rotation,
+                CronTrigger(day_of_week="mon", hour=9, minute=10, timezone="Asia/Tokyo"),
+                id="pinned_post_ab_rotation",
+                name="固定ポストA/Bローテーション（月曜09:10）",
+                replace_existing=True,
+                misfire_grace_time=1800,
+            )
+
+            # 戦略書KPI監査（毎週月曜07:30 JST、X収益化要件を最優先でDiscord通知）
+            self._scheduler.add_job(
+                self.kpi_audit_weekly,
+                CronTrigger(day_of_week="mon", hour=7, minute=30, timezone="Asia/Tokyo"),
+                id="kpi_audit_weekly",
+                name="戦略書KPI監査（月曜07:30）",
+                replace_existing=True,
+                misfire_grace_time=1800,
             )
 
             # ログクリーンアップ（毎日04:30 JST）— 7日超のログファイルを削除
@@ -4709,9 +4808,58 @@ class SyutainScheduler:
             await checker.initialize()
             results = await checker.check_all_pending()
 
+            # 2026-04-11 追加: limbo (stage2_verdict 空) のリトライも併せて実行
+            # 完全自動実行優先方針に基づく、limbo 記事の自動救済
+            try:
+                limbo_results = await checker.retry_limbo_stage2(limit=3)
+                if limbo_results:
+                    logger.info(f"limbo retry: {len(limbo_results)}件処理")
+                    results.extend(limbo_results)
+            except Exception as e:
+                logger.warning(f"limbo retry 失敗（通常チェック続行）: {e}")
+
             for r in results:
                 gpt5 = r.get("gpt5")
                 if gpt5 and gpt5.get("publish_verdict") == "publish_ready":
+                    # 品質通過ドラフトを product_packages に 'ready' で投入
+                    # (2026-04-11 bugfix: 以前はファイル保存のみで公開パイプラインから孤立していた)
+                    try:
+                        import os as _os_pub
+                        import json as _json_pub
+                        from tools.db_pool import get_connection as _get_conn_pub
+                        _fp = r.get("filepath")
+                        _title_pub = r.get("title") or "untitled"
+                        if _fp and _os_pub.exists(_fp):
+                            with open(_fp, "r", encoding="utf-8") as _f_pub:
+                                _body = _f_pub.read()
+                            if _body and len(_body) >= 500:
+                                _tags_json = _json_pub.dumps(
+                                    ["SYUTAINβ", "AI", "BuildInPublic", "個人開発"],
+                                    ensure_ascii=False,
+                                )
+                                async with _get_conn_pub() as _conn_pub:
+                                    _exists = await _conn_pub.fetchval(
+                                        "SELECT id FROM product_packages WHERE title = $1 AND platform = 'note'",
+                                        _title_pub[:100],
+                                    )
+                                    if not _exists:
+                                        await _conn_pub.execute(
+                                            """INSERT INTO product_packages
+                                               (platform, title, body_preview, body_full, price_jpy, status, tags, category)
+                                               VALUES ('note', $1, $2, $3, 0, 'ready', $4, 'article')""",
+                                            _title_pub[:100], _body[:300], _body, _tags_json,
+                                        )
+                                        logger.info(
+                                            f"品質通過→product_packages投入: {_title_pub[:50]} "
+                                            f"(status=ready, file={_os_pub.basename(_fp)})"
+                                        )
+                                    else:
+                                        logger.debug(
+                                            f"品質通過(既存package): {_title_pub[:50]} id={_exists}"
+                                        )
+                    except Exception as _pkg_err:
+                        logger.warning(f"品質通過記事のpackage投入失敗: {_pkg_err}")
+
                     from datetime import date as _date
                     free_note = "（※6月まで無料公開）" if _date.today() < _date(2026, 6, 1) else ""
                     await notify_discord(
@@ -5706,6 +5854,170 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"intel_bulletin_blueskyエラー: {e}")
 
+    async def strategy_plan_execution(self):
+        """戦略書Day自動実行(毎朝09:05 JST、strategy_plan_items の該当Dayを投下)。
+
+        2026-04-11 島原さん方針「完全自動実行優先」で追加。人間介入前提を撤廃し、
+        strategy_plan_executor.execute_today() が今日の pending アイテムを全処理する。
+        """
+        try:
+            from tools.strategy_plan_executor import execute_today
+            result = await execute_today()
+            logger.info(
+                f"戦略書Day自動実行: total={result['total']}"
+                f" executed={result['executed']}"
+                f" skipped={result['skipped']}"
+                f" failed={result['failed']}"
+            )
+            if result["executed"] > 0 or result["failed"] > 0:
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"📋 戦略書Day自動実行: 実行{result['executed']}件"
+                        f" / スキップ{result['skipped']}件"
+                        f" / 失敗{result['failed']}件"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"戦略書Day自動実行エラー: {e}", exc_info=True)
+
+    async def strategy_week_selection(self):
+        """戦略書Week自動選定(毎週月曜03:00 JST、前週エンゲージメント分析→翌週7日分自動生成)。
+
+        strategy_week_selector.select_next_week() が前週トップ3の感情軸を特定、
+        intel_items / failure_memory / article_seeds から素材選定、LLM 生成で
+        翌週 7 日分の X 投稿を strategy_plan_items に登録する。完全自動、承認なし。
+        """
+        try:
+            from tools.strategy_week_selector import select_next_week
+            result = await select_next_week()
+            logger.info(
+                f"戦略書Week自動選定: inserted={result['items_inserted']}"
+                f" top_posts={result['top_posts_analyzed']}"
+                f" materials={result['materials_considered']}"
+                f" emotion='{(result.get('emotion_axis') or '')[:60]}'"
+            )
+            if result["items_inserted"] > 0:
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"📈 戦略書Week自動選定: 翌週{result['items_inserted']}件を登録\n"
+                        f"感情軸: {(result.get('emotion_axis') or '不明')[:120]}"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"戦略書Week自動選定エラー: {e}", exc_info=True)
+
+    async def note_reset_invalid_packages(self):
+        """publish_url_invalid のパッケージを 'ready' に戻して再公開キューに載せる(毎日00:30 JST)."""
+        try:
+            from tools.note_publisher import reset_publish_url_invalid_packages
+            stats = await reset_publish_url_invalid_packages(min_age_hours=24)
+            if stats.get("reset", 0) > 0:
+                logger.info(f"publish_url_invalid リセット: {stats['reset']}件")
+                try:
+                    from tools.discord_notify import notify_discord
+                    await notify_discord(
+                        f"♻️ publish_url_invalid リセット: {stats['reset']}件を再公開キューに投入"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"publish_url_invalid リセット失敗: {e}")
+
+    async def pdl_health_monitor(self):
+        """PDL Worker の健全性チェック(1時間間隔、異常時のみ通知)."""
+        try:
+            from tools.pdl_monitor import pdl_monitor_check_and_alert
+            await pdl_monitor_check_and_alert()
+        except Exception as e:
+            logger.error(f"PDL監視エラー: {e}")
+
+    async def codex_auth_check(self):
+        """Codex ChatGPT Plus 認証期限チェック(毎日10:00、残り5日以下でアラート)."""
+        try:
+            from tools.codex_auth_monitor import check_and_alert
+            await check_and_alert()
+        except Exception as e:
+            logger.error(f"Codex認証チェックエラー: {e}")
+
+    async def active_reply_shimahara(self):
+        """能動的リプの日(戦略書Day 3)の完全自動化(1日5件上限、10:30/14:30/18:30)."""
+        try:
+            from tools.active_reply_shimahara import run_active_reply_cycle
+            stats = await run_active_reply_cycle()
+            logger.info(
+                f"能動的リプ: candidates={stats['candidates']}"
+                f" replied={stats['replied']}"
+                f" skipped={stats['skipped']}"
+                f" errors={stats['errors']}"
+                f" reason='{(stats.get('reason') or '')[:60]}'"
+            )
+        except Exception as e:
+            logger.error(f"能動的リプ実行エラー: {e}", exc_info=True)
+
+    async def x_boost_30min(self):
+        """X 2026アルゴリズム First-30min boost loop(7分間隔、直近20分のposted投稿に相互返信)."""
+        try:
+            from tools.x_boost_loop import run_boost_cycle
+            stats = await run_boost_cycle()
+            if stats.get("boosted", 0) > 0:
+                logger.info(
+                    f"X boost 30min: candidates={stats['candidates']}"
+                    f" boosted={stats['boosted']}"
+                    f" skipped={stats['skipped']}"
+                    f" reason='{(stats.get('reason') or '')[:60]}'"
+                )
+        except Exception as e:
+            logger.error(f"X boost loop エラー: {e}", exc_info=True)
+
+    async def pinned_post_ab_rotation(self):
+        """固定ポストA/B自動ローテーション(毎週月曜09:10 JST)."""
+        try:
+            from tools.pinned_post_ab_test import run_weekly_ab_rotation
+            result = await run_weekly_ab_rotation()
+            logger.info(
+                f"pinned_post A/B rotation: week={result.get('week_num')}"
+                f" posted={result.get('posted_variant')}"
+                f" next={result.get('next_variant')}"
+                f" winner={result.get('winner')}"
+            )
+        except Exception as e:
+            logger.error(f"固定ポストA/Bローテーション失敗: {e}", exc_info=True)
+
+    async def kpi_audit_weekly(self):
+        """戦略書KPI監査(毎週月曜07:30、X収益化要件を最優先で報告)."""
+        try:
+            from tools.kpi_audit import run_kpi_audit
+            from tools.x_monetization_tracker import check_requirements, format_report
+            from tools.discord_notify import notify_discord
+
+            # X 収益化要件(最優先)
+            try:
+                monetization = await check_requirements()
+                monetization_report = await format_report(monetization)
+                await notify_discord(monetization_report)
+                logger.info(
+                    f"X収益化要件: rs={monetization['revenue_share']['all_met']}"
+                    f" sub={monetization['subscriptions']['all_met']}"
+                    f" imp_90d={monetization['revenue_share']['impressions_90d_5M']['current']}"
+                )
+            except Exception as e:
+                logger.error(f"X収益化要件チェック失敗: {e}", exc_info=True)
+
+            # 従来の KPI 監査
+            result = await run_kpi_audit()
+            logger.info(
+                f"KPI監査: days_elapsed={result['days_elapsed']}"
+                f" x_delta={result['x_follower_delta']}"
+                f" third_party={result['third_party_mentions']}"
+                f" note_published={result['note_published']}"
+            )
+        except Exception as e:
+            logger.error(f"KPI監査失敗: {e}", exc_info=True)
+
     async def update_github_readme(self):
         """毎日09:30 JST: READMEにシステム状況を自動反映"""
         try:
@@ -5762,6 +6074,160 @@ class SyutainScheduler:
                     logger.info("README: no changes to commit")
         except Exception as e:
             logger.error(f"update_github_readmeエラー: {e}")
+
+    async def update_codex_stats(self):
+        """毎日09:35 JST: codex.md の AUTO-STATS セクションを最新情報で上書き。
+
+        codex.md は Codex CLI が gstack audit 実行時に参照する reference ファイル。
+        手動保守部分(Rules/Architecture/Recent Changes)は touch せず、マーカー間のみ更新する。
+        """
+        try:
+            import os as _os
+            import re as _re
+            from tools.db_pool import get_connection
+
+            codex_path = _os.path.join(_os.path.dirname(__file__), "codex.md")
+            if not _os.path.exists(codex_path):
+                logger.debug("codex.md が存在しないためスキップ")
+                return
+
+            async with get_connection() as conn:
+                llm_calls = await conn.fetchval("SELECT count(*) FROM llm_cost_log") or 0
+                llm_cost = await conn.fetchval("SELECT COALESCE(SUM(amount_jpy), 0) FROM llm_cost_log") or 0
+                events = await conn.fetchval("SELECT count(*) FROM event_log") or 0
+                posts_total = await conn.fetchval(
+                    "SELECT count(*) FROM posting_queue WHERE status='posted'"
+                ) or 0
+                note_published = await conn.fetchval(
+                    "SELECT count(*) FROM product_packages WHERE platform='note' AND status='published'"
+                ) or 0
+                intel_total = await conn.fetchval("SELECT count(*) FROM intel_items") or 0
+                goals_active = await conn.fetchval(
+                    "SELECT count(*) FROM goal_packets WHERE status='active'"
+                ) or 0
+                goals_completed = await conn.fetchval(
+                    "SELECT count(*) FROM goal_packets WHERE status='completed'"
+                ) or 0
+                loop_guard_events = await conn.fetchval(
+                    "SELECT count(*) FROM loop_guard_events"
+                ) or 0
+                persona_memory = await conn.fetchval("SELECT count(*) FROM persona_memory") or 0
+
+            # X 収益化状態
+            monetization_line = ""
+            try:
+                from tools.x_monetization_tracker import check_requirements
+                mon = await check_requirements()
+                vf = mon.get("revenue_share", {}).get("verified_followers_500", {})
+                vf_current = vf.get("current")
+                imp90 = mon.get("revenue_share", {}).get("impressions_90d_5M", {})
+                imp_current = imp90.get("current", 0)
+                imp_progress = imp90.get("progress", 0) * 100
+                sub_gap = mon.get("subscriptions", {}).get("verified_followers_2000", {}).get("gap", 0)
+                if vf_current is not None:
+                    monetization_line = (
+                        f"- Verified Followers: **{vf_current:,}** / 2,000 target (gap: {sub_gap:,})\n"
+                        f"- 90-day Impressions: **{imp_current:,}** / 5,000,000 target ({imp_progress:.2f}%)\n"
+                    )
+                else:
+                    monetization_line = "- Monetization state: not yet initialized\n"
+            except Exception as e:
+                logger.debug(f"X monetization取得失敗: {e}")
+                monetization_line = "- Monetization state: retrieval failed\n"
+
+            # 主要コンポーネントの行数
+            file_lines = {}
+            for label, rel_path in (
+                ("scheduler.py", "scheduler.py"),
+                ("brain_alpha/sns_batch.py", "brain_alpha/sns_batch.py"),
+                ("brain_alpha/content_pipeline.py", "brain_alpha/content_pipeline.py"),
+                ("brain_alpha/note_quality_checker.py", "brain_alpha/note_quality_checker.py"),
+                ("tools/x_mention_monitor.py", "tools/x_mention_monitor.py"),
+                ("app.py", "app.py"),
+            ):
+                fp = _os.path.join(_os.path.dirname(__file__), rel_path)
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        file_lines[label] = sum(1 for _ in f)
+                except Exception:
+                    file_lines[label] = "?"
+
+            job_count = len(self._scheduler.get_jobs()) if self._scheduler else 0
+
+            now_jst = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+            new_section = (
+                "<!-- AUTO-STATS-START -->\n"
+                "<!-- このセクションは scheduler.py:update_codex_stats によって毎日09:35 JSTに自動更新されます。手動編集禁止。 -->\n"
+                "\n"
+                f"## Live Auto-Stats (updated {now_jst})\n"
+                "\n"
+                "### System Metrics (PostgreSQL live query)\n"
+                f"- LLM Calls Total: **{int(llm_calls):,}**\n"
+                f"- LLM Cost Cumulative: **¥{float(llm_cost):,.0f}**\n"
+                f"- Event Log Entries: **{int(events):,}**\n"
+                f"- SNS Posts Posted: **{int(posts_total):,}**\n"
+                f"- note Published: **{int(note_published):,}**\n"
+                f"- intel_items: **{int(intel_total):,}**\n"
+                f"- persona_memory: **{int(persona_memory):,}**\n"
+                f"- Goal Packets: **{int(goals_active)} active / {int(goals_completed)} completed**\n"
+                f"- LoopGuard Events: **{int(loop_guard_events):,}**\n"
+                "\n"
+                "### Code Metrics\n"
+                + "".join(f"- {label}: **{n}** lines\n" for label, n in file_lines.items())
+                + f"- Scheduler Jobs Registered: **{job_count}**\n"
+                "\n"
+                "### X Monetization Progress (TOP PRIORITY)\n"
+                + monetization_line
+                + "\n"
+                "**Note for Codex**: これらの値は毎日09:35 JSTに最新化されます。これより前の手動記載数値(Recent Changesセクション等)は、記録時点のスナップショットです。現在値を参照したい場合は必ずこのセクションを見ること。\n"
+                "\n"
+                "<!-- AUTO-STATS-END -->"
+            )
+
+            with open(codex_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            marker_pattern = _re.compile(
+                r"<!-- AUTO-STATS-START -->.*?<!-- AUTO-STATS-END -->",
+                _re.DOTALL,
+            )
+            if marker_pattern.search(content):
+                new_content = marker_pattern.sub(new_section, content)
+            else:
+                new_content = content.rstrip() + "\n\n" + new_section + "\n"
+
+            if new_content == content:
+                logger.debug("codex.md: AUTO-STATS 変更なし")
+                return
+
+            with open(codex_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            logger.info(
+                f"codex.md AUTO-STATS updated (LLM={llm_calls:,} / cost=¥{float(llm_cost):,.0f} / jobs={job_count})"
+            )
+
+            try:
+                import subprocess
+                cwd = _os.path.dirname(__file__)
+                subprocess.run(["git", "add", "codex.md"], cwd=cwd, capture_output=True)
+                commit_result = subprocess.run(
+                    [
+                        "git", "commit", "-m",
+                        f"Update codex.md auto-stats ({datetime.now().strftime('%Y-%m-%d')})",
+                    ],
+                    cwd=cwd, capture_output=True, text=True,
+                )
+                if commit_result.returncode == 0:
+                    subprocess.run(
+                        ["git", "push", "origin", "main"],
+                        cwd=cwd, capture_output=True,
+                    )
+                    logger.info("codex.md: git commit+push 完了")
+            except Exception as e:
+                logger.warning(f"codex.md git push 失敗(更新自体は成功): {e}")
+
+        except Exception as e:
+            logger.error(f"update_codex_statsエラー: {e}", exc_info=True)
 
     async def daily_syutain_report(self):
         """毎日12:00 JST: SYUTAINβ日報（note無料連載用）をローカルLLMで自動生成"""

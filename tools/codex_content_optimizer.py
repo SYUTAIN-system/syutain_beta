@@ -143,9 +143,20 @@ async def _run_codex_audit(prompt: str, timeout: int = 420) -> dict:
             stat_out, _ = await stat_proc.communicate()
             total_lines = sum(int(m.group(1)) for m in _re_stat2.finditer(r'(\d+) (?:insertion|deletion)', stat_out.decode()))
             if total_lines > 200:
-                logger.error(f"Codex audit: 変更が{total_lines}行（上限200行）。全revert")
-                await (await asyncio.create_subprocess_exec("git", "checkout", "--", ".", cwd=PROJECT_DIR)).wait()
-                return {"success": False, "output": f"変更行数超過 ({total_lines}>200)", "files_changed": []}
+                # 2026-04-11 CRITICAL FIX: 全 checkout 禁止(消失事故対策)。個別 revert のみ。
+                logger.error(
+                    f"Codex audit: 変更が{total_lines}行（上限200行）。"
+                    f"files={len(files_changed)} 個別 revert(全 checkout 禁止)"
+                )
+                for _f in files_changed:
+                    try:
+                        _revert = await asyncio.create_subprocess_exec(
+                            "git", "checkout", "HEAD", "--", _f, cwd=PROJECT_DIR,
+                        )
+                        await _revert.wait()
+                    except Exception:
+                        pass
+                return {"success": False, "output": f"変更行数超過 ({total_lines}>200)、個別revert", "files_changed": []}
         except Exception:
             pass
 

@@ -44,12 +44,14 @@ STRATEGY_DIR = Path(__file__).resolve().parent.parent / "strategy"
 
 # ===== スケジュール定義 =====
 
-# 拡散実行書に基づく投稿数: 30本/日 + note 1(別パイプライン) = 31本
-# X shimahara 5 / X syutain 8 / Bluesky 10 / Threads 7
-X_SHIMAHARA_TIMES = ["09:00", "12:00", "15:00", "18:00", "21:00"]
-X_SYUTAIN_TIMES = ["09:30", "11:00", "12:30", "14:30", "16:00", "18:00", "20:00", "22:00"]
-BLUESKY_TIMES = ["09:00", "10:15", "11:30", "12:45", "14:00", "15:30", "17:00", "18:30", "20:00", "21:30"]
-THREADS_TIMES = ["09:30", "11:30", "13:30", "15:30", "17:30", "19:30", "21:30"]
+# 2026-04-11 X 2026 アルゴリズム最適化に基づく投稿時刻再配置:
+# - JST peak: 12-13(昼休), 17-19(通勤), 19-21(夜 leisure), 09-11(朝/週末)
+# - shimahara(主戦場) は peak 密集、syutain は shimahara の 5-10 分後 (conversation chain 起点)
+# - Bluesky/Threads は engagement 実測がほぼ 0 だったので本数削減、リソースを X に集中
+X_SHIMAHARA_TIMES = ["09:30", "12:15", "17:45", "19:45", "21:15"]
+X_SYUTAIN_TIMES = ["09:35", "11:00", "12:20", "15:30", "17:50", "19:50", "21:20", "22:30"]
+BLUESKY_TIMES = ["10:30", "13:00", "15:30", "18:30", "21:00"]
+THREADS_TIMES = ["10:30", "13:30", "18:30", "21:00"]
 
 # === 追加時間帯プール（エンゲージメント自動調整で追加/削除される候補） ===
 _EXTRA_TIMES = {
@@ -539,9 +541,23 @@ def check_falsity(text: str, theme: str = "", theme_category: str = "",
         import re as _re_mat
         _mat_text = " ".join(str(m) for m in materials)
 
-        # 投稿内の検証不能な効果数値（〇%向上/改善/削減 + 〇%が〜 + 約〇%）
-        _unverifiable = _re_mat.findall(r'(?:約)?(\d+(?:\.\d+)?)\s*[%％]\s*(?:向上|改善|削減|増加|減少|アップ|ダウン|UP|が|を|の)', text)
-        for val in _unverifiable:
+        # SYUTAINβ内部スコア由来の%は検証対象外(2026-04-11)
+        # 「ギャップスコア60%」「品質0.87→87%変換」等は材料照合不要
+        _internal_score_markers = (
+            "スコア", "品質", "精度", "確度", "達成率", "カバレッジ",
+            "ギャップ", "importance", "quality", "score",
+        )
+        # 投稿内の検証不能な効果数値(〇%+効果動詞/助詞)
+        _effect_re = _re_mat.compile(
+            r'(?:約)?(\d+(?:\.\d+)?)\s*[%％]\s*(?:向上|改善|削減|増加|減少|アップ|ダウン|UP|短縮|伸び|急増|急落|が|を|の)'
+        )
+        for m in _effect_re.finditer(text):
+            val = m.group(1)
+            # 直前30文字に内部スコアマーカーがあれば免除
+            ctx_start = max(0, m.start() - 30)
+            _ctx = text[ctx_start:m.start()]
+            if any(mk in _ctx for mk in _internal_score_markers):
+                continue
             if val not in _mat_text:
                 issues.append(f"素材外の効果数値: {val}%")
                 break
@@ -1156,8 +1172,16 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
         r'(?:増加|減少|向上|改善|短縮|上昇|低下|急増|急落|伸び)',
         content,
     )
+    # SYUTAINβ 内部スコア由来の % は直前 15 文字以内にマーカーがある場合のみ免除 (2026-04-11)
+    _score_markers_factual = (
+        "スコア", "品質", "精度", "確度", "達成率", "カバレッジ",
+        "ギャップ", "importance", "quality", "score",
+    )
     if _external_percent_claim and not (_has_source or _has_internal_context):
-        return False, "出典なしの外部効果数値（%）を検出"
+        _pct_start = _external_percent_claim.start()
+        _ctx_pre = content[max(0, _pct_start - 15):_pct_start]
+        if not any(mk in _ctx_pre for mk in _score_markers_factual):
+            return False, "出典なしの外部効果数値（%）を検出"
 
     _external_view_claim = _re_fact.search(r'\d+(?:\.\d+)?\s*(?:万|億)?回(?:視聴|再生)', content)
     if _external_view_claim and not (_has_source or _has_internal_context):
@@ -1504,11 +1528,29 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "- 感情に正直。弱さ・迷い・自嘲を含めて島原大知。完璧な人間として描くな\n"
             "- 不完全でも渡す美学。完璧より「止めずに渡す、始める、残す、繋ぐ」\n"
             "- 安い答えを売らない。問いを持ち続ける人。泥臭い日常の中の閃きを書け\n\n"
+            "【X 2026アルゴリズム準拠のインプレッション最大化ルール（2026-04-11 島原さん指示+リサーチ）】\n"
+            "リサーチ結果の事実(X open-source code + 2026記事より):\n"
+            "- エンゲージスコア: リプ×13.5 > リポスト×20 > プロフクリック×12 > いいね×1\n"
+            "- 会話チェーン(リプ + 著者返答) = いいねの150倍の重み\n"
+            "- 最初の30分が最強ランキング要因。test users 100-1000に露出、engagement >5%でブースト、<2%で沈没\n"
+            "- 外部リンクは near-zero distribution(algorithm suppression)\n"
+            "- リプライは 30倍 reach(単独投稿比)\n"
+            "- 時間半減期 6h、24h後はほぼ配信されない\n\n"
+            "適用ルール:\n"
+            "- 1行目で止めろ。質問型/断定型/意外な数字を必ず最初に出す\n"
+            "- 具体的な数字(API代/呼出回数/行数/エラー件数)を1つ以上含める。ただし実測値のみ、捏造禁止\n"
+            "- URL/リンクは投稿本文に含めるな(near-zero distribution)。note告知が必要ならリプライに分離\n"
+            "- 「リプしたくなる問い」で終わる(「どう思う?」「同じ経験ある?」等を最後に入れても良い)\n"
+            "- 「わかる」より「なにそれ」「続きが気になる」狙い(out-of-networkの50%に入るため)\n"
+            "- 抽象論/感想文/ポエム調は即捨てる(impは拾えない)\n"
+            "- 「事件」「失敗」「矛盾」「異常値」を正直に出す(Build in Publicの核)\n"
+            "- 定型AI臭の排除は絶対(読者は1秒で離脱する)\n\n"
             "絶対ルール:\n"
             "- AI臭い定型表現は禁止。島原大知の声で語れ。\n"
             "- 完璧な文章にするな。推敲途中のような人間味を残せ。\n"
             "- 完璧なAIエンジニア/成功した起業家として島原を描くな。\n"
             "- 投稿テキストのみを出力。説明や前置きは不要。\n"
+            "- 数値はDB実測値のみ使用。戦略書の古い数値や概算は禁止(fact-based mandate)。\n"
             f"{_common_structure_guide}"
             f"{_common_factual_rules}"
             f"{persona_hint}"
@@ -1698,7 +1740,13 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
             "- 悪い例: 「今日はLLMを使ってすごい成果が出ました」←報告書。ネタにしろ\n"
             "- 悪い例: 「AI技術の進歩は目覚ましいものがある」←誰でも言える。具体的にしろ\n"
             "禁止: AI臭い定型表現。「いかがでしょうか」。ポエム。抽象論。「AIすごい」。絵文字多用。\n"
-            "禁止: VTuber/ホロライブ/にじさんじ/kson等のVTuber関連話題。AITuberはOK。\n"
+            "禁止: VTuber/ホロライブ/にじさんじ/kson等のVTuber関連話題。AITuberはOK。\n\n"
+            "【X 2026アルゴリズム準拠のインプレッション最大化ルール】\n"
+            "- 1行目で止めろ。質問型/断定型/意外な数字を必ず最初に\n"
+            "- URL/外部リンクは本文に含めるな(X algorithmがnear-zero distributionで沈める)\n"
+            "- 「続きが気になる」「なにそれ」と止まる投稿を狙え(out-of-network viral進入のため)\n"
+            "- 具体的数字は実測値のみ(捏造禁止、fact-based mandate)\n"
+            "- 30分以内にshimaharaがリプで絡みに来る前提で、絡みやすい余白を残せ\n"
             "投稿テキストのみを出力。\n"
             f"{_common_structure_guide}"
             f"{_common_factual_rules}"
@@ -2309,6 +2357,41 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
                         elif not _cleaned or len(_cleaned) < 20:
                             # サニタイズ後に投稿として短すぎる → 元のdraftを使う（次のNGチェックで弾かれる）
                             pass
+
+                        # 小数スコア → %表記変換(2026-04-11 島原さん指示)
+                        # 「ギャップスコア0.60」等の SYUTAINβ 内部スコア(0.XX)を 60% 表記に統一。
+                        # 除外: 英字(v0.45/ver0.12)・金額(¥0.50)・URL(/0.99)・3桁以上(0.601)・連続小数(1.0.23)
+                        candidate_draft = _re_sns.sub(
+                            r'(?<![a-zA-Z0-9.¥$/])0\.(\d{2})(?!\d)',
+                            lambda m: f"{int(m.group(1))}%",
+                            candidate_draft,
+                        )
+
+                        # === X 2026 アルゴリズム: 外部リンク除去 (near-zero distribution 回避) ===
+                        # 2026-04-11 リサーチ結果: 外部 URL 含む投稿は algorithm suppression で配信ほぼ停止。
+                        # X/Bluesky/Threads 全 platform で投稿本体から URL を削除。
+                        # note/GitHub 告知が必要な場合は、投稿後に別途 reply として URL を投下する方式。
+                        if platform in ("x", "bluesky", "threads"):
+                            _url_before = candidate_draft
+                            # 生 URL (http/https) を削除
+                            candidate_draft = _re_sns.sub(
+                                r'https?://[^\s\u3000]+',
+                                '',
+                                candidate_draft,
+                            ).strip()
+                            # 「→ https://...」「URL: https://...」等の残りラベルを掃除
+                            candidate_draft = _re_sns.sub(
+                                r'(?:^|\n)(?:→\s*|URL\s*[:：]\s*|リンク\s*[:：]\s*|note\s*[:：]\s*|GitHub\s*[:：]\s*)\s*$',
+                                '',
+                                candidate_draft,
+                                flags=_re_sns.MULTILINE,
+                            ).strip()
+                            # 空行の連続を 1 行に
+                            candidate_draft = _re_sns.sub(r'\n{3,}', '\n\n', candidate_draft).strip()
+                            if _url_before != candidate_draft:
+                                logger.info(
+                                    f"X-algo link strip ({platform}): {len(_url_before)}→{len(candidate_draft)}字"
+                                )
 
                         # === Phase 2: 自律検証パイプライン ===
 

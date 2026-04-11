@@ -105,6 +105,7 @@ def _openrouter_record_use():
 _node_load = {
     "bravo": {"busy": False, "last_seen": 0, "call_count": 0},
     "charlie": {"busy": False, "last_seen": 0, "call_count": 0},
+    "delta": {"busy": False, "last_seen": 0, "call_count": 0},
     "alpha": {"busy": False, "last_seen": 0, "call_count": 0},
 }
 _round_robin_idx = 0  # BRAVO/CHARLIEのラウンドロビン用

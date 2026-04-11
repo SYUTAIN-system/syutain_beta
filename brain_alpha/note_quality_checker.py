@@ -623,6 +623,141 @@ class NoteQualityChecker:
 
         return results
 
+    async def retry_limbo_stage2(self, limit: int = 3) -> list:
+        """stage2_verdict が空の limbo レコードに対して stage2 を再実行する。
+
+        2026-04-11 島原さん方針「完全自動実行優先」に基づく実装。
+        final_status='checked' かつ stage2_verdict IS NULL/空 の記録は、
+        過去に stage2 がパース失敗 or API エラーで verdict が空のまま完了扱いになっている
+        状態。これらに対して _stage2_gpt5_check を再実行し、人間判定なしで救済する。
+        戻り値は check_all_pending と同じ形式(scheduler.note_quality_check の
+        product_packages 投入ロジックに乗る)。
+        """
+        self.run_cost = 0.0
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, filepath, article_title, stage1_result, stage1_score, total_cost_jpy
+                   FROM note_quality_reviews
+                   WHERE final_status = 'checked'
+                     AND (stage2_verdict IS NULL OR stage2_verdict = '')
+                   ORDER BY checked_at DESC
+                   LIMIT $1""",
+                limit,
+            )
+
+        if not rows:
+            return []
+
+        logger.info(f"limbo stage2 リトライ: {len(rows)}件")
+        results = []
+        for row in rows:
+            filepath_str = row["filepath"]
+            try:
+                fp = Path(filepath_str)
+                if not fp.exists():
+                    logger.warning(
+                        f"limbo retry: ファイル消失スキップ id={row['id']} path={filepath_str}"
+                    )
+                    continue
+
+                content = fp.read_text(encoding="utf-8")
+                title = row["article_title"] or (
+                    content.split("\n", 1)[0].lstrip("#").strip() if content else fp.name
+                )
+
+                # stage1 結果を DB から復元
+                s1_raw = row["stage1_result"]
+                if isinstance(s1_raw, str):
+                    try:
+                        haiku_result = json.loads(s1_raw)
+                    except Exception:
+                        haiku_result = {}
+                else:
+                    haiku_result = s1_raw or {}
+
+                # コスト確認
+                can_s2, reason_s2 = await self.cost_guard.can_proceed_stage2()
+                if not can_s2:
+                    logger.info(
+                        f"limbo retry: stage2コストブロック id={row['id']} reason={reason_s2}"
+                    )
+                    results.append({
+                        "filepath": filepath_str,
+                        "title": title,
+                        "status": "stage2_blocked",
+                        "reason": reason_s2,
+                        "cost_jpy": 0,
+                    })
+                    continue
+
+                now2 = datetime.now(timezone.utc)
+                gpt5_result, s2_cost, s2_in, s2_out, s2_model = await self._stage2_gpt5_check(
+                    content, haiku_result,
+                )
+                self.run_cost += s2_cost
+
+                await self._log_llm_cost(s2_model, "note_quality_limbo_retry", s2_cost)
+
+                s2_score = 0
+                verdict = None
+                pricing = None
+                if isinstance(gpt5_result, dict) and not gpt5_result.get("parse_error"):
+                    qa = gpt5_result.get("quality_assessment", {})
+                    s2_score = qa.get("overall", 0) if isinstance(qa, dict) else 0
+                    verdict = gpt5_result.get("publish_verdict")
+                    pricing = gpt5_result.get("pricing_recommendation")
+
+                verdict = self._normalize_verdict(verdict)
+
+                # stage1_score が高い場合は needs_edit→publish_ready 昇格
+                s1_score = row["stage1_score"] or 0
+                if verdict == "needs_edit" and s1_score >= 0.75:
+                    logger.info(
+                        f"limbo retry verdict fallback: needs_edit→publish_ready "
+                        f"(stage1_score={s1_score:.2f}, stage2_score={s2_score})"
+                    )
+                    verdict = "publish_ready"
+
+                final_status = "checked"
+                if verdict == "reject":
+                    final_status = "rejected_stage2"
+
+                total_cost = float(row["total_cost_jpy"] or 0) + s2_cost
+                await self._update_stage2(
+                    row["id"], s2_model, gpt5_result, s2_score, verdict, pricing,
+                    s2_cost, s2_in, s2_out, now2, total_cost, final_status,
+                )
+
+                logger.info(
+                    f"limbo retry 完了: id={row['id']} verdict={verdict} "
+                    f"s2_score={s2_score} cost=¥{s2_cost:.2f}"
+                )
+
+                # scheduler.note_quality_check の package 投入ロジックと同じ形式で返す
+                results.append({
+                    "filepath": filepath_str,
+                    "title": title,
+                    "status": final_status,
+                    "mechanical": None,
+                    "haiku": haiku_result,
+                    "gpt5": gpt5_result,
+                    "cost_jpy": s2_cost,
+                })
+
+            except Exception as e:
+                logger.error(
+                    f"limbo retry 失敗 id={row['id']}: {e}", exc_info=True,
+                )
+                results.append({
+                    "filepath": filepath_str,
+                    "status": "error",
+                    "reason": str(e),
+                    "cost_jpy": 0,
+                })
+
+        return results
+
     async def _check_article(self, filepath: Path) -> dict:
         """1記事のチェック"""
         content = filepath.read_text(encoding="utf-8")
