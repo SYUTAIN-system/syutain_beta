@@ -229,11 +229,10 @@ async def execute_approved_x(content: str, account: str = "syutain", in_reply_to
         tweet_kwargs = {"text": content}
         if in_reply_to_tweet_id:
             tweet_kwargs["in_reply_to_tweet_id"] = in_reply_to_tweet_id
-        # 2026-04-11: 自分の投稿は誰でも返信可能にする（reply_settings デフォルト対策）。
-        # shimahara ⇄ syutain_beta の boost_30min が 403 になっていた原因は、
-        # X アカウントの default reply_settings が "mentionedUsers" 扱いになっていたため。
-        # create_tweet 時に明示 "everyone" を付けて上書きする。
-        tweet_kwargs["reply_settings"] = "everyone"
+        # 2026-04-11: reply_settings を明示しない = X API デフォルト (誰でも返信可)。
+        # 以前 "everyone" を指定したら 400 BadRequest になった。X API v2 の valid 値は
+        # [following, mentionedUsers, subscribers, verified] のみで "everyone" は無い。
+        # 制限をかけない時はキーを渡さないのが正解。
         response = client.create_tweet(**tweet_kwargs)
         tweet_id = response.data.get("id", "") if response.data else ""
         tweet_url = f"https://x.com/{creds['handle'].lstrip('@')}/status/{tweet_id}"
