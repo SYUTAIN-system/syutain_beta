@@ -245,12 +245,15 @@ async def publish_and_announce(platform: str) -> dict:
     logger.info(f"{platform}記事生成完了: {title} ({len(body)}字)")
 
     # 2. 公開
+    # 2026-04-11 fix: qiita_publisher / zenn_publisher は結果を
+    # {"ok": bool} で返すが、以前の実装が {"success": ...} で判定していた
+    # ため、公開結果が常に偽判定 → 一度も記事が公開されずスキップされていた。
     publish_url = ""
     try:
         if platform == "qiita":
             from tools.qiita_publisher import publish_article
             pub_result = await publish_article(title=title, body=body, tags=tags)
-            if pub_result.get("success"):
+            if pub_result.get("ok"):
                 publish_url = pub_result.get("url", "")
                 result["published"] = True
             else:
@@ -258,18 +261,16 @@ async def publish_and_announce(platform: str) -> dict:
                 return result
 
         elif platform == "zenn":
-            from tools.zenn_publisher import create_article, git_push_articles
-            create_result = create_article(title=title, body=body, topics=tags)
-            if create_result.get("success"):
-                push_result = await git_push_articles(f"Add: {title[:30]}")
-                if push_result.get("success"):
-                    publish_url = create_result.get("url", "")
-                    result["published"] = True
-                else:
-                    result["error"] = f"Zenn git push失敗: {push_result.get('error', '')}"
-                    return result
+            # 2026-04-11 fix: 旧コードは create_article + git_push_articles という
+            # 存在しない関数を使っていた。実際は publish_and_push (create + git
+            # add/commit/push を 1 本にまとめた) がある。それを呼ぶ。
+            from tools.zenn_publisher import publish_and_push
+            pub_result = await publish_and_push(title=title, body=body, topics=tags)
+            if pub_result.get("ok"):
+                publish_url = pub_result.get("url", "")
+                result["published"] = True
             else:
-                result["error"] = f"Zenn記事作成失敗: {create_result.get('error', '')}"
+                result["error"] = f"Zenn公開失敗: {pub_result.get('error', '')}"
                 return result
 
     except Exception as e:
