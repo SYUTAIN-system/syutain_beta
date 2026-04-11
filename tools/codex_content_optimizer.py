@@ -104,6 +104,27 @@ async def _run_codex_audit(prompt: str, timeout: int = 420) -> dict:
     output_file = f"/tmp/codex_audit_{datetime.now().strftime('%H%M%S')}.txt"
     start = datetime.now()
 
+    # 第2防御層: HEAD SHA を wip/pre-codex-* 参照ブランチとして固定
+    # 2026-04-11 の改修消失事故対策。HEAD の移動を伴わない不動点。
+    try:
+        sha_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE, cwd=PROJECT_DIR,
+        )
+        sha_out, _ = await sha_proc.communicate()
+        head_sha = sha_out.decode().strip()
+        if head_sha:
+            wip_branch = f"wip/pre-codex-audit-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            br_proc = await asyncio.create_subprocess_exec(
+                "git", "branch", wip_branch, head_sha,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=PROJECT_DIR,
+            )
+            await br_proc.wait()
+            logger.info(f"Codex audit前: 安全ブランチ {wip_branch} @ {head_sha[:12]}")
+    except Exception as br_err:
+        logger.warning(f"codex audit wip branch 作成失敗(継続): {br_err}")
+
     try:
         proc = await asyncio.create_subprocess_exec(
             CODEX_PATH, "exec", prompt,
@@ -175,10 +196,11 @@ async def _run_codex_audit(prompt: str, timeout: int = 420) -> dict:
                     allowed.append(f)
                 else:
                     logger.warning(f"Codex audit: {f} 構文エラー→revert")
-                    await (await asyncio.create_subprocess_exec("git", "checkout", "--", f, cwd=PROJECT_DIR)).wait()
+                    # 2026-04-11: HEAD 付与で revert 先を明示、safe_git で監査パス
+                    await (await asyncio.create_subprocess_exec("git", "checkout", "HEAD", "--", f, cwd=PROJECT_DIR)).wait()
             else:
                 logger.warning(f"Codex audit: {f} は許可外→revert")
-                await (await asyncio.create_subprocess_exec("git", "checkout", "--", f, cwd=PROJECT_DIR)).wait()
+                await (await asyncio.create_subprocess_exec("git", "checkout", "HEAD", "--", f, cwd=PROJECT_DIR)).wait()
 
         return {
             "success": True,

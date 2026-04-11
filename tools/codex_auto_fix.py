@@ -119,6 +119,34 @@ async def run_codex_fix(issue_description: str, files_hint: list[str] = None, ti
         logger.warning(f"snapshot作成失敗（続行、但し保険無し）: {stash_err}")
         snapshot_dir_path = None
 
+    # 第2防御層: HEAD SHA を wip/pre-codex-* 参照ブランチとして固定
+    # これにより Codex が何をしようと `git branch wip/pre-codex-TIMESTAMP` は不動点として残り、
+    # reflog なしでも `git reset --mixed wip/pre-codex-TIMESTAMP` で HEAD を巻き戻せる。
+    # HEAD の移動を伴わないので、Codex の実行には影響しない。
+    wip_branch_name = None
+    try:
+        sha_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE, cwd=PROJECT_DIR,
+        )
+        sha_out, _ = await sha_proc.communicate()
+        head_sha = sha_out.decode().strip()
+        if head_sha:
+            wip_branch_name = f"wip/pre-codex-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            br_proc = await asyncio.create_subprocess_exec(
+                "git", "branch", wip_branch_name, head_sha,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=PROJECT_DIR,
+            )
+            br_rc = await br_proc.wait()
+            if br_rc == 0:
+                logger.info(f"Codex修正前: 安全ブランチ作成 {wip_branch_name} @ {head_sha[:12]}")
+            else:
+                wip_branch_name = None
+    except Exception as br_err:
+        logger.warning(f"wip ブランチ作成失敗（続行、但し第2層なし）: {br_err}")
+        wip_branch_name = None
+
     try:
         proc = await asyncio.create_subprocess_exec(
             CODEX_PATH, "exec", prompt,

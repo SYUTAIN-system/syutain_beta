@@ -22,6 +22,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# JST (Asia/Tokyo, UTC+9) — モジュール全体で共有する timezone オブジェクト
+# 2026-04-11 追加: update_codex_stats / daily_syutain_report 等で 'JST not defined'
+# エラーが頻発していたので module scope に昇格。
+JST = timezone(timedelta(hours=9))
+
 # --- PIDロックによる重複起動防止 ---
 _PID_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", ".scheduler.lock")
 os.makedirs(os.path.dirname(_PID_LOCK_FILE), exist_ok=True)
@@ -109,6 +114,23 @@ class SyutainScheduler:
             from apscheduler.triggers.cron import CronTrigger
 
             self._scheduler = AsyncIOScheduler(timezone="Asia/Tokyo")
+
+            # ⚠️ 起動時 git 安全性監査 — 2026-04-11 の改修消失事故 対策
+            # 危険な git 操作 (git checkout -- . / reset --hard / clean -fd)
+            # がコード中に残っていないか scan。findings があれば Discord 通知。
+            try:
+                from tools.safe_git import startup_git_safety_audit
+                audit_result = await startup_git_safety_audit(
+                    os.path.dirname(os.path.abspath(__file__))
+                )
+                if not audit_result["clean"]:
+                    logger.critical(
+                        f"⚠️ startup git safety audit FAILED: "
+                        f"{audit_result['count']}件の危険パターンが残存 — "
+                        f"scheduler は継続起動するが即修正すること"
+                    )
+            except Exception as e:
+                logger.warning(f"startup git safety audit 実行失敗(継続): {e}")
 
             # NATS接続
             try:
@@ -977,6 +999,16 @@ class SyutainScheduler:
                 CronTrigger(hour=9, minute=35, timezone="Asia/Tokyo"),
                 id="update_codex_stats",
                 name="codex.md 自動統計更新（毎日09:35）",
+                replace_existing=True,
+            )
+
+            # codex.md 自動チェンジログ更新（毎日09:40 JST、直近7日のgit logをLLM要約してAUTO-CHANGELOG間に書き込む）
+            # 2026-04-11 導入: codex.md の Recent Changes 手動保守問題を解消。
+            self._scheduler.add_job(
+                self.run_codex_auto_reflector,
+                CronTrigger(hour=9, minute=40, timezone="Asia/Tokyo"),
+                id="codex_auto_reflector",
+                name="codex.md auto changelog（毎日09:40）",
                 replace_existing=True,
             )
 
@@ -6228,6 +6260,22 @@ class SyutainScheduler:
 
         except Exception as e:
             logger.error(f"update_codex_statsエラー: {e}", exc_info=True)
+
+    async def run_codex_auto_reflector(self):
+        """毎日09:40 JST: codex.md の AUTO-CHANGELOG セクションを git log から LLM 要約で更新。
+
+        2026-04-11 導入。島原さん指示「Codexへの反映、全て自動化を行なって」対応。
+        """
+        try:
+            from tools.codex_auto_reflector import run_codex_auto_reflector as _runner
+            stats = await _runner()
+            logger.info(
+                f"codex_auto_reflector: commits={stats.get('commits_read', 0)} "
+                f"wrote={stats.get('summary_written', False)} committed={stats.get('committed', False)} "
+                f"error={stats.get('error', '')}"
+            )
+        except Exception as e:
+            logger.error(f"run_codex_auto_reflector エラー: {e}", exc_info=True)
 
     async def daily_syutain_report(self):
         """毎日12:00 JST: SYUTAINβ日報（note無料連載用）をローカルLLMで自動生成"""
