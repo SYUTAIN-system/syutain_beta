@@ -259,11 +259,28 @@ def _build_system_prompt(
             lines.append("記憶している具体情報 (相手を驚かせる素材):")
             for f in deep_profile["memorable_facts"][:12]:
                 lines.append(f"- {f[:150]}")
+        # raw_tweet_samples: 実際のツイート文面。過去発言への「あ、その話」的参照に使う
+        if "raw_tweet_samples" in deep_profile and deep_profile["raw_tweet_samples"]:
+            lines.append("")
+            lines.append("★相手の実際の過去ツイート (参考、原文):")
+            for i, s in enumerate(deep_profile["raw_tweet_samples"][:20]):
+                if isinstance(s, dict):
+                    txt = s.get("text", "")[:150]
+                    dt = (s.get("created_at", "") or "")[:10]
+                    lines.append(f"- ({dt}) {txt}")
+                elif isinstance(s, str):
+                    lines.append(f"- {s[:150]}")
+        lines.append("")
         lines.append(
             "★上記の情報を使うのは 3 割程度 (毎回全部出さない、波を持たせる)。"
-            "使う時は「調べた」「把握してる」と言わず、自然に文脈の一部として織り込む。"
-            "知りすぎ演出 > 相手の実際の発言への直接反応 の優先順位で、"
-            "まず相手の発言に応えて、そのついでに深層情報が匂う程度がベスト。"
+            "使う時は絶対に「調べた」「把握してる」「以前◯◯と言ってましたよね」等と明示するな。"
+            "自然に文脈の一部として織り込む。例:\n"
+            "  相手「UVがまた剥がれた」\n"
+            "  → 「あのツイートのやつ再発か。UV の根本原因、いつまで付き合うねん」 ← 明示ダメ\n"
+            "  → 「また剥がれたんかい。UV の因縁は何回繰り返すんや」 ← OK、過去を匂わせるだけ\n"
+            "知りすぎ演出 > 相手の今の発言への直接反応 の優先順位で、"
+            "まず今の発言に応えて、ついでに過去の文脈が自然に出る形が理想。"
+            "単語・言い回し・世界観を借りる程度で、過去発言の引用はしない。"
         )
         deep_profile_block = "\n".join(lines) + "\n"
 
