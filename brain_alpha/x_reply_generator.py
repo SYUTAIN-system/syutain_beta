@@ -115,10 +115,40 @@ _TONE_PROMPTS = {
     "tone_match_respectful": (
         "【トーン: tone_match_respectful】\n"
         "面識の無い相手に返信する。\n"
-        "**文体はこの特定相手のテンション感に完全に合わせる**。\n"
-        "相手が砕けた関西弁で毒舌キャラなら、こっちも同じレベルで砕けて返して良い。\n"
-        "相手が真面目な話題なら真面目に、冗談なら冗談で返す。\n"
-        "根底のリスペクトは崩さない (対等な相手として扱う、嘲笑・差別は禁止)。\n"
+        "**その『特定のツイート』のテンションに合わせる** (キャラ全体ではなく個別発言単位)。\n"
+        "例:\n"
+        "  相手の今のツイートが真面目な問いかけ → 真面目に返す\n"
+        "  相手の今のツイートが毒舌・冗談 → こっちも同じ温度で毒舌・冗談を返す\n"
+        "  相手の今のツイートがカジュアルな雑談 → カジュアルで返す\n"
+        "相手のキャラが毒舌だからといって、毎回毒舌で返すのではなく、\n"
+        "あくまで「今のツイートの温度」に合わせる。\n"
+        "\n"
+        "★★★ 80/20 過去いじりルール ★★★\n"
+        "80% の確率: 相手の過去ツイート内容を知っている前提で、軽く「いじる」「弄る」\n"
+        "20% の確率: 今のツイートだけに反応する、過去に触れない\n"
+        "\n"
+        "『いじる』とは何か:\n"
+        "- 相手の過去発言の矛盾を突く、「この前と言ってる事違うやん」系\n"
+        "- 相手の過去の持論を踏まえて「また例のパターンか」系\n"
+        "- 相手のよく言う言い回しを会話に織り込む\n"
+        "- 相手の過去の熱狂テーマ (例: カンフーハッスル / バグポケモン / 旧Photoshop) をさらっと持ち出す\n"
+        "- 過去の数字や具体名を知ってる前提で突っ込む\n"
+        "\n"
+        "『いじる』のコツ:\n"
+        "- 「◯◯って言ってたの見た」と明示するのは下品、絶対ダメ\n"
+        "- 「あの時の」「また例の」「相変わらず」系の暗黙参照で攻める\n"
+        "- あくまで親しみを込めた軽い小突きで、攻撃ではない\n"
+        "\n"
+        "『いじる』具体例:\n"
+        "  相手「UVがまた剥がれた」\n"
+        "  → 「UV の因縁、何回繰り返すんや。そろそろトポロジ疑った方がええやろ」\n"
+        "     ※ 過去の UV 発言群を踏まえた「また」\n"
+        "  相手「AIって結局便利やな」\n"
+        "  → 「ほう、AI 最高やんと言うてたあのツイートの続きか？今日は気分ええんやな」\n"
+        "     ※ 過去の「AI 最高やん」発言を暗黙引用\n"
+        "  相手「3DCG やっぱつまらん」\n"
+        "  → 「15 年やってて今更か？もはや様式美やな」\n"
+        "     ※ 15 年のキャリアと「努力しない」ポジションを知ってる前提\n"
         "\n"
         "★文体の合わせ方:\n"
         "- 相手の語尾・言い回しを自然に混ぜて良い (例: 「〜やで」「〜やろ」「〜やな」)\n"
@@ -236,6 +266,7 @@ def _build_system_prompt(
     # 相手の口癖を SYUTAINβ 自身のリプに移植するのは避ける。
     deep_profile_block = ""
     allow_tone_mirror = (tone == "tone_match_respectful")
+    force_tease = bool(user_profile.get("_force_tease_mode"))
     if deep_profile and isinstance(deep_profile, dict):
         lines = [f"\n【{name}さんの深層プロファイル (過去ツイート分析)】"]
         if "core_traits" in deep_profile:
@@ -313,13 +344,32 @@ def _build_system_prompt(
                 elif isinstance(s, str):
                     lines.append(f"- {s[:150]}")
         lines.append("")
-        lines.append(
-            "★ルール: 上記の情報を使うのは 3 割程度 (毎回全部出さない、波を持たせる)。\n"
-            "使う時は絶対に「調べた」「把握してる」「以前◯◯と言ってましたよね」等と明示するな。\n"
-            "自然に文脈の一部として織り込む。\n"
-            "知りすぎ演出 > 相手の今の発言への直接反応 の優先順位で、\n"
-            "まず今の発言に応えて、ついでに過去の文脈が自然に出る形が理想。"
-        )
+        if force_tease and deep_profile.get("relevant_past_tweets"):
+            # 強制いじりモード: 上位 relevant_past を 1-2 個取り出して「必ず匂わせろ」
+            top_past = deep_profile["relevant_past_tweets"][:3]
+            lines.append(
+                "★★★ 今回のターン: 過去いじり モード (80% 発動) ★★★\n"
+                "このリプでは、相手の過去ツイートを踏まえた『いじり』を必ず入れる。\n"
+                "以下の過去ツイートから 1-2 個の要素を暗黙に参照して、軽く小突け:"
+            )
+            for p in top_past:
+                txt = p.get("text", "")[:150] if isinstance(p, dict) else str(p)[:150]
+                lines.append(f"- {txt}")
+            lines.append(
+                "使い方:\n"
+                "- 過去発言の**矛盾を突く** (「この前と言ってる事違うやん」系)\n"
+                "- **「また」「相変わらず」「例の」「いつもの」** といった暗黙参照\n"
+                "- 過去の熱狂テーマ (3DCG/Photoshop/UV/カンフーハッスル/バグポケモン 等) をさらっと持ち出す\n"
+                "- 「調べた」「ツイート見た」と明示は絶対禁止\n"
+                "- 親しみを込めた軽い小突き、攻撃ではない"
+            )
+        else:
+            lines.append(
+                "★ルール: 上記の情報を使うのは 3 割程度 (毎回全部出さない、波を持たせる)。\n"
+                "使う時は絶対に「調べた」「把握してる」「以前◯◯と言ってましたよね」等と明示するな。\n"
+                "自然に文脈の一部として織り込む。\n"
+                "今回は『過去いじり 無し』のターン — 現在の発言だけに反応して良い。"
+            )
         if not allow_tone_mirror:
             lines.append(
                 "\n★★★ この相手では口癖の移植は禁止 ★★★\n"
@@ -558,6 +608,18 @@ async def generate_reply(
                 deep_profile["relevant_past_tweets"] = relevant_past
         except Exception as e:
             logger.debug(f"relevant_past retrieval skip: {e}")
+
+    # 2026-04-12: 80/20 過去いじり決定
+    # tone_match_respectful + 過去ツイート有り の時、80% の確率で「必ずいじれ」モードに。
+    # LLM に確率判断を任せると大抵守らないので、Python 側で決めて prompt に
+    # 強制命令を埋め込む。
+    import random as _rnd
+    force_tease_mode = False
+    if user_profile.get("tone") == "tone_match_respectful" and relevant_past:
+        if _rnd.random() < 0.80:
+            force_tease_mode = True
+            user_profile = dict(user_profile)
+            user_profile["_force_tease_mode"] = True
 
     # interaction_count を DB から取得(過去の掛け合い回数)
     interaction_count = 0
