@@ -475,6 +475,31 @@ class OSKernel:
 
                     # タスクステータス + 品質スコアをDBに反映
                     q_score = verify_dict.get("quality_score", 0.0)
+
+                    # 突然変異の結果報告 (設計書第24章、CLAUDE.md Rule 22)
+                    # 2026-04-12 P2: report_outcome が一度も呼ばれていなかった
+                    # (変異の学習フィードバックが発生しない = 変異確率が永遠に初期値の
+                    # ままだった) のを修正。
+                    # action_id パターン:
+                    #   - 優先度変異: f"dispatch_{task_id}_priority"
+                    #   - 文体変異:   f"dispatch_{task_id}_style_{key}" (各キー)
+                    # 対応する action_id を全て report_outcome に渡す。存在しなければ
+                    # mutation_engine 側で pop noop なので副作用なし。
+                    try:
+                        from agents.mutation_engine import report_outcome as _mut_report
+                        # 有益判定: quality_score >= 0.7 + success/partial を有益とみなす
+                        beneficial = q_score >= 0.7 and verify_dict.get("status") in ("success", "partial")
+                        _base_id = f"dispatch_{task_node.task_id}"
+                        # priority の報告
+                        _mut_report(f"{_base_id}_priority", beneficial)
+                        # style の報告: task_dict に style_params があればキーごと
+                        style_params = task_dict.get("style_params") or {}
+                        if isinstance(style_params, dict):
+                            for _sk in style_params:
+                                _mut_report(f"{_base_id}_style_{_sk}", beneficial)
+                    except Exception:
+                        pass
+
                     if verify_dict["status"] in ["success", "partial"]:
                         task_graph.mark_completed(task_node.task_id)
                         completed_count += 1

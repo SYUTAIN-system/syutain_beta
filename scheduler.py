@@ -900,6 +900,20 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # SYUTAINβ 自律目標生成 (毎朝 06:30 JST)
+            # 2026-04-12 P2 実装: os_kernel 5段階ループの起動トリガーが限定的で、
+            # ユーザからの指示がない日はループが一度も動かない問題を解消。
+            # persona_memory + intel_items + 未解決タスク + KPI から LLM で
+            # 今日のゴール 1 件を生成し、kernel.execute_goal() を起動する。
+            self._scheduler.add_job(
+                self.daily_goal_generator,
+                CronTrigger(hour=6, minute=30, timezone="Asia/Tokyo"),
+                id="daily_goal_generator",
+                name="SYUTAINβ 自律目標生成（毎朝 06:30）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
             # 商品パッケージング（1時間間隔）
             self._scheduler.add_job(
                 self.product_packaging,
@@ -1511,6 +1525,22 @@ class SyutainScheduler:
             })
         except Exception as e:
             logger.error(f"動的キーワード更新失敗: {e}")
+
+    async def daily_goal_generator(self):
+        """毎朝 06:30 JST: SYUTAINβ 自律目標を 1 件生成して os_kernel 5段階ループを起動.
+
+        2026-04-12 P2 実装 (自律ループの起動トリガー不足を解消)。
+        """
+        try:
+            from tools.daily_goal_generator import run_daily_goal_cycle
+            stats = await run_daily_goal_cycle()
+            logger.info(
+                f"daily_goal_generator: ok={stats.get('ok')} "
+                f"reason={stats.get('reason', '')[:80]} "
+                f"goal={stats.get('raw_goal', '')[:80]}"
+            )
+        except Exception as e:
+            logger.error(f"daily_goal_generator 失敗: {e}", exc_info=True)
 
     async def daily_summary_notify(self):
         """日次サマリー: 完了タスク数・収益・承認待ち件数をDiscord通知"""
