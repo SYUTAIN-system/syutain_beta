@@ -133,14 +133,34 @@ async def _collect_context() -> dict:
             )
             ctx["recent_intel"] = [dict(r) for r in rows]
 
-            # 未解決タスク: claude_code_queue の pending エントリを使う
+            # 未解決タスク: (a) claude_code_queue pending と
+            #             (b) brain_alpha_session の latest.unresolved_issues を統合
             rows = await conn.fetch(
                 """SELECT category, LEFT(description, 200) as description
                    FROM claude_code_queue
                    WHERE status='pending'
-                   ORDER BY created_at DESC LIMIT 8"""
+                   ORDER BY created_at DESC LIMIT 5"""
             )
-            ctx["unresolved_tasks"] = [dict(r) for r in rows]
+            unresolved = [dict(r) for r in rows]
+
+            # 最新セッションの unresolved_issues
+            try:
+                sess = await conn.fetchrow(
+                    """SELECT unresolved_issues FROM brain_alpha_session
+                       ORDER BY created_at DESC LIMIT 1"""
+                )
+                if sess and sess["unresolved_issues"]:
+                    import json as _json
+                    raw = sess["unresolved_issues"]
+                    try:
+                        items = raw if isinstance(raw, list) else _json.loads(raw)
+                    except Exception:
+                        items = []
+                    for item in (items or [])[:5]:
+                        unresolved.append({"category": "session_unresolved", "description": str(item)[:200]})
+            except Exception:
+                pass
+            ctx["unresolved_tasks"] = unresolved[:10]
 
             # 直近 3 日のゴール (重複回避)
             rows = await conn.fetch(

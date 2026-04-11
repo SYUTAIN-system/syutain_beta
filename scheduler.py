@@ -989,6 +989,17 @@ class SyutainScheduler:
                 replace_existing=True,
             )
 
+            # 学習フィードバックループ (エンゲージメント勝者 → few-shot 反映)
+            # 毎週月曜 03:30 JST。 2026-04-12 P2-3 実装。
+            self._scheduler.add_job(
+                self.learning_feedback_loop,
+                CronTrigger(day_of_week="mon", hour=3, minute=30, timezone="Asia/Tokyo"),
+                id="learning_feedback_loop",
+                name="学習フィードバックループ（月曜03:30）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
             # 高エンゲージメント投稿リライト（火金14:00 JST）
             self._scheduler.add_job(
                 self.repost_high_engagement,
@@ -2117,15 +2128,25 @@ class SyutainScheduler:
 
                 alerts = []  # 異常変動リスト
 
+                def _safe_float(v, default=0.0):
+                    """None や空文字を吸収して float に変換"""
+                    if v is None or v == "":
+                        return default
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return default
+
                 for symbol in self.CRYPTO_WATCH_SYMBOLS:
                     ticker = tickers.get(symbol)
                     if not ticker:
                         continue
 
-                    price = float(ticker.get("last", 0))
-                    high = float(ticker.get("high", 0))
-                    low = float(ticker.get("low", 0))
-                    volume = ticker.get("volume", "0")
+                    # GMOコイン API が None を返す場合がある (取引停止中の通貨等)
+                    price = _safe_float(ticker.get("last"))
+                    high = _safe_float(ticker.get("high"))
+                    low = _safe_float(ticker.get("low"))
+                    volume = ticker.get("volume") or "0"
 
                     if price <= 0:
                         continue
@@ -5688,6 +5709,31 @@ class SyutainScheduler:
                 logger.info(f"weekly_intel_digest: 生成完了 ({len(digest_text)}文字, {len(rows)}件)")
         except Exception as e:
             logger.error(f"weekly_intel_digestエラー: {e}")
+
+    async def learning_feedback_loop(self):
+        """毎週月曜03:30 JST: エンゲージメント勝者を learned_examples.json に集約.
+
+        2026-04-12 P2-3 実装: learning_manager の片方向レポート生成ループを閉じる.
+        実エンゲージメント (likes/impression/replies) の高い投稿を抽出し、
+        次回 SNS 生成の few-shot に自動的に混ざるようにする.
+        """
+        try:
+            from tools.learning_feedback_loop import run_learning_feedback_cycle
+            result = await run_learning_feedback_cycle()
+            logger.info(f"learning_feedback_loop: ok={result.get('ok')} summary={result.get('summary')}")
+            try:
+                from tools.discord_notify import notify_discord
+                summary = result.get("summary", {})
+                if any(v > 0 for v in summary.values()):
+                    parts = [f"{k}={v}" for k, v in summary.items()]
+                    await notify_discord(
+                        f"📊 学習フィードバック更新\n" + " / ".join(parts)
+                        + "\n次回 SNS 生成で few-shot に反映"
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"learning_feedback_loop エラー: {e}", exc_info=True)
 
     async def auto_improve_sns_prompt(self):
         """毎週水曜03:00: SNS投稿プロンプトの自動改善ループ（AutoAgent方式）

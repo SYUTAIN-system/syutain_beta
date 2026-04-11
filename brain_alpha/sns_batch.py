@@ -1143,6 +1143,10 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
         if phrase in content:
             return False, f"ハレーション表現検出: 「{phrase}」— {reason}"
 
+    # --- 借り物テンプレ導入（公式運用では不自然な冒頭） ---
+    if "FF外から失礼します" in content:
+        return False, "借り物テンプレ冒頭を検出（公式運用トーン不一致）"
+
     # --- 中国語混線/文字化け系（意図しない多言語混在） ---
     chinese_markers = [
         "小时", "我们", "这是", "现象", "因为", "你们", "不是", "分钟内", "失败是", "流行",
@@ -1167,6 +1171,13 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
     _internal_markers = ("SYUTAINβ", "LLM", "event_log", "posting_queue", "直近", "累計", "呼び出し")
     _has_source = any(m in content for m in _source_markers)
     _has_internal_context = any(m in content for m in _internal_markers)
+    _external_incident_markers = (
+        "謝罪", "告発", "暴露", "発覚", "未許可", "環境問題", "炎上", "問題視",
+    )
+    if any(m in content for m in _external_incident_markers):
+        if not (_has_source or _has_internal_context):
+            return False, "外部炎上/告発系の断定に一次情報がない"
+
     _external_percent_claim = _re_fact.search(
         r'\d+(?:\.\d+)?\s*%[^。]*'
         r'(?:増加|減少|向上|改善|短縮|上昇|低下|急増|急落|伸び)',
@@ -1186,6 +1197,26 @@ async def _check_sns_factual(content: str, platform: str = "", account: str = ""
     _external_view_claim = _re_fact.search(r'\d+(?:\.\d+)?\s*(?:万|億)?回(?:視聴|再生)', content)
     if _external_view_claim and not (_has_source or _has_internal_context):
         return False, "出典なしの視聴/再生回数断定を検出"
+
+    # --- 新記事告知の日付整合性（古い日付の再利用を抑止） ---
+    if any(marker in content for marker in ("【新記事】", "日報", "公開")):
+        _date_match = _re_fact.search(r'(\d{4})-(\d{2})-(\d{2})', content)
+        if _date_match:
+            try:
+                from datetime import date as _date_cls
+                date_in_post = _date_cls(
+                    int(_date_match.group(1)),
+                    int(_date_match.group(2)),
+                    int(_date_match.group(3)),
+                )
+                today_jst = datetime.now(JST).date()
+                delta_days = (today_jst - date_in_post).days
+                if delta_days > 14:
+                    return False, f"新記事告知の日付が古い（{date_in_post.isoformat()}）"
+                if delta_days < -1:
+                    return False, f"新記事告知の日付が未来すぎる（{date_in_post.isoformat()}）"
+            except Exception:
+                pass
 
     # --- 軍事・攻撃用途の断定表現 ---
     military_markers = [
@@ -1454,6 +1485,8 @@ def _build_prompt(platform: str, account: str, theme: str, time_str: str,
         "- SYUTAINβは島原大知のデジタルツインを目指しているが、島原とは全く別の存在・個体である\n"
         "- SYUTAINβは島原の体験を自分の体験として語ってはならない。島原のことは「島原さん」として三人称で言及する\n"
         "- 外部ニュースについて書く時、島原やSYUTAINβが使った/担当した/体験したと書くな。観察・分析として書け\n"
+        "- 謝罪/告発/暴露など対立が強い外部ニュースは一次情報URLがない限り書くな\n"
+        "- 新記事告知で日付を書く時は実日付のみ。古い日付の使い回しは禁止\n"
         "- 「当社」「弊社」「我々のチーム」は存在しない。個人開発\n"
         "- 検証できない数値（〇%向上、〇倍改善等）を書くな\n"
         "\n【SYUTAINβの能力範囲】\n"
@@ -2236,8 +2269,23 @@ async def _generate_for_schedule(schedule: list, target_date: datetime, batch_na
             used_today.append(theme)
             _theme_category = _theme_detail.get("category", "") if _theme_detail else _infer_theme_category(theme)
 
-            # few-shot（X島原のみ）
-            few_shot = random.sample(few_shot_pool, min(3, len(few_shot_pool))) if platform == "x" and account == "shimahara" else []
+            # few-shot（X島原のみ） + 2026-04-12: learning_feedback_loop から
+            # エンゲージメント上位の実投稿を最大 2 件まで注入 (platform別)
+            few_shot = (
+                random.sample(few_shot_pool, min(3, len(few_shot_pool)))
+                if platform == "x" and account == "shimahara"
+                else []
+            )
+            try:
+                from tools.learning_feedback_loop import load_learned_examples
+                learned = load_learned_examples(platform, account)
+                # 上位 2 件を few_shot に混ぜる (テンプレ投稿は既に除外済み)
+                for _ex in learned[:2]:
+                    _txt = (_ex.get("content") or "").strip()
+                    if _txt and _txt not in few_shot:
+                        few_shot.append(_txt[:200])
+            except Exception as _le:
+                logger.debug(f"learned_examples 読込失敗(続行): {_le}")
 
             # V2: テーマに関連する素材を選定（LLMはこの素材だけで書く）
             _materials = []

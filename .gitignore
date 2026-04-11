@@ -24,6 +24,9 @@ strategy/sns_platform_voices.py
 
 # 拡散戦略
 strategy/diffusion_execution_plan.md
+
+# 学習フィードバック (実投稿内容を含むためローカル保持)
+strategy/learned_examples.json
 *.key
 
 # ===== Python =====
