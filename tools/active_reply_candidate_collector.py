@@ -104,10 +104,11 @@ async def collect_active_reply_candidates() -> dict:
         "reason": "",
     }
 
-    # X Credit Guard: 402 halt 中ならスキップ
+    # X Credit Guard: bearer token は syutain 側の project に紐づくので
+    # syutain project が halt 中ならスキップ
     try:
         from tools.x_credit_guard import is_halted
-        if await is_halted():
+        if await is_halted(project="syutain"):
             stats["reason"] = "x_credit_guard_halted"
             logger.info("active_reply_collector: credit_guard halt 中、スキップ")
             return stats
@@ -142,11 +143,14 @@ async def collect_active_reply_candidates() -> dict:
         except Exception as e:
             logger.warning(f"search failed {query!r}: {e}")
             stats["errors"] += 1
-            # 402 検出で credit_guard 発動し以降は skip
+            # 402 検出で credit_guard 発動 (bearer = syutain project)
             try:
                 from tools.x_credit_guard import is_402_error, register_402
                 if is_402_error(e):
-                    await register_402(endpoint_hint="search_recent_tweets")
+                    await register_402(
+                        endpoint_hint="search_recent_tweets",
+                        project="syutain",
+                    )
                     stats["reason"] = "credit_402_halt"
                     return stats
             except Exception:

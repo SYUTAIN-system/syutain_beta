@@ -354,11 +354,14 @@ async def run_active_reply_cycle(dry_run: bool = False) -> dict:
         "reason": "", "dry_run": dry_run, "previews": [],
     }
 
-    # X Credit Guard: 402 halt 中ならスキップ
+    # X Credit Guard: 投稿は shimahara project、search は syutain project。
+    # shimahara が halt ならそもそもリプ投下不可なので cycle skip。
+    # syutain (bearer) が halt でも、既存の active_reply_candidates を使うだけ
+    # なら問題ないので cycle は継続する (新規収集は別ジョブで別チェック)。
     try:
         from tools.x_credit_guard import is_halted
-        if not dry_run and await is_halted():
-            stats["reason"] = "x_credit_guard_halted"
+        if not dry_run and await is_halted(project="shimahara"):
+            stats["reason"] = "x_credit_guard_halted_shimahara"
             return stats
     except Exception:
         pass

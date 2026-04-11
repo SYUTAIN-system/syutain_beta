@@ -207,10 +207,10 @@ async def execute_approved_x(
         in_reply_to_tweet_id: 指定するとリプライとして投稿
         quote_tweet_id: 指定すると引用リツイートとして投稿 (in_reply_to と排他)
     """
-    # X Credit Guard: 402 halt 中なら即 skip
+    # X Credit Guard: 402 halt 中なら即 skip (account 別にチェック)
     try:
         from tools.x_credit_guard import is_halted
-        if await is_halted():
+        if await is_halted(project=account):
             logger.warning(f"X投稿 skip: credit_guard halt 中 (account={account})")
             return {"success": False, "reason": "x_credit_guard_halted"}
     except Exception:
@@ -275,11 +275,14 @@ async def execute_approved_x(
         return await _post_x_direct(content, creds)
     except Exception as e:
         logger.error(f"X承認済み投稿失敗({creds['handle']}): {e}")
-        # 402 検出で credit_guard 発動
+        # 402 検出で credit_guard 発動 (account 別)
         try:
             from tools.x_credit_guard import is_402_error, register_402
             if is_402_error(e):
-                await register_402(endpoint_hint=f"create_tweet/{account}")
+                await register_402(
+                    endpoint_hint=f"create_tweet/{account}",
+                    project=account,
+                )
         except Exception:
             pass
         try:

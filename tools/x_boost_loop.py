@@ -187,11 +187,12 @@ async def run_boost_cycle() -> dict:
 
     stats = {"candidates": 0, "boosted": 0, "skipped": 0, "reason": ""}
 
-    # X Credit Guard: 402 halt 中ならスキップ
+    # X Credit Guard: shimahara / syutain の少なくとも片方が生きていれば続行。
+    # 実際の投稿時に execute_approved_x が account 別 guard を再チェックする。
     try:
         from tools.x_credit_guard import is_halted
-        if await is_halted():
-            stats["reason"] = "x_credit_guard_halted"
+        if await is_halted(project="shimahara") and await is_halted(project="syutain"):
+            stats["reason"] = "x_credit_guard_halted_both"
             return stats
     except Exception:
         pass

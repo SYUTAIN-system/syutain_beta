@@ -173,6 +173,17 @@ async def _collect_viral_candidates() -> list[dict]:
             )
         except Exception as e:
             logger.warning(f"quote_rt search failed {query!r}: {e}")
+            # 402 検出で credit_guard 発動 (bearer = syutain project)
+            try:
+                from tools.x_credit_guard import is_402_error, register_402
+                if is_402_error(e):
+                    await register_402(
+                        endpoint_hint="search_recent_tweets/quote_rt",
+                        project="syutain",
+                    )
+                    return candidates  # 残りの query を回さず早期終了
+            except Exception:
+                pass
             continue
 
         users_by_id: dict[str, Any] = {}
@@ -360,11 +371,12 @@ async def run_quote_rt_cycle(dry_run: bool = False) -> dict:
         "dry_run": dry_run, "previews": [],
     }
 
-    # X Credit Guard: 402 halt 中ならスキップ
+    # X Credit Guard: この loop は search (bearer=syutain project) に依存する。
+    # search できないと候補が得られないので、syutain 側が halt なら skip。
     try:
         from tools.x_credit_guard import is_halted
-        if await is_halted():
-            stats["reason"] = "x_credit_guard_halted"
+        if await is_halted(project="syutain"):
+            stats["reason"] = "x_credit_guard_halted_search"
             return stats
     except Exception:
         pass
