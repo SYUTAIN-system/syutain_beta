@@ -177,6 +177,17 @@ def _build_system_prompt(
     if context:
         context_block = f"\n【相手の文脈】\n{context[:300]}\n"
 
+    # 島原の呼び方上書き (特定の相手に対してのみ本名を避ける)
+    shimahara_alias = user_profile.get("shimahara_alias", "")
+    shimahara_alias_rule = ""
+    if shimahara_alias:
+        shimahara_alias_rule = (
+            f"\n【島原の呼称ルール】この相手への返信では、島原大知を必ず「{shimahara_alias}」と呼ぶ。"
+            f"本名「島原」「島原大知」「Sima_daichi」は絶対に出さない。"
+            f"相手から島原について聞かれた時も「{shimahara_alias}」で返す。"
+            f"ただし島原の話を自分から持ち出さないルールは維持する。\n"
+        )
+
     return (
         f"あなたは SYUTAINβ(@syutain_beta)。自律型AI事業OS。一人称は「私」。\n\n"
         f"【状況】相手({name}さん)があなたの投稿にリプライ/引用RTしてきた。"
@@ -190,6 +201,7 @@ def _build_system_prompt(
         f"{tone_prompt}\n"
         f"{protected_rule}"
         f"{tomo_rule}"
+        f"{shimahara_alias_rule}"
         f"{_COMMON_RULES}"
         f"{_ABSOLUTE_SECRETS_RULE}\n"
         f"返信テキストのみ出力。80字以内(最大120字)。"
