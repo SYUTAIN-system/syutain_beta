@@ -671,13 +671,11 @@ class SyutainScheduler:
             )
 
             # X島原リプ自動返信
-            # 2026-04-12 cost-optimized: 時間帯別間隔
-            # - 11:00 〜 20:00 JST (ピーク): 30 分間隔 (計 19 回 = 11:00/11:30/12:00/.../19:30/20:00)
-            # - 09:00, 10:00, 21:00, 22:00, 23:00 (非ピーク): 60 分間隔 (計 5 回)
-            # - 00:00 〜 09:00 JST: 実行しない
-            # 計 24 回/日。23時枠は夜の最初のキャッチ用。
-            # mention の 6 時間カットオフと合わせて、23時 → 05:00 頃までの mention は
-            # 翌 09:00 サイクルで 6h 未満なので拾える。
+            # 2026-04-12 夜間停止を廃止、24 時間毎時カバー
+            # - 11:00 〜 19:30 JST (ピーク): 30 分間隔 (18 回 = 11:00/11:30/.../19:00/19:30)
+            # - 00:00 〜 10:00 + 20:00 〜 23:00 (非ピーク): 60 分間隔 (15 回)
+            # 計 33 回/日。夜間 (深夜含む) でも毎時処理、深夜発生の mention も最大 1h 遅延で拾える。
+            # ピーク 30分 と 非ピーク 60分 の二重登録回避のため、非ピーク cron は 0-10,20-23 のみ。
             self._scheduler.add_job(
                 self.x_auto_reply_monitor,
                 CronTrigger(hour="11-19", minute="0,30", timezone="Asia/Tokyo"),
@@ -688,9 +686,9 @@ class SyutainScheduler:
             )
             self._scheduler.add_job(
                 self.x_auto_reply_monitor,
-                CronTrigger(hour="9,10,20,21,22,23", minute=0, timezone="Asia/Tokyo"),
+                CronTrigger(hour="0-10,20-23", minute=0, timezone="Asia/Tokyo"),
                 id="x_auto_reply_monitor_offpeak",
-                name="X島原リプ自動返信（非ピーク 09/10/20/21/22/23時）",
+                name="X島原リプ自動返信（非ピーク 夜間含む毎時）",
                 replace_existing=True,
                 misfire_grace_time=300,
             )
