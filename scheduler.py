@@ -673,9 +673,11 @@ class SyutainScheduler:
             # X島原リプ自動返信
             # 2026-04-12 cost-optimized: 時間帯別間隔
             # - 11:00 〜 20:00 JST (ピーク): 30 分間隔 (計 19 回 = 11:00/11:30/12:00/.../19:30/20:00)
-            # - 09:00, 10:00, 21:00, 22:00 (非ピーク): 60 分間隔 (計 4 回)
-            # - 23:00 〜 09:00 JST: 実行しない (メソッド内でも旧 skip 残す)
-            # 計 23 回/日 → 従来 42 回/日 から約半減。旧 API 消費 $0.63 → 推定 $0.35
+            # - 09:00, 10:00, 21:00, 22:00, 23:00 (非ピーク): 60 分間隔 (計 5 回)
+            # - 00:00 〜 09:00 JST: 実行しない
+            # 計 24 回/日。23時枠は夜の最初のキャッチ用。
+            # mention の 6 時間カットオフと合わせて、23時 → 05:00 頃までの mention は
+            # 翌 09:00 サイクルで 6h 未満なので拾える。
             self._scheduler.add_job(
                 self.x_auto_reply_monitor,
                 CronTrigger(hour="11-19", minute="0,30", timezone="Asia/Tokyo"),
@@ -686,9 +688,9 @@ class SyutainScheduler:
             )
             self._scheduler.add_job(
                 self.x_auto_reply_monitor,
-                CronTrigger(hour="9,10,20,21,22", minute=0, timezone="Asia/Tokyo"),
+                CronTrigger(hour="9,10,20,21,22,23", minute=0, timezone="Asia/Tokyo"),
                 id="x_auto_reply_monitor_offpeak",
-                name="X島原リプ自動返信（非ピーク 09/10/20/21/22時）",
+                name="X島原リプ自動返信（非ピーク 09/10/20/21/22/23時）",
                 replace_existing=True,
                 misfire_grace_time=300,
             )
@@ -4265,15 +4267,12 @@ class SyutainScheduler:
             logger.error(f"grok_x_research_evening 失敗: {e}")
 
     async def x_auto_reply_monitor(self):
-        """X島原リプ自動返信（20分間隔、夜間は1時間に1回）"""
+        """X島原リプ自動返信.
+
+        2026-04-12: 旧 IntervalTrigger(20min) + 夜間スキップロジック を廃止。
+        Cron スケジュールで時間帯制御 (peak 30min / offpeak 60min / 23時枠あり)。
+        """
         try:
-            from datetime import datetime, timezone, timedelta
-            JST = timezone(timedelta(hours=9))
-            now_jst = datetime.now(JST)
-            # 夜間（23:00-09:00）は1時間に1回のみ実行（20分間隔の3回中2回をスキップ）
-            if now_jst.hour < 9 or now_jst.hour >= 23:
-                if now_jst.minute >= 20:  # 毎時00分の回だけ実行、20分/40分はスキップ
-                    return
             from tools.x_mention_monitor import check_and_reply
             result = await check_and_reply()
             if result.get("replied", 0) > 0:

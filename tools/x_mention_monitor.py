@@ -477,11 +477,20 @@ async def check_and_reply():
         if await _is_already_replied(tweet_id):
             continue
 
-        # 古すぎるツイートはスキップ（60分以上前）
+        # 古すぎるツイートはスキップ
+        # 2026-04-12: 60分 → 6時間に拡張
+        # cron 間隔が最大 60分 (非ピーク) なので、その間に来た mention は
+        # 次回サイクルで必ず拾える必要がある。さらに scheduler ダウンタイム
+        # (再起動/credit枯渇/障害) を考慮して余裕を持って 6 時間まで拾う。
+        # 重複返信は x_reply_log UNIQUE 制約 + _is_already_replied で構造防止。
+        _MENTION_MAX_AGE_SEC = 6 * 3600
         try:
             created = datetime.fromisoformat(trigger["created_at"].replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - created).total_seconds() > 3600:
-                # ただし初回起動時は古いものもスキップするだけで記録はしない
+            age_sec = (datetime.now(timezone.utc) - created).total_seconds()
+            if age_sec > _MENTION_MAX_AGE_SEC:
+                logger.info(
+                    f"mention skip (too old {age_sec/3600:.1f}h): id={tweet_id} @{trigger.get('_author_username','?')}"
+                )
                 continue
         except Exception:
             pass
