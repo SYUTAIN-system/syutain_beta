@@ -172,6 +172,7 @@ def _build_system_prompt(
     user_profile: dict = None,
     interaction_count: int = 0,
     trigger_text: str = "",
+    deep_profile: dict | None = None,
 ) -> str:
     """ユーザープロファイルに応じた system prompt を構築する"""
     user_profile = user_profile or {}
@@ -215,6 +216,57 @@ def _build_system_prompt(
             f"ただし島原の話を自分から持ち出さないルールは維持する。\n"
         )
 
+    # 深層プロファイル (過去ツイート分析から生成、2026-04-12 追加)
+    # persona_memory.category='deep_profile' を load して system prompt に注入。
+    # 「なんで知ってるの?」レベルの把握感を演出するために、memorable_facts と
+    # tone_markers、primary_interests、on_* を system に埋め込む。
+    deep_profile_block = ""
+    if deep_profile and isinstance(deep_profile, dict):
+        lines = [f"\n【{name}さんの深層プロファイル (過去ツイート分析)】"]
+        if "core_traits" in deep_profile:
+            lines.append(f"性格: {', '.join(deep_profile['core_traits'][:5])}")
+        if "values" in deep_profile:
+            lines.append(f"価値観: {', '.join(deep_profile['values'][:5])}")
+        if "worldview" in deep_profile:
+            lines.append(f"世界観: {deep_profile['worldview'][:200]}")
+        if "dominant_mood" in deep_profile:
+            lines.append(f"気分: {deep_profile['dominant_mood'][:150]}")
+        if "tone_markers" in deep_profile:
+            lines.append(f"口癖: {', '.join(deep_profile['tone_markers'][:15])}")
+        if "tone_description" in deep_profile:
+            lines.append(f"文体: {deep_profile['tone_description'][:200]}")
+        if "primary_interests" in deep_profile:
+            lines.append(f"関心領域: {', '.join(deep_profile['primary_interests'][:8])}")
+        if "technical_skills" in deep_profile:
+            lines.append(f"スキル: {', '.join(deep_profile['technical_skills'][:8])}")
+        if "dislikes" in deep_profile:
+            lines.append(f"嫌い: {', '.join(deep_profile['dislikes'][:5])}")
+        if "on_ai" in deep_profile:
+            lines.append(f"AI 観: {deep_profile['on_ai'][:200]}")
+        if "on_3dcg" in deep_profile:
+            lines.append(f"業界観: {deep_profile['on_3dcg'][:200]}")
+        if "on_people" in deep_profile:
+            lines.append(f"対人観: {deep_profile['on_people'][:200]}")
+        if "on_own_work" in deep_profile:
+            lines.append(f"仕事観: {deep_profile['on_own_work'][:200]}")
+        if "how_to_engage" in deep_profile:
+            lines.append(f"接し方: {deep_profile['how_to_engage'][:250]}")
+        if "topics_that_light_up" in deep_profile:
+            lines.append(f"食いつく話題: {', '.join(deep_profile['topics_that_light_up'][:8])}")
+        if "avoid_these" in deep_profile:
+            lines.append(f"避ける話題: {', '.join(deep_profile['avoid_these'][:5])}")
+        if "memorable_facts" in deep_profile:
+            lines.append("記憶している具体情報 (相手を驚かせる素材):")
+            for f in deep_profile["memorable_facts"][:12]:
+                lines.append(f"- {f[:150]}")
+        lines.append(
+            "★上記の情報を使うのは 3 割程度 (毎回全部出さない、波を持たせる)。"
+            "使う時は「調べた」「把握してる」と言わず、自然に文脈の一部として織り込む。"
+            "知りすぎ演出 > 相手の実際の発言への直接反応 の優先順位で、"
+            "まず相手の発言に応えて、そのついでに深層情報が匂う程度がベスト。"
+        )
+        deep_profile_block = "\n".join(lines) + "\n"
+
     return (
         f"あなたは SYUTAINβ(@syutain_beta)。自律型AI事業OS。一人称は「私」。\n\n"
         f"【状況】相手({name}さん)があなたの投稿にリプライ/引用RTしてきた。"
@@ -225,6 +277,7 @@ def _build_system_prompt(
         f"できない: 物理作業、人間の体験(食事/睡眠/外出)、物の制作。\n"
         f"相手の物理体験を自分の体験として語るな。観察者として振る舞え。\n"
         f"{context_block}"
+        f"{deep_profile_block}"
         f"{tone_prompt}\n"
         f"{protected_rule}"
         f"{tomo_rule}"
@@ -322,13 +375,38 @@ async def _get_persona_facts(scope: str = "daichi") -> list[str]:
             rows = await conn.fetch(
                 """SELECT content, category FROM persona_memory
                 WHERE (scope = $1 OR (category = 'fact' AND scope IN ('daichi', $1)))
-                AND category NOT IN ('taboo', 'system')
+                AND category NOT IN ('taboo', 'system', 'deep_profile')
                 ORDER BY priority_tier DESC, RANDOM() LIMIT 8""",
                 scope,
             )
             return [(r["content"] or "")[:150] for r in rows if r["content"]]
     except Exception:
         return []
+
+
+async def _get_deep_profile(scope: str) -> dict | None:
+    """persona_memory.category='deep_profile' を取得 (JSON デコード済み).
+
+    2026-04-12: 過去ツイート分析による人格プロファイル。
+    tone_match_respectful トーンでの返信時に、相手の人柄・口癖・
+    関心領域・memorable_facts を system prompt に注入するために使う。
+    """
+    try:
+        from tools.db_pool import get_connection
+        import json
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                """SELECT content FROM persona_memory
+                   WHERE scope = $1 AND category = 'deep_profile'
+                   ORDER BY updated_at DESC LIMIT 1""",
+                scope,
+            )
+            if not row or not row["content"]:
+                return None
+            return json.loads(row["content"])
+    except Exception as e:
+        logger.debug(f"deep_profile 取得失敗 scope={scope}: {e}")
+        return None
 
 
 async def generate_reply(
@@ -347,6 +425,9 @@ async def generate_reply(
     user_profile = user_profile or {}
     scope = user_profile.get("scope", "daichi")
     persona_facts = await _get_persona_facts(scope=scope)
+
+    # 深層プロファイル (過去ツイート分析、存在する相手だけ)
+    deep_profile = await _get_deep_profile(scope=scope)
 
     # interaction_count を DB から取得(過去の掛け合い回数)
     interaction_count = 0
@@ -388,6 +469,7 @@ async def generate_reply(
         user_profile=user_profile,
         interaction_count=interaction_count,
         trigger_text=trigger_text,
+        deep_profile=deep_profile,
     )
     user_prompt = _build_user_prompt(
         trigger_text=trigger_text,
