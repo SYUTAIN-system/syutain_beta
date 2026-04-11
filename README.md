@@ -173,8 +173,8 @@ syutain_beta/
 
 | Metric | Value |
 |--------|-------|
-| LLM Calls | 14,331 |
-| Total Cost | ¥1,635 |
-| Events Logged | 54,231 |
-| SNS Posts | 691 |
-| Last Updated | 2026-04-10 09:30 JST |
+| LLM Calls | 14,815 |
+| Total Cost | ¥1,742 |
+| Events Logged | 57,494 |
+| SNS Posts | 722 |
+| Last Updated | 2026-04-11 09:30 JST |
