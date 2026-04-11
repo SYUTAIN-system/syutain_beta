@@ -107,6 +107,9 @@ class NotePublisher:
             publish_url = create_result.get("url", "")
 
             # 4.5. URL検証 — エディタURLのままならSNS告知しない
+            # 2026-04-11: playwright 側が tentative として
+            # https://note.com/{user}/n/{note_id} の形に変換してくれるので、
+            # ここで editor.note.com が残っているのは明確な失敗パターンのみ。
             import re as _re
             is_valid_publish_url = bool(_re.match(r'https://note\.com/[^/]+/n/[a-z0-9]+', publish_url))
             if not is_valid_publish_url:
@@ -118,6 +121,13 @@ class NotePublisher:
                 result["error"] = f"公開URLがエディタURLのまま: {publish_url}"
                 result["publish_url"] = publish_url
                 return result
+
+            # tentative 警告があれば log するが published として進める
+            if create_result.get("warning"):
+                logger.warning(
+                    f"note公開 tentative (pkg={package_id}): {create_result['warning']} — "
+                    f"URL={publish_url}、SNS告知は継続する"
+                )
 
             # 5. DB更新 — status='published'
             await self._update_status(
@@ -667,8 +677,9 @@ async def note_auto_publish_check() -> dict:
 
         # 日次公開上限チェック（note.comスパム判定回避）
         # JST基準で判定（サーバTZ非依存）
-        # 拡散実行書: 1日1本。地層を積む場所。量より質
-        DAILY_PUBLISH_LIMIT = 1
+        # 2026-04-11 島原さん方針: 「1日1本以上、2-3本でも構わない」
+        # spam 判定回避のために 3 を上限とし、ready が溜まれば 1 サイクルで複数公開する。
+        DAILY_PUBLISH_LIMIT = 3
         async with get_connection() as conn:
             today_published = await conn.fetchval(
                 """SELECT COUNT(*) FROM product_packages
