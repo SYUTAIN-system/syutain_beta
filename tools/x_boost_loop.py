@@ -65,13 +65,19 @@ def _extract_tweet_id_from_url(url: str | None) -> str | None:
 
 
 async def _count_today_boost_replies() -> int:
-    """当日の boost reply 件数(JST基準)"""
+    """当日の boost reply 成功件数(JST基準).
+
+    2026-04-11 修正: 以前は status を問わずカウントしていたため、失敗した
+    attempt も cap に計上されて、6 件連続失敗で以降全サイクルが daily_cap
+    でスキップされていた。成功分 (status='replied') のみをカウントする。
+    """
     try:
         from tools.db_pool import get_connection
         async with get_connection() as conn:
             row = await conn.fetchrow(
                 """SELECT count(*) as cnt FROM x_reply_log
                    WHERE trigger_type = 'boost_30min'
+                     AND status = 'replied'
                      AND (created_at AT TIME ZONE 'Asia/Tokyo')::date
                          = (NOW() AT TIME ZONE 'Asia/Tokyo')::date"""
             )
@@ -180,6 +186,15 @@ async def run_boost_cycle() -> dict:
     from tools.db_pool import get_connection
 
     stats = {"candidates": 0, "boosted": 0, "skipped": 0, "reason": ""}
+
+    # X Credit Guard: 402 halt 中ならスキップ
+    try:
+        from tools.x_credit_guard import is_halted
+        if await is_halted():
+            stats["reason"] = "x_credit_guard_halted"
+            return stats
+    except Exception:
+        pass
 
     # 日次上限
     today = await _count_today_boost_replies()

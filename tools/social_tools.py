@@ -193,9 +193,29 @@ async def post_to_x(content: str, account: str = "syutain", skip_approval: bool 
         return {"success": False, "reason": str(e)}
 
 
-async def execute_approved_x(content: str, account: str = "syutain", in_reply_to_tweet_id: str = None) -> dict:
+async def execute_approved_x(
+    content: str,
+    account: str = "syutain",
+    in_reply_to_tweet_id: str = None,
+    quote_tweet_id: str = None,
+) -> dict:
     """承認済みX投稿を実行（承認チェックをバイパス — 承認済みキューからのみ呼ぶこと）
-    in_reply_to_tweet_id: 指定するとリプライとして投稿"""
+
+    Args:
+        content: 投稿テキスト
+        account: "syutain" or "shimahara"
+        in_reply_to_tweet_id: 指定するとリプライとして投稿
+        quote_tweet_id: 指定すると引用リツイートとして投稿 (in_reply_to と排他)
+    """
+    # X Credit Guard: 402 halt 中なら即 skip
+    try:
+        from tools.x_credit_guard import is_halted
+        if await is_halted():
+            logger.warning(f"X投稿 skip: credit_guard halt 中 (account={account})")
+            return {"success": False, "reason": "x_credit_guard_halted"}
+    except Exception:
+        pass
+
     creds = _get_x_credentials(account)
 
     # 日本語150字制限（文が途中で切れないよう文末で切る）
@@ -229,6 +249,8 @@ async def execute_approved_x(content: str, account: str = "syutain", in_reply_to
         tweet_kwargs = {"text": content}
         if in_reply_to_tweet_id:
             tweet_kwargs["in_reply_to_tweet_id"] = in_reply_to_tweet_id
+        if quote_tweet_id:
+            tweet_kwargs["quote_tweet_id"] = quote_tweet_id
         # 2026-04-11: reply_settings を明示しない = X API デフォルト (誰でも返信可)。
         # 以前 "everyone" を指定したら 400 BadRequest になった。X API v2 の valid 値は
         # [following, mentionedUsers, subscribers, verified] のみで "everyone" は無い。
@@ -253,6 +275,13 @@ async def execute_approved_x(content: str, account: str = "syutain", in_reply_to
         return await _post_x_direct(content, creds)
     except Exception as e:
         logger.error(f"X承認済み投稿失敗({creds['handle']}): {e}")
+        # 402 検出で credit_guard 発動
+        try:
+            from tools.x_credit_guard import is_402_error, register_402
+            if is_402_error(e):
+                await register_402(endpoint_hint=f"create_tweet/{account}")
+        except Exception:
+            pass
         try:
             from tools.event_logger import log_event
             await log_event(

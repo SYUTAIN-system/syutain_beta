@@ -354,6 +354,15 @@ async def run_active_reply_cycle(dry_run: bool = False) -> dict:
         "reason": "", "dry_run": dry_run, "previews": [],
     }
 
+    # X Credit Guard: 402 halt 中ならスキップ
+    try:
+        from tools.x_credit_guard import is_halted
+        if not dry_run and await is_halted():
+            stats["reason"] = "x_credit_guard_halted"
+            return stats
+    except Exception:
+        pass
+
     # 1. 時間帯
     now_jst = datetime.now(JST)
     if not dry_run and (now_jst.hour < ACTIVE_HOUR_START or now_jst.hour >= ACTIVE_HOUR_END):

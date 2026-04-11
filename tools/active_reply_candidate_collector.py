@@ -104,6 +104,16 @@ async def collect_active_reply_candidates() -> dict:
         "reason": "",
     }
 
+    # X Credit Guard: 402 halt 中ならスキップ
+    try:
+        from tools.x_credit_guard import is_halted
+        if await is_halted():
+            stats["reason"] = "x_credit_guard_halted"
+            logger.info("active_reply_collector: credit_guard halt 中、スキップ")
+            return stats
+    except Exception:
+        pass
+
     try:
         client = _build_client()
     except Exception as e:
@@ -132,6 +142,15 @@ async def collect_active_reply_candidates() -> dict:
         except Exception as e:
             logger.warning(f"search failed {query!r}: {e}")
             stats["errors"] += 1
+            # 402 検出で credit_guard 発動し以降は skip
+            try:
+                from tools.x_credit_guard import is_402_error, register_402
+                if is_402_error(e):
+                    await register_402(endpoint_hint="search_recent_tweets")
+                    stats["reason"] = "credit_402_halt"
+                    return stats
+            except Exception:
+                pass
             continue
 
         users_by_id: dict[str, Any] = {}
