@@ -139,14 +139,14 @@ fi
 cd "$PROJECT_DIR"
 if ! git worktree add "$WORKTREE_DIR" -b "$BRANCH_NAME" 2>>"$LOG_FILE"; then
     log "ERROR: Failed to create worktree for task $TASK_ID"
-    # Mark task as failed
+    # Mark task as failed (2026-04-11: column is completed_at, not updated_at)
     cd "$PROJECT_DIR" && python3 -c "
 import asyncio
 from tools.db_pool import get_connection, init_pool
 async def fail():
     await init_pool(min_size=1, max_size=2)
     async with get_connection() as conn:
-        await conn.execute('UPDATE claude_code_queue SET status=\$1, updated_at=NOW() WHERE id=\$2', 'failed', $TASK_ID)
+        await conn.execute('UPDATE claude_code_queue SET status=\$1, completed_at=NOW() WHERE id=\$2', 'failed', $TASK_ID)
 asyncio.run(fail())
 " 2>/dev/null
     exit 1
@@ -159,6 +159,29 @@ from pdl.file_guard import get_forbidden_files
 forbidden = get_forbidden_files()
 print(' '.join(forbidden))
 " > "$FORBIDDEN_FILE" 2>/dev/null || echo "" > "$FORBIDDEN_FILE"
+
+# Ensure git has a usable credential helper for non-interactive push.
+# macOS default (osxkeychain) requires user-session Keychain access which
+# cron does not have. Configure a one-shot PAT-based helper backed by gh.
+if ! git -C "$WORKTREE_DIR" config credential.helper >/dev/null 2>&1; then
+    # nothing to do at the worktree level — repo-wide config inherited
+    :
+fi
+# Prefer gh's credential helper if gh is available and authenticated. This
+# uses the token stored under ~/.config/gh which works from cron.
+if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
+    GIT_ASKPASS_GH=$(mktemp 2>/dev/null || echo "/tmp/pdl_askpass_$$.sh")
+    cat > "$GIT_ASKPASS_GH" <<'ASKPASS'
+#!/bin/bash
+case "$1" in
+    Username*) echo "token" ;;
+    Password*) gh auth token ;;
+esac
+ASKPASS
+    chmod +x "$GIT_ASKPASS_GH"
+    export GIT_ASKPASS="$GIT_ASKPASS_GH"
+    trap 'rm -f "$LOCK_FILE" "$GIT_ASKPASS_GH"' EXIT
+fi
 
 FORBIDDEN_LIST=$(cat "$FORBIDDEN_FILE")
 
@@ -343,22 +366,11 @@ asyncio.run(notify())
 " 2>/dev/null || log "WARN: Discord notification failed"
             fi
         else
-            log "WARN: PR creation failed, commit stays on branch $BRANCH_NAME"
-
-            # Fallback notification — commit succeeded but PR failed
-            cd "$PROJECT_DIR" && python3 -c "
-import asyncio
-from tools.discord_notify import notify_discord
-async def notify():
-    await notify_discord(
-        '\U0001f527 [PDL] 自動修正完了 (PR作成失敗)\n'
-        'Task: #$TASK_ID - $(echo "$TASK_DESC" | head -c 100)\n'
-        '変更: $CHANGED_FILES\n'
-        'テスト: 全通過\n'
-        'ブランチ: $BRANCH_NAME (手動でPR作成してください)'
-    )
-asyncio.run(notify())
-" 2>/dev/null || log "WARN: Discord notification failed"
+            # 2026-04-11: PR creation failures are common in non-interactive cron
+            # runs (git credential helper unavailable, branch already exists, etc)
+            # and were spamming Discord every 10 min. Silence the notification and
+            # log only — aggregated status is available via pdl_summary_report job.
+            log "WARN: PR creation failed, commit stays on branch $BRANCH_NAME (silent — aggregated in daily summary)"
         fi
 
     else
@@ -366,23 +378,11 @@ asyncio.run(notify())
     fi
 else
     FAIL_DETAIL=$(echo "$TEST_RESULT" | cut -d: -f2-)
-    log "TEST FAILED: $FAIL_DETAIL — changes discarded"
+    log "TEST FAILED: $FAIL_DETAIL — changes discarded (silent — aggregated in daily summary)"
     FINAL_STATUS="failed"
-
-    # Notify test failure
-    cd "$PROJECT_DIR" && python3 -c "
-import asyncio
-from tools.discord_notify import notify_discord
-async def notify():
-    await notify_discord(
-        '\u274c [PDL] テスト失敗: task #$TASK_ID - $(echo "$TASK_DESC" | head -c 100)\n'
-        '失敗ステージ: $FAIL_DETAIL'
-    )
-asyncio.run(notify())
-" 2>/dev/null || true
 fi
 
-# Update task status in DB
+# Update task status in DB (2026-04-11: column is completed_at, not updated_at)
 cd "$PROJECT_DIR" && python3 -c "
 import asyncio, json, sys
 from tools.db_pool import get_connection, init_pool
@@ -390,7 +390,7 @@ async def complete():
     await init_pool(min_size=1, max_size=2)
     async with get_connection() as conn:
         await conn.execute(
-            'UPDATE claude_code_queue SET status=\$1, updated_at=NOW() WHERE id=\$2',
+            'UPDATE claude_code_queue SET status=\$1, completed_at=NOW() WHERE id=\$2',
             '$FINAL_STATUS', $TASK_ID
         )
 asyncio.run(complete())

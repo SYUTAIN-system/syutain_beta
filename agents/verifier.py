@@ -784,7 +784,13 @@ F. 独自価値: 他では得られない視点・情報があるか
             return "low"
 
     async def _check_quality_decline(self):
-        """24h平均が7日平均を0.10以上下回っていたらエスカレーション"""
+        """24h 平均品質が 7日平均を下回っていたらログのみ記録する。
+
+        2026-04-11: PDL エスカレーションを停止。Codex が修正できる種類の問題
+        ではなく、エスカレーションすると毎回同じタスクが PDL に積まれ、Codex が
+        無意味な試行で Discord 通知を大量発生させていた。品質低下は
+        llm_router.get_avoided_models() で別途対応している。
+        """
         async with get_connection() as conn:
             r = await conn.fetchrow(
                 """SELECT
@@ -796,20 +802,11 @@ F. 独自価値: 他では得られない視点・情報があるか
             if r and r["avg_24h"] is not None and r["avg_7d"] is not None:
                 delta = float(r["avg_24h"]) - float(r["avg_7d"])
                 if delta < -0.05:
-                    # 重複防止: 直近1日以内に同じエスカレーションがなければ
-                    existing = await conn.fetchval(
-                        """SELECT COUNT(*) FROM claude_code_queue
-                           WHERE category = 'quality_decline' AND created_at > NOW() - INTERVAL '24 hours'"""
+                    logger.info(
+                        f"品質スコア低下観測: 24h平均={float(r['avg_24h']):.2f}, "
+                        f"7日平均={float(r['avg_7d']):.2f} (差={delta:.2f}) "
+                        f"— PDLエスカレーションは停止 (2026-04-11)"
                     )
-                    if existing == 0:
-                        from brain_alpha.escalation import escalate_to_queue
-                        await escalate_to_queue(
-                            category="quality_decline",
-                            description=f"品質スコア低下: 24h平均={float(r['avg_24h']):.2f}, 7日平均={float(r['avg_7d']):.2f} (差={delta:.2f})",
-                            priority="high",
-                            source_agent="verifier",
-                            auto_solvable=False,
-                        )
 
     async def _record_trace(self, task_id: str, goal_id: str = None, action: str = "",
                            reasoning: str = "", confidence: float = None, context: dict = None):

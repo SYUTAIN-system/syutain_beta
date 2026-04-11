@@ -326,19 +326,29 @@ class LearningManager:
                 },
             )
 
-            # モデル品質低下エスカレーション
+            # モデル品質低下は 2026-04-11 に PDL エスカレーションを停止。
+            # 理由: Codex がコード修正で対処できる種類の問題ではない (モデル選択の
+            # 結果であり、llm_router の設定で調整すべき)。PDL キューに積むと
+            # Codex が無意味な試行を繰り返して Discord 通知を増やすだけだった。
+            # 品質低下は llm_router の模範回避リスト (get_avoided_models) が別途
+            # ハンドリング。ここではログに記録するのみに留める。
             try:
-                for stat in model_stats:
-                    if isinstance(stat, dict) and stat.get("avg_quality") is not None:
-                        avg_q = float(stat["avg_quality"])
-                        if avg_q < 0.5 and stat.get("call_count", 0) >= 5:
-                            from brain_alpha.escalation import escalate_to_queue
-                            await escalate_to_queue(
-                                category="model_quality_decline",
-                                description=f"モデル品質低下: {stat.get('model_used', '?')} task={stat.get('task_type', '?')} avg={avg_q:.2f} (calls={stat.get('call_count', 0)})",
-                                priority="medium",
-                                source_agent="learning_manager",
-                            )
+                low_quality_models = [
+                    stat for stat in model_stats
+                    if isinstance(stat, dict)
+                    and stat.get("avg_quality") is not None
+                    and float(stat["avg_quality"]) < 0.5
+                    and stat.get("call_count", 0) >= 5
+                ]
+                if low_quality_models:
+                    logger.info(
+                        f"品質低下モデル {len(low_quality_models)}件検出 "
+                        f"(PDLエスカレーションは行わず、llm_router.get_avoided_models() で回避): "
+                        + ", ".join(
+                            f"{s.get('model_used')}/{s.get('task_type')}={float(s.get('avg_quality',0)):.2f}"
+                            for s in low_quality_models[:5]
+                        )
+                    )
             except Exception:
                 pass
 
