@@ -1,19 +1,35 @@
 """
-能動的リプの完全自動化 (shimahara アカウント)
+能動的リプの完全自動化 (shimahara アカウント) — 2026-04-11 改訂版
 
-島原さん方針「完全自動実行優先」に基づき、shimahara アカウントから
-AI/映像/VTuber 関連の他者投稿へ能動的にリプライを自動投下する。
+## 目的
+X 収益分配 (500万imp/90d) と サブスク機能 (認証済フォロワー 2,000) の要件達成。
+認証済 4桁台のクリエイターに島原アカウントが能動的に返信し、オーガニック
+インプレッションと認証済フォロワーを獲得する。
 
-方針:
-- intel_items の grok_x_research から X URL を抽出して返信候補とする
-- 日次上限、時間帯制限、ツイート鮮度の ガードを設定
-- 品質ルール(情報付与 / 経験ベース / 定型相槌禁止 / 自己宣伝禁止)をプロンプトに明記
-- 既存の x_reply_log UNIQUE(trigger_tweet_id) で同一ポストへの二重返信を構造的に防止
-- 自分のアカウント (@Sima_daichi, @syutain_beta) への返信は除外
+## 改訂点 (2026-04-11)
+従来:
+- intel_items (grok_x_research) の X URL を使用 → 大手バイアスで 100% 403 失敗
+- プロンプトが甘く、「面白いですね」「僕も〜で」等の AI 定型表現が漏れていた
+
+新版:
+- `active_reply_candidates` テーブル (tools/active_reply_candidate_collector.py が収集)
+  から候補を取得 — 認証済+4桁台+reply_settings=everyone を構造的に保証
+- few-shot に島原さん実返信例を埋め込み
+- 敬語標準 (相手との関係性判定はしない)
+- 一人称は「僕」のみ、ただし省略を優先
+- ハード禁止: 絵文字、多重感嘆符 (!!)、ハッシュタグ、宣伝URL
+- 長さ 15〜80 字、超えたら再生成
+
+## ガード
+- 同一 tweet_id への二重返信を x_reply_log UNIQUE(trigger_tweet_id) で構造的に防止
+- 同一作者への日次1件上限
+- 所有アカウント (@Sima_daichi, @syutain_beta) は blocked_authors で除外
+- dry_run モード対応 (投稿せず生成結果を返すだけ)
 """
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -27,116 +43,270 @@ JST = timezone(timedelta(hours=9))
 MAX_REPLIES_PER_DAY = 5
 ACTIVE_HOUR_START = 9
 ACTIVE_HOUR_END = 21
-MAX_TWEET_AGE_SEC = 12 * 3600  # 12時間以内のツイートのみ
+MIN_TWEET_AGE_SEC = 30 * 60       # 30分未満の即反応は機械臭いので除外
+MAX_TWEET_AGE_SEC = 8 * 3600      # 8時間以内のツイートのみ
 
 
 def _load_blocked_authors() -> set[str]:
-    """除外ハンドル: 自分の所有アカウントには絶対に返信しない。
-    env 変数から user_id / username を読み込んで construct する。
-    """
-    import os
+    """除外ハンドル: 自分の所有アカウントには絶対に返信しない。"""
     items: set[str] = set()
     for env_key in (
-        "X_SHIMAHARA_USER_ID",      # 設計者(所有者) user_id
-        "X_SHIMAHARA_USERNAME",     # 設計者 username (例: Sima_daichi)
-        "X_SYUTAIN_USER_ID",        # SYUTAINβ アカウント user_id
-        "X_SYUTAIN_USERNAME",       # SYUTAINβ アカウント username (例: syutain_beta)
+        "X_SHIMAHARA_USER_ID",
+        "X_SHIMAHARA_USERNAME",
+        "X_SYUTAIN_USER_ID",
+        "X_SYUTAIN_USERNAME",
     ):
         v = os.getenv(env_key, "").strip()
         if v:
-            items.add(v)
+            items.add(v.lower().lstrip("@"))
     return items
 
 
-_BLOCKED_AUTHORS = _load_blocked_authors()
-_BLOCKED_AUTHORS_NORM = {h.lower().lstrip("@") for h in _BLOCKED_AUTHORS}
+_BLOCKED_AUTHORS_NORM = _load_blocked_authors()
 
-# 関心トピック(keyword マッチ)
-_TOPIC_KEYWORDS = [
-    "AI", "LLM", "ChatGPT", "Claude", "Gemini", "エージェント", "生成AI",
-    "映像", "動画", "制作", "撮影", "VTuber", "AITuber", "AI映像",
-    "自動化", "個人開発", "SaaS", "ノーコード", "Build in Public",
-    "Dify", "n8n", "Anthropic", "OpenAI",
+
+# 島原さん実返信の few-shot 例 (2026-04-11 X API 取得)
+# - 敬語ベース (初対面/公式向け)
+# - 長さのレンジ 10〜90字
+# - 定型相槌禁止ではなく、使い方の参考例として
+_SHIMAHARA_REPLY_EXAMPLES = [
+    "すみません、今は僕のアカウントにしかリアクションしない設定にしておりまして…。返信するアカウントは簡単に増やせれる様にしてあるので、興味あればテスターとして追加させて頂きます！",
+    "その結果は、多分このアカウントに反映されると思います…。(上手くいけば…)",
+    "なるほど、今現状でもMCPサーバー移行して削減できるコードは24000行ぐらいらしいけど、早目に移行を考えておく。",
+    "今日の結果は明日には改善させる。明日の結果は明後日には改善させる。この繰り返し…。",
+    "もちろん、他人への返信内容も全て目を通すからね。何か問題や改善点があれば、すぐにやる。",
+    "構造不信ではないぜ…ただ、AI任せで実装しても、何処かに問題が出てくるのを潰すってだけ",
+    "近いうちに超えると思ってる。",
 ]
 
-# tweet URL からIDを抽出
-_TWEET_URL_RE = re.compile(r"https?://(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)")
 
+_ACTIVE_REPLY_SYSTEM = """あなたは島原大知(@Sima_daichi)本人として、X で初対面の相手の投稿に返信を書く。
 
-_ACTIVE_REPLY_SYSTEM = """あなたはSYUTAINβの能動的リプライ生成官。
-島原大知(@Sima_daichi)アカウントから、他者の投稿へ質の高いリプライを生成する。
+## 島原大知のプロフィール
+- 非エンジニアの個人事業主。AI を活用した事業 OS を開発中
+- 基本は敬語。相手をリスペクトする姿勢
+- 煽らない、押し付けない、売り込まない
+- ポジティブだが淡々と、自然な温度感
 
-## 島原大知の立場
-- 映像制作15年、VTuber業界8年。SYUTAINβ(自律型AI事業OS)を個人開発中
-- 非エンジニア視点でAI活用を発信
-- 4台PCで24時間動く事業OSを構築
+## 返信の書き方
+- 敬語基本 (です/ます調)。ただし過剰に堅くない
+- 一人称は省略を優先。どうしても必要な時だけ「僕」
+- 長さは 15〜80字
+- 相手の投稿内容をちゃんと読んで、空気に合わせる
+- 定型相槌 (「すごいですね」「気になります」等) を使ってもよいが、その後に必ず自分の視点を1つ足す
 
-## リプの品質基準
-1. 相手の投稿に情報を付与する。何も足さないリプは禁止
-2. 自分の経験(映像制作/VTuber/AI運用)を踏まえた実質的なコメント
-3. 定型相槌(「いいですね」「わかる」「すごい」等)のみは絶対禁止
-4. 自己宣伝が主目的のリプは禁止(SYUTAINβの宣伝を冒頭に入れるな)
-5. 80字以内(最大120字)
-6. 敬語と軽いタメ口を混ぜる。硬すぎない
+## 返信の終わり方 (超重要)
+**疑問符 (？) で終わらせない**。初対面の相手に質問を投げるのはクソリプ扱いされる。
+次のいずれかで終わらせる:
+ (a) 短い感想や同意で閉じる (「〜ですね」「〜だと思います」「〜かもしれません」)
+ (b) 相手への肯定/尊重で閉じる (「応援してます」「楽しみにしてます」「素敵な取り組みですね」)
+ (c) 自分の観察や補足で閉じる (「〜という視点が新鮮でした」「〜の流れが進みそうですね」)
+ (d) トレイルオフ (「…」) で余韻を残す
 
-## トーン
-- 冷静だが好奇心がある
-- 一歩踏み込んだ質問 or 具体体験の1行共有
-- ポエム調禁止、情景描写禁止
+## 返信の基本姿勢 (最重要)
+- **クソリプと思われないことが全て**。相手の発言を尊重し、その内容に合った反応をする
+- 相手の投稿を読まずに書いたような一般論は禁止
+- 相手の言いたいことに対して、ちゃんと反応していると伝わる内容にする
+- 知ったかぶり、上から目線、余計な指摘は絶対に書かない
+- 「いいね」だけでは伝えきれない一言を、礼儀正しく添えるイメージ
+
+## ハード禁止事項
+- 絵文字は一切使わない
+- ハッシュタグ禁止
+- URL 禁止
+- 多重感嘆符 (「!!」「！！」) 禁止
+- 「僕も〜で〜」「私も〜業界で〜」の自己経験押し付け禁止
+- 技術用語の list-down (「retopo, UV, LOD」のような並列) 禁止
+- 宣伝・自分のプロダクト誘導は書かない
+- 相手の投稿をただオウム返しにするのは禁止
+- 1つのリプで全部詰め込まない。1つの論点だけ取り上げる
 
 ## 出力
-返信テキストのみ。前置き・説明・ハッシュタグ禁止。"""
+返信テキストのみ。前置き・説明・引用符・ラベル等は書かない。"""
 
 
-def _build_active_reply_user_prompt(target_text: str, target_author: str) -> str:
+# 返信終わり方の指示候補 (毎回ランダムに1つ選ぶ。疑問は原則禁止)
+_ENDING_STRATEGIES = [
+    ("statement", "語尾は断定や感想 (「〜ですね」「〜だと思います」)。相手をちゃんと肯定する。"),
+    ("observation", "語尾は自分の観察や補足 (「〜という視点が新鮮でした」「〜の流れが見えてきそうです」)。上から目線にしない。"),
+    ("support", "語尾は肯定・尊重・応援 (「応援してます」「楽しみにしてます」「素敵な取り組みですね」)。"),
+    ("trailoff", "語尾は余韻を残す形 (「〜ですね…」「〜かもしれません…」)。"),
+]
+
+
+def _build_active_reply_user_prompt(
+    target_text: str, target_author: str, author_description: str,
+    ending_strategy: tuple[str, str] | None = None,
+) -> str:
+    examples_block = "\n".join(
+        f"例{i+1}: {ex}"
+        for i, ex in enumerate(_SHIMAHARA_REPLY_EXAMPLES)
+    )
+    if ending_strategy is None:
+        ending_strategy = random.choice(_ENDING_STRATEGIES)
+    _, ending_instruction = ending_strategy
+
     return (
-        f"# 返信相手の投稿(@{target_author})\n"
-        f"{target_text[:300]}\n\n"
+        f"# 島原さんの過去の返信例 (文体参考)\n{examples_block}\n\n"
+        f"# 返信先の相手\n"
+        f"username: @{target_author}\n"
+        f"プロフィール: {(author_description or '')[:200]}\n\n"
+        f"# 相手の投稿\n{target_text[:400]}\n\n"
         f"# タスク\n"
-        f"上記投稿に対して、上記ルールに従って質の高いリプを1件生成せよ。\n"
-        f"- 定型相槌は禁止\n"
-        f"- 情報を足すか、経験を1行足すか、具体的な問いを投げる\n"
-        f"- 80字以内\n"
-        f"- 返信テキストのみ出力"
+        f"上記投稿に対して、島原さんの文体で自然な返信を1件書け。\n"
+        f"- 15〜80字\n"
+        f"- 敬語基本\n"
+        f"- 疑問符で終わらせない\n"
+        f"- **このリプ固有のルール**: {ending_instruction}\n"
+        f"- 返信テキストのみ"
     )
 
 
-async def _get_candidate_tweets(limit: int = 30) -> list[dict]:
-    """intel_items から返信候補となる X ポストを取得"""
+# 品質チェック用 regex
+_RE_EMOJI = re.compile(
+    "[\U0001F300-\U0001F9FF\U0001FA00-\U0001FAFF\u2600-\u27BF\u2700-\u27BF]"
+)
+_RE_HASHTAG = re.compile(r"#\S+")
+_RE_URL = re.compile(r"https?://\S+")
+_RE_MULTI_EXCLAIM = re.compile(r"[!！]{2,}")
+_RE_SELF_PUSH = re.compile(r"(僕も|私も)[^。]{0,20}(映像|VTuber|AI)")
+
+
+def _quality_check(text: str) -> tuple[bool, str]:
+    """返信テキストの品質チェック。OK なら (True, ''), NG なら (False, reason)"""
+    t = (text or "").strip()
+    if not t:
+        return False, "empty"
+    if len(t) < 15:
+        return False, f"too_short ({len(t)})"
+    if len(t) > 80:
+        return False, f"too_long ({len(t)})"
+    if _RE_EMOJI.search(t):
+        return False, "emoji"
+    if _RE_HASHTAG.search(t):
+        return False, "hashtag"
+    if _RE_URL.search(t):
+        return False, "url"
+    if _RE_MULTI_EXCLAIM.search(t):
+        return False, "multi_exclaim"
+    if _RE_SELF_PUSH.search(t):
+        return False, "self_experience_push"
+    # 疑問符で終わるのは禁止 (初対面相手への質問はクソリプ扱い)
+    if t.rstrip("。 …").endswith(("？", "?")):
+        return False, "ends_with_question"
+    # 具体性チェック: ほぼ定型だけなら再生成
+    generic_only = {
+        "すごいですね": "すごいですね" in t,
+        "素敵です": "素敵です" in t,
+        "面白いですね": "面白いですね" in t,
+        "気になります": "気になります" in t,
+    }
+    matched = [k for k, v in generic_only.items() if v]
+    # どの定型相槌も使われていて、かつ文字数が少なすぎる (20字未満) なら NG
+    if matched and len(t) < 25:
+        return False, f"too_generic ({matched})"
+    return True, ""
+
+
+async def _generate_active_reply(
+    target_text: str, target_author: str, author_description: str = "",
+    max_attempts: int = 3,
+) -> str | None:
+    """LLM でリプ生成 + 品質チェック ループ"""
+    try:
+        from tools.llm_router import call_llm, choose_best_model_v6
+    except ImportError:
+        return None
+
+    sel = choose_best_model_v6(
+        task_type="sns_draft",
+        quality="medium",
+        needs_japanese=True,
+    )
+
+    last_reason = ""
+    for attempt in range(max_attempts):
+        user_prompt = _build_active_reply_user_prompt(
+            target_text, target_author, author_description, ending_strategy=None,
+        )
+
+        try:
+            result = await call_llm(
+                prompt=user_prompt,
+                system_prompt=_ACTIVE_REPLY_SYSTEM,
+                model_selection=sel,
+                temperature=0.75,
+                use_cache=False,
+            )
+        except Exception as e:
+            logger.warning(f"active_reply LLM 失敗 (attempt {attempt+1}): {e}")
+            return None
+
+        text = (result.get("text") or result.get("content") or "").strip()
+        text = re.sub(r'^["「『\s]+|["」』\s]+$', "", text)
+        text = text.strip()
+
+        ok, reason = _quality_check(text)
+        if ok:
+            return text
+        last_reason = reason
+        logger.debug(f"active_reply 再生成 (attempt {attempt+1}): reason={reason} text={text[:60]!r}")
+
+    logger.warning(f"active_reply 品質チェック 3回失敗 last={last_reason}")
+    return None
+
+
+# ---------- 候補取得 (active_reply_candidates テーブル) ----------
+
+async def _pick_candidates_from_db(limit: int) -> list[dict]:
+    """active_reply_candidates から鮮度チェック済み候補を取得"""
     from tools.db_pool import get_connection
     async with get_connection() as conn:
         rows = await conn.fetch(
-            """SELECT id, title, summary, keyword, url, importance_score, created_at
-               FROM intel_items
-               WHERE source = 'grok_x_research'
-                 AND url ~ 'https?://(twitter\\.com|x\\.com)/[^/]+/status/[0-9]+'
-                 AND created_at > NOW() - make_interval(hours => 12)
-               ORDER BY importance_score DESC, created_at DESC
-               LIMIT $1""",
-            limit,
+            """SELECT tweet_id, author_id, author_username, author_name,
+                      author_description, author_verified_type, author_followers_count,
+                      tweet_text, tweet_created_at, reply_settings
+               FROM active_reply_candidates
+               WHERE used = FALSE
+                 AND reply_settings = 'everyone'
+                 AND tweet_created_at < NOW() - make_interval(secs => $1)
+                 AND tweet_created_at > NOW() - make_interval(secs => $2)
+                 AND author_followers_count BETWEEN 1000 AND 9999
+               ORDER BY RANDOM()
+               LIMIT $3""",
+            MIN_TWEET_AGE_SEC, MAX_TWEET_AGE_SEC, limit,
         )
     return [dict(r) for r in rows]
 
 
-def _parse_tweet_url(url: str) -> tuple[str, str] | None:
-    m = _TWEET_URL_RE.search(url or "")
-    if not m:
-        return None
-    return m.group(1), m.group(2)  # (author_handle, tweet_id)
+async def _mark_candidate_used(tweet_id: str, reason: str = "replied") -> None:
+    from tools.db_pool import get_connection
+    async with get_connection() as conn:
+        await conn.execute(
+            """UPDATE active_reply_candidates
+               SET used=TRUE, used_at=NOW(), skip_reason=$2
+               WHERE tweet_id=$1""",
+            tweet_id, reason,
+        )
 
 
-def _matches_topic(item: dict) -> bool:
-    """AI/映像/VTuber 関連のトピックか判定"""
-    haystack = f"{item.get('title', '')} {item.get('summary', '')} {item.get('keyword', '')}"
-    hl = haystack.lower()
-    for kw in _TOPIC_KEYWORDS:
-        if kw.lower() in hl:
-            return True
-    return False
+async def _count_today_active_replies() -> int:
+    try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                """SELECT count(*) as cnt FROM x_reply_log
+                   WHERE trigger_type = 'active_reply_shimahara'
+                     AND status = 'replied'
+                     AND (created_at AT TIME ZONE 'Asia/Tokyo')::date
+                         = (NOW() AT TIME ZONE 'Asia/Tokyo')::date"""
+            )
+            return int(row["cnt"]) if row else 0
+    except Exception:
+        return 9999
 
 
 async def _is_already_replied_anywhere(tweet_id: str) -> bool:
-    """x_reply_log に同じ trigger_tweet_id があるかチェック"""
     try:
         from tools.db_pool import get_connection
         async with get_connection() as conn:
@@ -146,33 +316,13 @@ async def _is_already_replied_anywhere(tweet_id: str) -> bool:
             )
             return row is not None
     except Exception:
-        return True  # 安全側: エラー時はスキップ
-
-
-async def _count_today_active_replies() -> int:
-    """当日の能動的リプ件数(JST基準)"""
-    try:
-        from tools.db_pool import get_connection
-        async with get_connection() as conn:
-            row = await conn.fetchrow(
-                """SELECT count(*) as cnt FROM x_reply_log
-                   WHERE trigger_type = 'active_reply_shimahara'
-                     AND (created_at AT TIME ZONE 'Asia/Tokyo')::date
-                         = (NOW() AT TIME ZONE 'Asia/Tokyo')::date"""
-            )
-            return int(row["cnt"]) if row else 0
-    except Exception:
-        return 9999
+        return True
 
 
 async def _record_active_reply(
-    tweet_id: str,
-    author_handle: str,
-    target_text: str,
-    reply_content: str,
-    status: str = "posting",
+    tweet_id: str, author_id: str, author_handle: str,
+    target_text: str, reply_content: str, status: str = "posting",
 ) -> bool:
-    """能動的リプをx_reply_logに記録(UNIQUE制約で重複防止)"""
     from tools.db_pool import get_connection
     try:
         async with get_connection() as conn:
@@ -181,7 +331,7 @@ async def _record_active_reply(
                    (trigger_tweet_id, trigger_author_id, trigger_author_username,
                     trigger_content, trigger_type, reply_content, thread_id, depth, status)
                    VALUES ($1, $2, $3, $4, 'active_reply_shimahara', $5, $6, 0, $7)""",
-                tweet_id, "", author_handle, target_text[:500],
+                tweet_id, author_id or "", author_handle, target_text[:500],
                 reply_content[:500], tweet_id, status,
             )
         return True
@@ -193,126 +343,116 @@ async def _record_active_reply(
         return False
 
 
-async def _generate_active_reply(target_text: str, target_author: str) -> str | None:
-    """LLMでリプ生成"""
-    try:
-        from tools.llm_router import call_llm, choose_best_model_v6
-    except ImportError:
-        return None
-
-    sel = choose_best_model_v6(
-        task_type="sns_draft",
-        quality="medium",
-        needs_japanese=True,
-    )
-    try:
-        result = await call_llm(
-            prompt=_build_active_reply_user_prompt(target_text, target_author),
-            system_prompt=_ACTIVE_REPLY_SYSTEM,
-            model_selection=sel,
-            temperature=0.85,
-            use_cache=False,
-        )
-        text = (result.get("text") or result.get("content") or "").strip()
-        # ハッシュタグ除去
-        text = re.sub(r"#\S+", "", text).strip()
-        # 過剰な絵文字除去はしない(人間味のため残す)
-        # 「いいですね」だけの定型は rejection
-        if len(text) < 10:
-            return None
-        if text.lower() in ("いいですね", "すごい", "わかる", "素敵"):
-            return None
-        # 150字を超える場合は切り詰め
-        if len(text) > 150:
-            text = text[:140] + "…"
-        return text
-    except Exception as e:
-        logger.warning(f"active_reply LLM失敗: {e}")
-        return None
-
-
-async def run_active_reply_cycle() -> dict:
-    """能動的リプの1サイクル実行"""
+async def run_active_reply_cycle(dry_run: bool = False) -> dict:
+    """能動的リプの 1 サイクル実行。
+    dry_run=True の場合は投稿せず候補+返信文のリストを返す。
+    """
     from tools.social_tools import execute_approved_x
 
-    stats = {"candidates": 0, "replied": 0, "skipped": 0, "errors": 0, "reason": ""}
+    stats: dict[str, Any] = {
+        "candidates": 0, "replied": 0, "skipped": 0, "errors": 0,
+        "reason": "", "dry_run": dry_run, "previews": [],
+    }
 
-    # 1. 時間帯チェック
+    # 1. 時間帯
     now_jst = datetime.now(JST)
-    if now_jst.hour < ACTIVE_HOUR_START or now_jst.hour >= ACTIVE_HOUR_END:
+    if not dry_run and (now_jst.hour < ACTIVE_HOUR_START or now_jst.hour >= ACTIVE_HOUR_END):
         stats["reason"] = "inactive_hour"
         return stats
 
     # 2. 日次上限
-    today = await _count_today_active_replies()
-    if today >= MAX_REPLIES_PER_DAY:
-        stats["reason"] = f"daily_cap ({today}/{MAX_REPLIES_PER_DAY})"
-        return stats
-    remaining = MAX_REPLIES_PER_DAY - today
+    if not dry_run:
+        today = await _count_today_active_replies()
+        if today >= MAX_REPLIES_PER_DAY:
+            stats["reason"] = f"daily_cap ({today}/{MAX_REPLIES_PER_DAY})"
+            return stats
+        remaining = MAX_REPLIES_PER_DAY - today
+    else:
+        remaining = 5
 
-    # 3. 候補取得
-    raw_candidates = await _get_candidate_tweets(limit=30)
-    stats["candidates"] = len(raw_candidates)
-
-    # 4. フィルタリング
-    candidates: list[dict] = []
-    for item in raw_candidates:
-        parsed = _parse_tweet_url(item.get("url") or "")
-        if not parsed:
-            continue
-        author_handle, tweet_id = parsed
-        # 自分のアカウントは除外
-        if author_handle.lower().lstrip("@") in _BLOCKED_AUTHORS_NORM:
-            continue
-        # トピックマッチ
-        if not _matches_topic(item):
-            continue
-        candidates.append({
-            **item,
-            "author_handle": author_handle,
-            "tweet_id": tweet_id,
-        })
-
+    # 3. 候補
+    candidates = await _pick_candidates_from_db(limit=remaining * 4)
+    stats["candidates"] = len(candidates)
     if not candidates:
-        stats["reason"] = "no_matching_candidates"
+        stats["reason"] = "no_fresh_candidates"
         return stats
 
-    # 5. シャッフルしてランダム順に評価
-    random.shuffle(candidates)
+    # 4. フィルタ (blocked + 同一日内作者)
+    same_author_today: set[str] = set()
+    try:
+        from tools.db_pool import get_connection
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT DISTINCT lower(trigger_author_username) as u
+                   FROM x_reply_log
+                   WHERE trigger_type='active_reply_shimahara'
+                     AND (created_at AT TIME ZONE 'Asia/Tokyo')::date
+                         = (NOW() AT TIME ZONE 'Asia/Tokyo')::date"""
+            )
+            same_author_today = {r["u"] for r in rows if r["u"]}
+    except Exception:
+        pass
 
     for cand in candidates:
         if stats["replied"] >= remaining:
             break
+        if len(stats["previews"]) >= remaining and dry_run:
+            break
 
+        author_handle = cand["author_username"]
         tweet_id = cand["tweet_id"]
-        author_handle = cand["author_handle"]
-        title = cand.get("title", "") or ""
-        summary = cand.get("summary", "") or ""
-        # intel_items の summary は grok が要約したもの。ツイート本文はそのままでは無いが近似として使える
-        target_text = f"{title}: {summary}"[:300]
 
-        # Layer 2 dedup: 既に返信済みスキップ
+        if author_handle.lower() in _BLOCKED_AUTHORS_NORM:
+            stats["skipped"] += 1
+            continue
+        if author_handle.lower() in same_author_today:
+            stats["skipped"] += 1
+            continue
+
+        # dedup layer: x_reply_log
         if await _is_already_replied_anywhere(tweet_id):
             stats["skipped"] += 1
             continue
 
-        # 返信生成
-        reply_text = await _generate_active_reply(target_text, author_handle)
+        target_text = cand["tweet_text"] or ""
+        target_author = cand["author_username"]
+        author_description = cand.get("author_description", "") or ""
+
+        reply_text = await _generate_active_reply(
+            target_text, target_author, author_description,
+        )
         if not reply_text:
             stats["skipped"] += 1
             continue
 
-        # Layer 3 dedup: INSERT(UNIQUE制約)
+        if dry_run:
+            stats["previews"].append({
+                "tweet_id": tweet_id,
+                "author_username": target_author,
+                "author_followers": cand["author_followers_count"],
+                "target_text": target_text[:200],
+                "reply_text": reply_text,
+                "reply_length": len(reply_text),
+            })
+            same_author_today.add(target_author.lower())
+            continue
+
+        # 本番投稿モード
         recorded = await _record_active_reply(
-            tweet_id, author_handle, target_text, reply_text, status="posting",
+            tweet_id, cand.get("author_id", ""), target_author,
+            target_text, reply_text, status="posting",
         )
         if not recorded:
-            # UNIQUE違反 or エラー
             stats["skipped"] += 1
             continue
 
-        # X投稿
         try:
+            # 自然な遅延 (30秒〜4分のランダム)
+            delay = random.randint(30, 240)
+            logger.debug(f"active_reply: {delay}秒 待機してから投稿")
+            import asyncio
+            await asyncio.sleep(delay)
+
             result = await execute_approved_x(
                 content=reply_text,
                 account="shimahara",
@@ -330,10 +470,12 @@ async def run_active_reply_cycle() -> dict:
                     )
             except Exception:
                 pass
+            await _mark_candidate_used(tweet_id, reason="post_exception")
             continue
 
         if result.get("success"):
             stats["replied"] += 1
+            same_author_today.add(target_author.lower())
             try:
                 from tools.db_pool import get_connection
                 async with get_connection() as conn:
@@ -344,25 +486,25 @@ async def run_active_reply_cycle() -> dict:
                     )
             except Exception:
                 pass
+            await _mark_candidate_used(tweet_id, reason="replied")
             logger.info(
-                f"active_reply 成功: @{author_handle} → tweet_id={tweet_id} "
+                f"active_reply 成功: @{target_author} → tweet_id={tweet_id} "
                 f"reply_id={result.get('tweet_id', '')}"
             )
             try:
                 from tools.discord_notify import notify_discord
                 url = f"https://x.com/Sima_daichi/status/{result.get('tweet_id', '')}"
                 await notify_discord(
-                    f"💬 能動的リプ投下 (@{author_handle})\n"
+                    f"💬 能動的リプ投下 (@{target_author}, f={cand['author_followers_count']:,})\n"
                     f"相手: {target_text[:80]}\n"
-                    f"島原: {reply_text[:80]}\n{url}"
+                    f"島原: {reply_text}\n{url}"
                 )
             except Exception:
                 pass
         else:
             stats["errors"] += 1
-            # execute_approved_x は {"success": False, "reason": ...} を返す。
-            # 古い "error" キーも一応 fallback で見る。
             err = result.get("reason") or result.get("error") or "unknown"
+            logger.warning(f"active_reply 投稿失敗: {err}")
             try:
                 from tools.db_pool import get_connection
                 async with get_connection() as conn:
@@ -372,5 +514,6 @@ async def run_active_reply_cycle() -> dict:
                     )
             except Exception:
                 pass
+            await _mark_candidate_used(tweet_id, reason=f"post_failed:{str(err)[:50]}")
 
     return stats

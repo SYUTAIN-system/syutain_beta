@@ -1220,7 +1220,20 @@ class SyutainScheduler:
                 misfire_grace_time=600,
             )
 
-            # 能動的リプ自動化（10:30 / 14:30 / 18:30 JST、1日5件上限）
+            # 能動的リプ候補収集（毎日09:00 JST、X API search_recent_tweets で
+            # 認証済+4桁フォロワー+reply_settings=everyone の候補を active_reply_candidates に保存）
+            self._scheduler.add_job(
+                self.active_reply_collect_candidates,
+                CronTrigger(hour=9, minute=0, timezone="Asia/Tokyo"),
+                id="active_reply_collect_candidates",
+                name="能動的リプ候補収集（毎日09:00）",
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+
+            # 能動的リプ実行（10:30 / 14:30 / 18:30 JST、1日5件上限）
+            # 2026-04-11 再稼働: active_reply_candidates テーブルベースに刷新、
+            # reply_settings=everyone 構造的保証 + 4層dedup + プロンプト刷新で AI 感緩和
             self._scheduler.add_job(
                 self.active_reply_shimahara,
                 CronTrigger(hour="10,14,18", minute=30, timezone="Asia/Tokyo"),
@@ -5975,8 +5988,22 @@ class SyutainScheduler:
         except Exception as e:
             logger.error(f"Codex認証チェックエラー: {e}")
 
+    async def active_reply_collect_candidates(self):
+        """能動的リプ候補を X API search から収集して active_reply_candidates に保存(毎日 09:00)."""
+        try:
+            from tools.active_reply_candidate_collector import collect_active_reply_candidates
+            stats = await collect_active_reply_candidates()
+            logger.info(
+                f"能動的リプ候補収集: queries={stats['queries_run']} seen={stats['tweets_seen']} "
+                f"saved={stats['candidates_saved']} filtered={stats['filtered_out']} "
+                f"fresh={stats.get('fresh_candidates_in_db', '?')} reason='{(stats.get('reason') or '')[:80]}'"
+            )
+        except Exception as e:
+            logger.error(f"能動的リプ候補収集エラー: {e}", exc_info=True)
+
     async def active_reply_shimahara(self):
-        """能動的リプの日(戦略書Day 3)の完全自動化(1日5件上限、10:30/14:30/18:30)."""
+        """能動的リプの完全自動化(1日5件上限、10:30/14:30/18:30)。
+        active_reply_candidates テーブルから候補を取得 → LLM で返信生成 → 品質チェック → 投稿"""
         try:
             from tools.active_reply_shimahara import run_active_reply_cycle
             stats = await run_active_reply_cycle()
