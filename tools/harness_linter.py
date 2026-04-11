@@ -280,10 +280,19 @@ class HarnessLinter:
                 continue
             merged.merge(r)
 
-        # イベントログ記録（違反・警告がある場合のみ）
+        # イベントログ記録
+        # 2026-04-11: passed=True で warnings のみのケースは情報記録に格下げ。
+        # event_log ノイズ削減 (warning 74件/7d のうち大部分がこの軽微な警告)。
+        # 本当に危険な violation があった時だけ critical として立てる。
         if not merged.passed or merged.warnings:
             try:
                 from tools.event_logger import log_event
+                if merged.passed:
+                    # passed=True + warnings のみ → INFO で静かに記録
+                    severity = "info"
+                else:
+                    # 違反あり → critical
+                    severity = "critical"
                 await log_event(
                     "harness_lint.result",
                     "safety",
@@ -294,7 +303,7 @@ class HarnessLinter:
                         "warnings": len(merged.warnings),
                         "content_preview": content[:100],
                     },
-                    severity="warning" if merged.passed else "critical",
+                    severity=severity,
                 )
             except Exception:
                 pass
