@@ -709,11 +709,60 @@ async def _count_today_proactive_replies_shimahara() -> int:
 
 
 async def _proactive_reply_sakata() -> dict:
-    """特定 "friend" ユーザーの新規ポスト(リツイート/リプ除外)に確率的に自律返信する。
+    """legacy エントリ (scheduler からも呼ばれている)。
 
-    function name は legacy 互換のため残しているが、対象ユーザーは
-    X_PROACTIVE_FRIEND_USER_ID 環境変数で指定される。USER_PROFILES から
-    username/name/tone を動的に取得する。
+    2026-04-12 拡張: 単一 user id (_FRIEND_USER_ID) 固定から、USER_PROFILES 内の
+    全エントリのうち `proactive: true` フラグが立ったものすべてを巡回する形に
+    変更。下位互換のため関数名は維持。
+
+    各 profile エントリは以下のオプショナルフィールドを持てる:
+      - proactive: bool (必須: true で対象化)
+      - proactive_rate_pct: int (default 30)
+      - proactive_daily_cap: int (default 2)
+      - proactive_active_hour_start: int (default 9)
+      - proactive_active_hour_end: int (default 21)
+      - proactive_max_age_hours: int (default 6)
+    """
+    stats = {"processed": 0, "replied": 0, "skipped": 0, "reason": "", "targets": 0}
+
+    # proactive 対象候補: USER_PROFILES 内の proactive:true エントリ
+    proactive_targets: list[tuple[str, dict]] = []
+    for uid, prof in USER_PROFILES.items():
+        if isinstance(prof, dict) and prof.get("proactive") is True:
+            proactive_targets.append((uid, prof))
+
+    # 後方互換: _FRIEND_USER_ID が env 指定されていて、profile に proactive:true
+    # が無い場合はその ID を暗黙的に proactive 対象にする (既存運用を壊さないため)
+    if _FRIEND_USER_ID and not any(uid == _FRIEND_USER_ID for uid, _ in proactive_targets):
+        _legacy_profile = dict(USER_PROFILES.get(_FRIEND_USER_ID, {}))
+        _legacy_profile.setdefault("proactive", True)
+        _legacy_profile.setdefault("proactive_rate_pct", _FRIEND_PROACTIVE_RATE)
+        _legacy_profile.setdefault("proactive_daily_cap", _FRIEND_MAX_PROACTIVE_PER_DAY)
+        _legacy_profile.setdefault("proactive_active_hour_start", _FRIEND_ACTIVE_HOUR_START)
+        _legacy_profile.setdefault("proactive_active_hour_end", _FRIEND_ACTIVE_HOUR_END)
+        proactive_targets.append((_FRIEND_USER_ID, _legacy_profile))
+
+    stats["targets"] = len(proactive_targets)
+    if not proactive_targets:
+        stats["reason"] = "no_proactive_targets"
+        return stats
+
+    total_stats = {"processed": 0, "replied": 0, "skipped": 0}
+    for uid, prof in proactive_targets:
+        try:
+            sub = await _run_proactive_single_user(uid, prof)
+            total_stats["processed"] += sub.get("processed", 0)
+            total_stats["replied"] += sub.get("replied", 0)
+            total_stats["skipped"] += sub.get("skipped", 0)
+        except Exception as e:
+            logger.warning(f"proactive_single_user({uid}) エラー: {e}")
+
+    stats.update(total_stats)
+    return stats
+
+
+async def _run_proactive_single_user(user_id: str, profile: dict) -> dict:
+    """単一ユーザーに対する proactive reply サイクル.
 
     dedup 4 層:
     - Layer 1: fetch_user_recent_tweets の exclude=retweets,replies で元ポストのみ
@@ -727,30 +776,41 @@ async def _proactive_reply_sakata() -> dict:
 
     stats = {"processed": 0, "replied": 0, "skipped": 0, "reason": ""}
 
-    if not _FRIEND_USER_ID:
-        stats["reason"] = "friend_user_id_not_configured"
+    if not user_id:
+        stats["reason"] = "user_id_empty"
         return stats
 
+    rate_pct = int(profile.get("proactive_rate_pct", _FRIEND_PROACTIVE_RATE))
+    daily_cap = int(profile.get("proactive_daily_cap", _FRIEND_MAX_PROACTIVE_PER_DAY))
+    hour_start = int(profile.get("proactive_active_hour_start", _FRIEND_ACTIVE_HOUR_START))
+    hour_end = int(profile.get("proactive_active_hour_end", _FRIEND_ACTIVE_HOUR_END))
+    max_age_hours = int(profile.get("proactive_max_age_hours", 6))
+    tweet_max_age_sec = max_age_hours * 3600
+
     now_jst = datetime.now(JST)
-    if now_jst.hour < _FRIEND_ACTIVE_HOUR_START or now_jst.hour >= _FRIEND_ACTIVE_HOUR_END:
+    if now_jst.hour < hour_start or now_jst.hour >= hour_end:
         stats["reason"] = "inactive_hour"
         return stats
 
-    today_count = await _count_today_proactive_replies(_FRIEND_USER_ID)
-    if today_count >= _FRIEND_MAX_PROACTIVE_PER_DAY:
-        stats["reason"] = f"daily_cap ({today_count}/{_FRIEND_MAX_PROACTIVE_PER_DAY})"
+    today_count = await _count_today_proactive_replies(user_id)
+    if today_count >= daily_cap:
+        stats["reason"] = f"daily_cap ({today_count}/{daily_cap})"
         return stats
 
-    tweets = await fetch_user_recent_tweets(_FRIEND_USER_ID, limit=5)
+    tweets = await fetch_user_recent_tweets(user_id, limit=5)
     if not tweets:
         stats["reason"] = "no_tweets"
         return stats
 
     all_texts = [t.get("text", "") for t in tweets if t.get("text")]
 
-    # username を USER_PROFILES から取得(ハードコードしない)
-    friend_profile = dict(USER_PROFILES.get(_FRIEND_USER_ID, {}))
+    friend_profile = dict(profile)
     friend_username = friend_profile.get("username", "")
+
+    _FRIEND_USER_ID_LOCAL = user_id  # 以降の旧コード参照用
+    _FRIEND_PROACTIVE_RATE_LOCAL = rate_pct
+    _FRIEND_MAX_PROACTIVE_PER_DAY_LOCAL = daily_cap
+    _FRIEND_TWEET_MAX_AGE_SEC_LOCAL = tweet_max_age_sec
 
     for tweet in tweets:
         tweet_id = tweet.get("id", "")
@@ -764,28 +824,28 @@ async def _proactive_reply_sakata() -> dict:
 
         try:
             created = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - created).total_seconds() > _FRIEND_TWEET_MAX_AGE_SEC:
+            if (datetime.now(timezone.utc) - created).total_seconds() > _FRIEND_TWEET_MAX_AGE_SEC_LOCAL:
                 continue
         except Exception:
             continue
 
-        if random.randint(1, 100) > _FRIEND_PROACTIVE_RATE:
+        if random.randint(1, 100) > _FRIEND_PROACTIVE_RATE_LOCAL:
             continue
 
-        recount = await _count_today_proactive_replies(_FRIEND_USER_ID)
-        if recount >= _FRIEND_MAX_PROACTIVE_PER_DAY:
+        recount = await _count_today_proactive_replies(_FRIEND_USER_ID_LOCAL)
+        if recount >= _FRIEND_MAX_PROACTIVE_PER_DAY_LOCAL:
             stats["reason"] = "daily_cap_mid"
             break
 
         stats["processed"] += 1
 
         profile = dict(friend_profile)
-        profile["user_id"] = _FRIEND_USER_ID
+        profile["user_id"] = _FRIEND_USER_ID_LOCAL
         profile["recent_tweets"] = [t for t in all_texts if t != text][:5]
 
         try:
-            await detect_and_save_preferred_name(_FRIEND_USER_ID, text)
-            _pref = await get_preferred_name(_FRIEND_USER_ID, profile.get("name", ""))
+            await detect_and_save_preferred_name(_FRIEND_USER_ID_LOCAL, text)
+            _pref = await get_preferred_name(_FRIEND_USER_ID_LOCAL, profile.get("name", ""))
             if _pref:
                 profile["name"] = _pref
         except Exception:
@@ -809,7 +869,7 @@ async def _proactive_reply_sakata() -> dict:
 
         fake_trigger = {
             "id": tweet_id,
-            "author_id": _FRIEND_USER_ID,
+            "author_id": _FRIEND_USER_ID_LOCAL,
             "_author_username": friend_username,
             "text": text,
             "_original_content": "",
@@ -876,7 +936,7 @@ async def _proactive_reply_sakata() -> dict:
                 reply_url = f"https://x.com/syutain_beta/status/{result.get('tweet_id', '')}"
                 _friend_label = profile.get("name") or friend_username or "友人"
                 await notify_discord(
-                    f"🎬 {_friend_label}のポストに自律返信(proactive {_FRIEND_PROACTIVE_RATE}%)\n"
+                    f"🎬 {_friend_label}のポストに自律返信(proactive {_FRIEND_PROACTIVE_RATE_LOCAL}%)\n"
                     f"{_friend_label}: {text[:80]}\n"
                     f"SYUTAINβ: {reply_text[:80]}\n{reply_url}"
                 )
