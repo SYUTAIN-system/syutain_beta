@@ -114,6 +114,41 @@ _round_robin_idx = 0  # BRAVO/CHARLIEのラウンドロビン用
 _model_quality_cache: dict = {}  # {task_type: {"model": "...", "avg_quality": 0.X, "updated": timestamp}}
 _model_quality_cache_ttl = 3600  # 1時間キャッシュ
 
+# 品質劣化判定（learning_managerの7日アラートと整合させる）
+_RECENT_QUALITY_DAYS = 7
+_RECENT_QUALITY_AVOID_THRESHOLD = 0.5
+_RECENT_QUALITY_MIN_CALLS = 5
+_LONG_QUALITY_DAYS = 14
+_LONG_QUALITY_AVOID_THRESHOLD = 0.4
+_LONG_QUALITY_MIN_CALLS = 5
+
+
+def _should_avoid_model(
+    avg_recent: float,
+    cnt_recent: int,
+    avg_long: float,
+    cnt_long: int,
+) -> bool:
+    """品質劣化モデルの回避判定。直近急落と長期低品質の双方を拾う。"""
+    recent_decline = (
+        cnt_recent >= _RECENT_QUALITY_MIN_CALLS
+        and avg_recent > 0
+        and avg_recent < _RECENT_QUALITY_AVOID_THRESHOLD
+    )
+    long_decline = (
+        cnt_long >= _LONG_QUALITY_MIN_CALLS
+        and avg_long > 0
+        and avg_long < _LONG_QUALITY_AVOID_THRESHOLD
+    )
+    return recent_decline or long_decline
+
+
+def _pick_effective_quality(avg_recent: float, cnt_recent: int, avg_long: float, cnt_long: int) -> tuple[float, int, str]:
+    """学習ループ推奨に使う代表品質。直近サンプルが十分なら7日値を優先。"""
+    if cnt_recent >= 3 and avg_recent > 0:
+        return avg_recent, cnt_recent, "7d"
+    return avg_long, cnt_long, "14d"
+
 
 async def refresh_model_quality_cache():
     """model_quality_logから学習結果をキャッシュに読み込む（scheduler.pyから定期呼出）"""
@@ -121,38 +156,71 @@ async def refresh_model_quality_cache():
     try:
         from tools.db_pool import get_connection
         async with get_connection() as conn:
-            rows = await conn.fetch("""
-                SELECT task_type, model_used, tier,
-                    AVG(quality_score) as avg_quality, COUNT(*) as cnt
+            rows = await conn.fetch(f"""
+                SELECT
+                    task_type,
+                    model_used,
+                    tier,
+                    AVG(quality_score) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '{_RECENT_QUALITY_DAYS} days' AND quality_score > 0
+                    ) AS avg_quality_recent,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '{_RECENT_QUALITY_DAYS} days' AND quality_score > 0
+                    ) AS cnt_recent,
+                    AVG(quality_score) FILTER (
+                        WHERE quality_score > 0
+                    ) AS avg_quality_long,
+                    COUNT(*) FILTER (
+                        WHERE quality_score > 0
+                    ) AS cnt_long
                 FROM model_quality_log
-                WHERE created_at >= NOW() - INTERVAL '14 days' AND quality_score > 0
+                WHERE created_at >= NOW() - INTERVAL '{_LONG_QUALITY_DAYS} days' AND quality_score > 0
                 GROUP BY task_type, model_used, tier
                 HAVING COUNT(*) >= 3
-                ORDER BY task_type, avg_quality DESC
+                ORDER BY task_type, COALESCE(
+                    AVG(quality_score) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '{_RECENT_QUALITY_DAYS} days' AND quality_score > 0
+                    ),
+                    AVG(quality_score)
+                ) DESC
             """)
             cache = {}
             avoid = {}  # 品質が低いモデルを回避リストに
             for r in rows:
                 tt = r["task_type"]
-                avg_q = float(r["avg_quality"])
-                # 品質0.4未満 & サンプル5件以上 → 回避リスト
-                if avg_q < 0.4 and int(r["cnt"]) >= 5:
+                avg_recent = float(r["avg_quality_recent"]) if r["avg_quality_recent"] is not None else 0.0
+                cnt_recent = int(r["cnt_recent"] or 0)
+                avg_long = float(r["avg_quality_long"]) if r["avg_quality_long"] is not None else 0.0
+                cnt_long = int(r["cnt_long"] or 0)
+                avg_q, sample_count, quality_window = _pick_effective_quality(
+                    avg_recent, cnt_recent, avg_long, cnt_long
+                )
+
+                # 直近7日急落 or 14日長期低品質は回避対象
+                if _should_avoid_model(avg_recent, cnt_recent, avg_long, cnt_long):
                     if tt not in avoid:
                         avoid[tt] = []
                     avoid[tt].append(r["model_used"])
+
                 # 各task_typeで最高品質のモデルを記録
                 if tt not in cache:
                     cache[tt] = {
                         "model": r["model_used"], "tier": r["tier"],
                         "avg_quality": avg_q,
-                        "sample_count": int(r["cnt"]),
+                        "sample_count": sample_count,
+                        "quality_window": quality_window,
                         "updated": time.time(),
                         "avoid_models": avoid.get(tt, []),
                     }
                 elif tt in avoid:
                     cache[tt]["avoid_models"] = avoid[tt]
             _model_quality_cache = cache
-            logger.info(f"モデル品質キャッシュ更新: {len(cache)}タスクタイプ, {sum(len(v) for v in avoid.values())}モデル回避")
+            logger.info(
+                "モデル品質キャッシュ更新: "
+                f"{len(cache)}タスクタイプ, {sum(len(v) for v in avoid.values())}モデル回避 "
+                f"(recent<{_RECENT_QUALITY_AVOID_THRESHOLD:.2f}/{_RECENT_QUALITY_DAYS}d or "
+                f"long<{_LONG_QUALITY_AVOID_THRESHOLD:.2f}/{_LONG_QUALITY_DAYS}d)"
+            )
     except Exception as e:
         logger.warning(f"モデル品質キャッシュ更新失敗: {e}")
 
