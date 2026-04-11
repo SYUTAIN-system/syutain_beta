@@ -428,9 +428,22 @@ async def _get_thread_context(thread_id: str, limit: int = 10) -> list[dict]:
 
 
 async def check_and_reply():
-    """メイン処理: メンション+引用RTを検知して返信"""
+    """メイン処理: メンション+引用RTを検知して返信.
+
+    2026-04-12 cost-aware: credit_guard (syutain project) halt 中は
+    API 呼び出しを完全に抑制する.
+    """
     from brain_alpha.x_reply_generator import generate_reply
     from tools.social_tools import execute_approved_x
+
+    # credit_guard: syutain (bearer) project が halt なら即終了
+    try:
+        from tools.x_credit_guard import is_halted
+        if await is_halted(project="syutain"):
+            logger.info("x_mention_monitor: credit_guard halt 中 — スキップ")
+            return {"processed": 0, "replied": 0}
+    except Exception:
+        pass
 
     since_id = await _get_since_id()
     latest_id = since_id
@@ -438,7 +451,9 @@ async def check_and_reply():
     # 1. メンション取得
     mentions = await _fetch_mentions(since_id)
 
-    # 2. 引用RT取得
+    # 2. 引用RT取得 (コスト重い: 自分の直近5投稿 + 各 quote_tweets lookup)
+    # 2026-04-12: 引用RT検知は別ジョブ (低頻度) に分離予定。
+    # 今は従来通り実行するが、quote_count が 0 の投稿はスキップされる仕組みは保つ。
     quotes = await _fetch_quote_tweets()
 
     # 全トリガーを統合

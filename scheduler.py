@@ -446,24 +446,28 @@ class SyutainScheduler:
                 misfire_grace_time=30,
             )
 
-            # エンゲージメント取得（12時間間隔、起動5分後に初回実行）
-            _eng_first_run = datetime.now() + timedelta(minutes=5)
+            # エンゲージメント取得
+            # 2026-04-12 cost fix: 以前は起動5分後に next_run_time で即起動していたが、
+            # scheduler 再起動のたびに X API を大量に叩いて 1日 $2.80 を浪費していた。
+            # 現在: CronTrigger で日次 2回のみ (09:30 / 21:30 JST)、起動時即実行を廃止。
+            # 対象投稿数もメソッド側で 20 → 5 に縮小済み。
+            _eng_first_run = datetime.now() + timedelta(minutes=5)  # 他 job 用 (X 以外)
             self._scheduler.add_job(
                 self.bluesky_engagement_check,
-                IntervalTrigger(hours=12),
+                CronTrigger(hour="9,21", minute=30, timezone="Asia/Tokyo"),
                 id="bluesky_engagement",
-                name="Blueskyエンゲージメント取得（12時間）",
+                name="Blueskyエンゲージメント取得（09:30/21:30）",
                 replace_existing=True,
-                next_run_time=_eng_first_run,
+                misfire_grace_time=600,
             )
 
             self._scheduler.add_job(
                 self.x_engagement_check,
-                IntervalTrigger(hours=12),
+                CronTrigger(hour="9,21", minute=35, timezone="Asia/Tokyo"),
                 id="x_engagement",
-                name="Xエンゲージメント取得（12時間）",
+                name="Xエンゲージメント取得（09:35/21:35）",
                 replace_existing=True,
-                next_run_time=_eng_first_run + timedelta(minutes=1),
+                misfire_grace_time=600,
             )
             # A/Bテスト評価（エンゲージメント取得の10分後に実行、両バリアント24h経過分のみ評価）
             self._scheduler.add_job(
@@ -666,13 +670,25 @@ class SyutainScheduler:
                 misfire_grace_time=60,
             )
 
-            # X島原リプ自動返信（20分間隔、09:00-23:00 JST）
-            from apscheduler.triggers.interval import IntervalTrigger as _IntTrigger
+            # X島原リプ自動返信
+            # 2026-04-12 cost-optimized: 時間帯別間隔
+            # - 11:00 〜 20:00 JST (ピーク): 30 分間隔 (計 19 回 = 11:00/11:30/12:00/.../19:30/20:00)
+            # - 09:00, 10:00, 21:00, 22:00 (非ピーク): 60 分間隔 (計 4 回)
+            # - 23:00 〜 09:00 JST: 実行しない (メソッド内でも旧 skip 残す)
+            # 計 23 回/日 → 従来 42 回/日 から約半減。旧 API 消費 $0.63 → 推定 $0.35
             self._scheduler.add_job(
                 self.x_auto_reply_monitor,
-                _IntTrigger(minutes=20),
-                id="x_auto_reply_monitor",
-                name="X島原リプ自動返信（20分間隔）",
+                CronTrigger(hour="11-19", minute="0,30", timezone="Asia/Tokyo"),
+                id="x_auto_reply_monitor_peak",
+                name="X島原リプ自動返信（ピーク 11-19時、30分間隔）",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            self._scheduler.add_job(
+                self.x_auto_reply_monitor,
+                CronTrigger(hour="9,10,20,21,22", minute=0, timezone="Asia/Tokyo"),
+                id="x_auto_reply_monitor_offpeak",
+                name="X島原リプ自動返信（非ピーク 09/10/20/21/22時）",
                 replace_existing=True,
                 misfire_grace_time=300,
             )
@@ -2267,7 +2283,22 @@ class SyutainScheduler:
             logger.error(f"Blueskyエンゲージメント取得失敗: {e}")
 
     async def x_engagement_check(self):
-        """12時間間隔でX投稿のエンゲージメント取得（Free tierでは取得不可の場合あり）"""
+        """日次 2 回 (09:35 / 21:35 JST) でX投稿のエンゲージメント取得。
+
+        2026-04-12 cost fix: 以下を制限。
+        - 対象を直近 48h に絞り込み (以前は 7日、最大 20 件を毎回 fetch していた)
+        - 最大 5 件 (以前は 20 件)
+        - engagement_data が未取得のみを対象
+        - credit_guard halt 中ならスキップ
+        """
+        # Credit guard
+        try:
+            from tools.x_credit_guard import is_halted
+            if await is_halted(project="syutain"):
+                logger.info("x_engagement_check: credit_guard halt 中 — スキップ")
+                return
+        except Exception:
+            pass
         try:
             import json
             from tools.db_pool import get_connection
@@ -2278,8 +2309,10 @@ class SyutainScheduler:
                 rows = await conn.fetch("""
                     SELECT id, account, post_url FROM posting_queue
                     WHERE platform = 'x' AND status = 'posted' AND post_url IS NOT NULL
-                    AND posted_at > NOW() - INTERVAL '7 days'
-                    LIMIT 20
+                    AND posted_at > NOW() - INTERVAL '48 hours'
+                    AND (engagement_data IS NULL OR engagement_data::text = '{}')
+                    ORDER BY posted_at DESC
+                    LIMIT 5
                 """)
                 for row in rows:
                     post_url = row["post_url"] or ""
