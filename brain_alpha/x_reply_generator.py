@@ -259,11 +259,22 @@ def _build_system_prompt(
             lines.append("記憶している具体情報 (相手を驚かせる素材):")
             for f in deep_profile["memorable_facts"][:12]:
                 lines.append(f"- {f[:150]}")
-        # raw_tweet_samples: 実際のツイート文面。過去発言への「あ、その話」的参照に使う
+        # relevant_past_tweets: pgvector で「今の発言」と意味的に近い過去ツイート (動的)
+        # ここが「なんで知ってるの?」演出の核心。相手が今話してるテーマの過去発言が直接出る。
+        if "relevant_past_tweets" in deep_profile and deep_profile["relevant_past_tweets"]:
+            lines.append("")
+            lines.append("★相手の今の発言に関連する過去ツイート (意味検索 top 6、原文):")
+            for s in deep_profile["relevant_past_tweets"][:6]:
+                if isinstance(s, dict):
+                    txt = s.get("text", "")[:200]
+                    dt = (s.get("created_at", "") or "")[:10]
+                    sim = s.get("similarity", 0.0)
+                    lines.append(f"- ({dt}, sim={sim:.2f}) {txt}")
+        # raw_tweet_samples: 静的な過去ツイート (意味検索が使えない場合のフォールバック)
         if "raw_tweet_samples" in deep_profile and deep_profile["raw_tweet_samples"]:
             lines.append("")
             lines.append("★相手の実際の過去ツイート (参考、原文):")
-            for i, s in enumerate(deep_profile["raw_tweet_samples"][:20]):
+            for i, s in enumerate(deep_profile["raw_tweet_samples"][:15]):
                 if isinstance(s, dict):
                     txt = s.get("text", "")[:150]
                     dt = (s.get("created_at", "") or "")[:10]
@@ -426,6 +437,61 @@ async def _get_deep_profile(scope: str) -> dict | None:
         return None
 
 
+async def _retrieve_relevant_past_tweets(
+    user_id: str, query_text: str, top_k: int = 6,
+) -> list[dict]:
+    """相手の過去ツイート (x_user_tweets に embedding 済み) から、
+    現在の会話内容と意味的に近い上位 k 件を取得する。
+
+    2026-04-12: 2,568 件の過去ツイートを pgvector コサイン類似度で検索。
+    返信生成時、相手が「今話してる内容」に関連する過去発言を自然に拾える。
+
+    Args:
+        user_id: X user ID
+        query_text: 現在のトリガーテキスト (相手の今の発言)
+        top_k: 取得する件数 (default 6)
+
+    Returns: [{"text": str, "created_at": str, "similarity": float}, ...]
+    """
+    if not user_id or not query_text:
+        return []
+    try:
+        from tools.embedding_tools import get_embedding
+        from tools.db_pool import get_connection
+
+        emb = await get_embedding(query_text[:1000])
+        if not emb:
+            return []
+
+        emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT content, created_at,
+                          1 - (embedding <=> $2::vector) as similarity
+                   FROM x_user_tweets
+                   WHERE user_id = $1 AND embedding IS NOT NULL
+                   ORDER BY embedding <=> $2::vector
+                   LIMIT $3""",
+                user_id, emb_str, top_k,
+            )
+        results = []
+        import re as _re
+        for r in rows:
+            txt = (r["content"] or "").strip()
+            txt = _re.sub(r"https?://\S+", "", txt).strip()
+            if len(txt) < 10:
+                continue
+            results.append({
+                "text": txt[:200],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "similarity": float(r["similarity"]) if r["similarity"] is not None else 0.0,
+            })
+        return results
+    except Exception as e:
+        logger.debug(f"過去ツイート retrieval 失敗: {e}")
+        return []
+
+
 async def generate_reply(
     trigger_text: str,
     trigger_username: str,
@@ -445,6 +511,20 @@ async def generate_reply(
 
     # 深層プロファイル (過去ツイート分析、存在する相手だけ)
     deep_profile = await _get_deep_profile(scope=scope)
+
+    # 意味検索: 相手の今の発言に関連する過去ツイートを pgvector で 6 件取得
+    relevant_past = []
+    _uid = user_profile.get("user_id", "")
+    if _uid and trigger_text:
+        try:
+            relevant_past = await _retrieve_relevant_past_tweets(_uid, trigger_text, top_k=6)
+            if relevant_past and deep_profile is not None:
+                # deep_profile に動的差し込み。既存の raw_tweet_samples は保持するが、
+                # 意味一致のものを優先する。
+                deep_profile = dict(deep_profile)
+                deep_profile["relevant_past_tweets"] = relevant_past
+        except Exception as e:
+            logger.debug(f"relevant_past retrieval skip: {e}")
 
     # interaction_count を DB から取得(過去の掛け合い回数)
     interaction_count = 0
