@@ -31,11 +31,18 @@ echo $$ > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"' EXIT
 
 # Load environment (.env for API keys) without executing file contents
+# 2026-04-11 FIX: .env contains LOG_FILE which collides with this script's LOG_FILE
+# variable. Use _RESERVED_LOG_FILE to stash and restore it after the env loader.
+_RESERVED_LOG_FILE="$LOG_FILE"
 if [ -f "$PROJECT_DIR/.env" ]; then
     while IFS= read -r kv; do
         [ -z "$kv" ] && continue
         key=${kv%%=*}
         value=${kv#*=}
+        # Skip keys that collide with local shell variables used by this script
+        case "$key" in
+            LOG_FILE|LOCK_FILE|PROJECT_DIR|WORKTREE_BASE|WORKTREE_DIR|TASK_ID|TASK_DESC|PATH) continue ;;
+        esac
         export "$key=$value"
     done < <(python3 - "$PROJECT_DIR/.env" <<'PY'
 import re
@@ -58,6 +65,9 @@ with open(env_path, encoding="utf-8") as fh:
 PY
 )
 fi
+# Restore local LOG_FILE in case .env or subshell messed with it
+LOG_FILE="$_RESERVED_LOG_FILE"
+unset _RESERVED_LOG_FILE
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:$PATH"
 
 log "START: PDL Worker (Phase 4)"
