@@ -77,45 +77,19 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-11 12:43 JST)
+## Auto Changelog (last 7 days, updated 2026-04-12 09:41 JST)
 
-### SNS Content & Engagement
-*   `strategy/sns_theme_engine.py`: 339個のミーム/スラングアセットを導入し、独立した確率で投稿コンテンツを強化。
-*   `brain_alpha/sns_batch.py`: 投稿モードをdiss/neta/self-deprecation/readerでローテーションする機能を追加。
-*   `brain_alpha/x_reply_generator.py`: 複数ユーザー対応のX自動返信システムを導入、指定ユーザー限定で3層デデュープも実装。
-*   `strategy/sns_theme_engine.py`: 逆スラングを構造先行から素材先行へ変更し、スラングがコンテンツ駆動を強化。
-*   `brain_alpha/sns_batch.py`: SYUTAINβ専用のユーモア密度軸（12%）を追加し、SNS投稿の品質を向上。
-*   `strategy/sns_platform_voices.py`: 4つのアカウントに特化したSNSプロンプトを設計、柔軟な投稿を実現。
-*   `strategy/humor_combination_patterns.py`: 70種の異常パターンと40種の開始パターン、1000通りのバリエーションコンボを導入。
-*   `brain_alpha/sns_batch.py`: テーマ逸脱チェックを緩和し、適合する投稿が誤ってブロックされる問題を解消。
-*   `strategy/net_meme_vocabulary.py`: ミーム語彙を大幅に拡張し、アニメ、ネットスラング、コメディフレーズ、西村博之氏の言葉などを追加。
-*   `strategy/net_meme_vocabulary.py`: 多くのミーム構造テンプレートを追加し、多様な投稿パターンを可能に。
-*   `strategy/humor_combination_patterns.py`: ユーモアパターンを23から201に拡張し、読者エンゲージメントやAI社会観察を促すパターンを追加。
-*   `brain_alpha/sns_batch.py` 他: 建前本音ギャップやツッコミたい衝動を設計に組み込み、SNS投稿に多様なユーモアを注入。
+### SNS Reply Engine (x-reply)
+- brain_alpha/x_reply_generator.py: kusositsureiに対して tone_match_respectful かつ関連過去ツイート存在時に80%確率で過去いじりモードを発動し、過去ツイートを言い回しに取り込む実装
+- brain_alpha/x_reply_generator.py: 受信者の Kansai 弁や語尾を理解には使うが SYUTAINβ の生成文体には絶対に反映させないようトーンマーカー漏洩を防止
+- brain_alpha/x_reply_generator.py: kusositsurei 限定で語調ミラーリングを許可し、設計者／アイツ／あのおっさん の呼び分けルールを実装
+- brain_alpha/x_reply_generator.py: kusositsurei の全ツイート2,568件に対する pgvector ベース意味類似検索を組み込み、返信ごとに上位6件を深層プロファイルに注入
+- brain_alpha/x_reply_generator.py: deep_profile に raw_tweet_samples（過去ツイート抜粋）を埋め込み、引用禁止・語彙継承のみで過去知識を自然に織り込むルールを追加
+- brain_alpha/x_reply_generator.py: X API から取得した kusositsurei のツイートを LLM で分析し、深層プロファイル JSON を persona_memory に保存してシステムプロンプトに反映
 
-### Strategy & Content Quality
-*   `tools/strategy_book_loader.py` 他: 戦略ブックのランタイムローダーと実行システムを導入し、週次計画の選択を可能に。
-*   `brain_alpha/note_quality_checker.py`: ノート品質リトライ機能を強化し、合格時に製品パッケージを自動挿入する機能を追加。
-*   `tools/note_publisher.py`: 公開URL無効時の自動リセット機能をdailyジョブとして追加。
-*   `tools/note_publisher.py`: 記事日報のボイスをSYUTAINβに変更し、タイトルに日付、タグを拡張、自動生成免責事項を強制。
-*   `brain_alpha/content_pipeline.py`: 記事パイプラインのStage 4におけるナレーターボイスの混同を修正、リトライカウントを増加。
-*   `strategy/sns_theme_engine.py` 他: VTuber関連のコンテンツをシステムプロンプトを含む4層でブロックし、AITuberに言及を統一。
-
-### Monitoring & Automation
-*   `tools/x_monetization_tracker.py`: Xの収益化目標追跡機能を追加し、KPI監査ジョブに優先通知機能を追加。
-*   `tools/pdl_monitor.py` 他: PDLヘルスモニターとCodex認証有効期限モニターを実装、期限切れ5日前にアラート通知。
-*   `tools/active_reply_shimahara.py`: 特定時刻 (10:30/14:30/18:30 JST) に自動返信機能をスケジュール。
-*   `tools/pinned_post_ab_test.py`: ピン留めポストのA/Bテストローテーションを戦略ブックから動的にロード。
-*   `tools/grok_helpers.py` 他: Grokリサーチを1日6クエリに拡張し、JPトレンドと文化スロットを追加。
-
-### Core System & Infrastructure
-*   `tools/codex_auto_fix.py` 他: Codexの自動修正が未コミット変更を消さないよう修正、影響ファイルのみリバートしスナップショットを保存。
-*   `.gitignore` 他: 全個人データ（ユーザープロファイル、PII）をgitignoredな外部ファイルへ分離し、セキュリティを強化。
-*   `tools/llm_router.py`: SNS・ノート記事生成にgpt-4o-miniを導入し、費用効率とモデルフォールバックを最適化。
-*   `tools/llm_router.py`: LLMルーターのモデルチェーンを再編成し、Nemotron Superを優先して安定性を向上。
-*   `tools/llm_router.py`: `sns_draft`処理をOpenRouterの無料モデルチェーンにルーティングし、ローカルモデルの負荷を軽減。
-*   `brain_alpha/sns_batch.py`: プロンプト長を5900文字から4024文字に削減し、効率を向上。
-*   `tools/fact_checker.py`: fact_checkerの_extract_external_claims関数におけるIndexErrorバグを修正。
+### Scheduler & Monitoring
+- scheduler.py: オフピーク時間帯に時間単位スロット（0‑10,20‑23時）を追加し、深夜を含む 24 時間 1 時間以内のメンション検知カバレッジを達成
+- tools/x_mention_monitor.py, scheduler.py: メンション最大経過時間を 60 分から 6 時間に緩和し、オフピークに 23 時スロットを追加して見逃し防止
 
 <!-- AUTO-CHANGELOG-END -->
 
