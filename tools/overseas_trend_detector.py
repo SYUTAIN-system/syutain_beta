@@ -35,8 +35,9 @@ OVERSEAS_KEYWORDS = [
 async def detect_overseas_trends() -> list:
     """英語で話題だが日本語記事がまだないトピックを検出"""
     try:
-        from tools.tavily_client import search_tavily
-    except ImportError:
+        from tools.tavily_client import TavilyClient
+        _tavily = TavilyClient()
+    except Exception:
         logger.warning("tavily_client not available")
         return []
 
@@ -44,16 +45,18 @@ async def detect_overseas_trends() -> list:
     for kw in OVERSEAS_KEYWORDS:
         try:
             # 英語で検索
-            en_results = await search_tavily(kw, search_depth="basic", max_results=5)
+            en_result = await _tavily.search(kw, search_depth="basic", max_results=5)
+            en_results = en_result.get("results", []) if en_result else []
             if not en_results:
                 continue
 
             # 同じトピックを日本語で検索
             jp_query = kw
-            jp_results = await search_tavily(
+            jp_result = await _tavily.search(
                 jp_query, search_depth="basic", max_results=3,
                 include_domains=["note.com", "zenn.dev", "qiita.com", "hateblo.jp"],
             )
+            jp_results = jp_result.get("results", []) if jp_result else []
 
             jp_count = len(jp_results) if jp_results else 0
 

@@ -2206,8 +2206,10 @@ class SyutainScheduler:
                 # Tavily検索で原因をリサーチ
                 search_query = f"{coin_name} price {direction.replace('急騰','surge').replace('急落','crash')} reason today"
                 try:
-                    from tools.tavily_client import search_tavily
-                    results = await search_tavily(search_query, max_results=3, search_depth="basic")
+                    from tools.tavily_client import TavilyClient
+                    _tavily_crypto = TavilyClient()
+                    _tavily_result = await _tavily_crypto.search(search_query, max_results=3, search_depth="basic")
+                    results = _tavily_result.get("results", []) if _tavily_result else []
                     if results:
                         # intel_itemsに保存（情報収集パイプラインと紐付け）
                         from tools.db_pool import get_connection
@@ -2902,11 +2904,13 @@ class SyutainScheduler:
                                 if mm_normalized not in _known_released:
                                     # 未確認モデル → 外部検索で公式リリースを確認
                                     try:
-                                        from tools.tavily_client import search_tavily
-                                        search_results = await search_tavily(
+                                        from tools.tavily_client import TavilyClient
+                                        _tavily_model = TavilyClient()
+                                        _tavily_model_result = await _tavily_model.search(
                                             f"{mm} official release announcement",
                                             max_results=3, search_depth="basic",
                                         )
+                                        search_results = _tavily_model_result.get("results", []) if _tavily_model_result else []
                                         # 公式リリース記事が見つかるか確認
                                         _has_official = False
                                         if search_results:

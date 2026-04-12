@@ -217,13 +217,15 @@ async def _check_tavily(claims: list[str]) -> tuple[list[dict], float]:
     total_cost = 0.0
 
     try:
-        from tools.tavily_client import search_tavily
-    except ImportError:
+        from tools.tavily_client import TavilyClient
+        _tavily = TavilyClient()
+    except Exception:
         return issues, 0.0
 
     for claim in claims[:3]:  # 最大3件
         try:
-            results = await search_tavily(claim, max_results=3)
+            search_result = await _tavily.search(claim, max_results=3)
+            results = search_result.get("results", []) if search_result else []
             total_cost += 0.01  # Tavily 1検索 ≈ ¥0.01
 
             if results:

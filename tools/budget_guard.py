@@ -300,6 +300,7 @@ class BudgetGuard:
                     "allowed": False,
                     "reason": f"推定コスト{estimated_cost_jpy}円を加算すると予算90%超過",
                     "suggest_tier_downgrade": True,
+                    "remaining_jpy": round(max(0, DAILY_BUDGET_JPY - self._daily_spend_jpy), 1),
                 }
             elif max_ratio >= ALERT_THRESHOLD_WARN:
                 return {
