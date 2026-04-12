@@ -350,6 +350,26 @@ async def mcp_tools_call(
     except Exception:
         pass  # ログ失敗でもツール実行は続行
 
+    # 2026-04-12 P2-4: malware 検証 (条件付き承認)
+    # ツール実行前に arguments をスキャンし、blocked なら即拒否
+    try:
+        from tools.mcp_malware_verification import verify_and_log
+        verification = await verify_and_log(req.name, req.arguments)
+        if verification.is_blocked:
+            logger.critical(
+                f"MCP tool BLOCKED by malware check: {req.name} "
+                f"issues={verification.issues[:3]}"
+            )
+            return MCPToolCallResponse(
+                tool=req.name,
+                success=False,
+                error=f"Blocked by malware verification: {verification.issues[0].get('type', '?')}",
+                duration_ms=0,
+            )
+    except Exception as e:
+        # 検証自体のエラーは fail-open (ツール実行を止めない)
+        logger.warning(f"MCP malware check failed (continuing): {e}")
+
     start = time.monotonic()
     try:
         tool_fn = TOOL_REGISTRY[req.name]

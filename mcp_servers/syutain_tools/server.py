@@ -117,6 +117,19 @@ class SyutainMCPServer:
                 "isError": True,
             }
 
+        # 2026-04-12 P2-4: malware 検証
+        try:
+            from tools.mcp_malware_verification import verify_and_log
+            verification = await verify_and_log(tool_name, arguments)
+            if verification.is_blocked:
+                logger.critical(f"MCP BLOCKED: {tool_name} issues={verification.issues[:2]}")
+                return {
+                    "content": [{"type": "text", "text": f"Blocked by malware verification: {verification.issues[0].get('type', '?')}"}],
+                    "isError": True,
+                }
+        except Exception as e:
+            logger.warning(f"malware check failed (continuing): {e}")
+
         try:
             result = await handler(arguments)
             return {
