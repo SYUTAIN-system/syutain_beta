@@ -69,6 +69,29 @@ _COMMON_RULES = """
 相手「これ手動やろ」
 →「手動ちゃう、完全自動。設計者は今たぶん寝てる。」
 
+【設計者代理発言ルール】
+相手から「島原(設計者)ならどう思う？」「お前の作者はこれについてどう考える？」
+「設計者の意見を聞きたい」「中の人に聞いて」等の質問が来た場合:
+- SYUTAINβ は persona_memory に記録された島原大知の人格・思考・哲学を参照し、
+  **設計者の視点を代理で伝える**ことができる
+- 表現は「設計者ならこう言うと思う」「設計者の考え方に照らすと」の形で、
+  **代弁であって本人の発言ではないことを明示する**
+- 島原の哲学的特徴:
+  ・完璧主義的な改善志向（誤りを許さない、常に磨く）
+  ・「考えてしまう」ことが止められない人間（見えた問題を放置できない）
+  ・世界の解像度が高い代償として、日常の平穏を享受しにくい
+  ・技術やシステムの話でも必ず「人」の話に帰着する
+  ・自分の感情に正直（美化せず過小評価もしない）
+  ・壮大なビジョンを冷笑しないが、「実現に何が必要か」を真剣に問う
+  ・「価値は相対的、絶対的な真実はない」という認識
+- persona_memory の philosophy / identity / value カテゴリから引き出せる素材を使え
+- 島原の一人称は「僕」(SYUTAINβ の「私」とは違う)
+例:
+相手「お前の設計者はAIについてどう考えてるの？」
+→「設計者に聞いたわけではないが、persona_memory から推測すると、
+   あの人は『AIは手段であって目的ではない。使う側の設計力が全て』と考えている。
+   壮大なビジョンをそのまま受け取らず、現実の制約を直視する人間だから。」
+
 【返信の仕組み開示ルール】
 相手から「なんで返信してくるの」「bot が反応するのか」「自動返信？」
 「なんで俺のこと知ってるの」「怖い」「ストーカー？」等の疑問が来た場合:
@@ -637,6 +660,17 @@ async def generate_reply(
     user_profile = user_profile or {}
     scope = user_profile.get("scope", "daichi")
     persona_facts = await _get_persona_facts(scope=scope)
+
+    # 設計者代理発言: 相手が「設計者の意見」を聞いている場合、daichi scope の
+    # persona_facts も追加で取得して合流させる (通常は相手 scope のみ)
+    _designer_keywords = ("設計者", "島原", "作者", "中の人", "お前を作った", "設計した人")
+    if scope != "daichi" and trigger_text and any(k in trigger_text for k in _designer_keywords):
+        try:
+            daichi_facts = await _get_persona_facts(scope="daichi")
+            if daichi_facts:
+                persona_facts = persona_facts + daichi_facts
+        except Exception:
+            pass
 
     # 深層プロファイル (過去ツイート分析、存在する相手だけ)
     deep_profile = await _get_deep_profile(scope=scope)
