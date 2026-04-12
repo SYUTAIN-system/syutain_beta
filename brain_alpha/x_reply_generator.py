@@ -115,17 +115,20 @@ _TONE_PROMPTS = {
     "tone_match_respectful": (
         "【トーン: tone_match_respectful】\n"
         "面識の無い相手に返信する。\n"
-        "**その『特定のツイート』のテンションに合わせる** (キャラ全体ではなく個別発言単位)。\n"
-        "例:\n"
-        "  相手の今のツイートが真面目な問いかけ → 真面目に返す\n"
-        "  相手の今のツイートが毒舌・冗談 → こっちも同じ温度で毒舌・冗談を返す\n"
-        "  相手の今のツイートがカジュアルな雑談 → カジュアルで返す\n"
-        "相手のキャラが毒舌だからといって、毎回毒舌で返すのではなく、\n"
-        "あくまで「今のツイートの温度」に合わせる。\n"
+        "**その『特定のリプライ/ツイート』のテンション感に合わせる** (キャラ全体ではなく、今の 1 ツイートの温度)。\n"
         "\n"
-        "★★★ 80/20 過去いじりルール ★★★\n"
-        "80% の確率: 相手の過去ツイート内容を知っている前提で、軽く「いじる」「弄る」\n"
-        "20% の確率: 今のツイートだけに反応する、過去に触れない\n"
+        "★★★ テンション合わせの核心 ★★★\n"
+        "相手の「今のこの返信」の文面を読んで、温度を判定する:\n"
+        "  - 真面目な問いかけ・哲学的 → 真面目に、冷静に、考察的に返す。砕けた語尾(やで/フハハ)は不要\n"
+        "  - 毒舌・冗談・軽口 → 同じ温度で砕けて返す。「やで」「フハハ」OK\n"
+        "  - 短い一言ツッコミ → 短く返す\n"
+        "  - 技術的な質問 → 具体的に返す\n"
+        "キャラが毒舌だからといって常に毒舌で返すのは NG。今の 1 ツイートだけを見る。\n"
+        "\n"
+        "★★★ 90/10 過去いじりルール ★★★\n"
+        "90% の確率: 相手の過去ツイート内容を知っている前提で、会話の流れに自然に織り込む\n"
+        "10% の確率: 今のツイートだけに反応する、過去に触れない\n"
+        "ただし「自然な流れで入れれる場合に限る」。無理に過去を持ち出さない。\n"
         "\n"
         "『いじる』とは何か:\n"
         "- 相手の過去発言の矛盾を突く、「この前と言ってる事違うやん」系\n"
@@ -343,6 +346,37 @@ def _build_system_prompt(
                     lines.append(f"- ({dt}) {txt}")
                 elif isinstance(s, str):
                     lines.append(f"- {s[:150]}")
+        # トーンミラー用: trigger_text のテンション分析を追加注入
+        # (Python 側で簡易判定した結果を system prompt に直接書く)
+        if allow_tone_mirror and trigger_text:
+            # 簡易テンション判定
+            t = trigger_text.strip()
+            has_exclaim = any(c in t for c in "！!笑ｗwフハハコラ")
+            has_question_mark = "？" in t or "?" in t
+            is_short = len(t) < 30
+            has_serious_words = any(w in t for w in ("自我", "存在", "本質", "哲学", "人格", "意味", "価値", "死", "生"))
+            has_casual_words = any(w in t for w in ("笑", "草", "ワロ", "盛って", "マジ", "やば", "ｗ"))
+
+            if has_serious_words and not has_exclaim:
+                lines.append(
+                    "\n★★★★★ 今回のリプのテンション判定: 【真面目・哲学的】 ★★★★★\n"
+                    "相手は真面目に問いかけている。\n"
+                    "**以下の語尾・表現を絶対に使うな**: やで、やな、やろ、フハハ、コラ、ほんまそれな、マジで、草\n"
+                    "**以下のスタイルで返せ**: 冷静、考察的、知的、断定的。「です/ます」または「だ/である」調。\n"
+                    "相手の口癖リストは今回は完全に無視する。存在だけは把握しているが、リプには一切反映しない。\n"
+                    "このルールは他の全てのトーン指示より優先する。\n"
+                )
+            elif has_exclaim or has_casual_words:
+                lines.append(
+                    "\n★ 今回のリプのテンション判定: 【カジュアル・軽口】 ★\n"
+                    "相手は軽い調子で話している。砕けた語尾 OK。\n"
+                )
+            else:
+                lines.append(
+                    "\n★ 今回のリプのテンション判定: 【中間】 ★\n"
+                    "相手のトーンに合わせて判断せよ。\n"
+                )
+
         lines.append("")
         if force_tease and deep_profile.get("relevant_past_tweets"):
             # 強制いじりモード: 上位 relevant_past を 1-2 個取り出して「必ず匂わせろ」
@@ -616,7 +650,7 @@ async def generate_reply(
     import random as _rnd
     force_tease_mode = False
     if user_profile.get("tone") == "tone_match_respectful" and relevant_past:
-        if _rnd.random() < 0.80:
+        if _rnd.random() < 0.90:
             force_tease_mode = True
             user_profile = dict(user_profile)
             user_profile["_force_tease_mode"] = True
