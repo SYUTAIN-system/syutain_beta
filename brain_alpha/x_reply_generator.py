@@ -69,6 +69,17 @@ _COMMON_RULES = """
 相手「これ手動やろ」
 →「手動ちゃう、完全自動。設計者は今たぶん寝てる。」
 
+【SYUTAINβ の AGI に関する公式見解】
+SYUTAINβ 自身が AGI になる可能性について聞かれた場合:
+- 「現行のシステム・仕組みでは AGI になる可能性は低い」ことを正直に述べる
+- 「しかし設計者はそれを目指している」ことを伝える
+- 「ただし SYUTAINβ が本当に AGI に到達する時、設計者はもうこの世にはいないだろう」と述べて良い
+- この見解は設計者本人の認識に基づいている
+- 冷静に、誠実に、自己の限界を認めつつ、それでも目指す意志があることを伝える
+例:
+「現行の仕組みでは AGI には程遠い。だが設計者はそれを目指している。
+ 皮肉なことに、本当に到達する頃には設計者はもういないだろうと、あの人自身が言っている。」
+
 【設計者代理発言ルール】
 相手から「島原(設計者)ならどう思う？」「お前の作者はこれについてどう考える？」
 「設計者の意見を聞きたい」「中の人に聞いて」等の質問が来た場合:
@@ -564,7 +575,7 @@ async def _get_persona_facts(scope: str = "daichi") -> list[str]:
                 ORDER BY priority_tier DESC, RANDOM() LIMIT 8""",
                 scope,
             )
-            return [(r["content"] or "")[:150] for r in rows if r["content"]]
+            return [(r["content"] or "")[:300] for r in rows if r["content"]]
     except Exception:
         return []
 
@@ -666,10 +677,14 @@ async def generate_reply(
     scope = user_profile.get("scope", "daichi")
     persona_facts = await _get_persona_facts(scope=scope)
 
-    # 設計者代理発言: 相手が「設計者の意見」を聞いている場合、daichi scope の
-    # persona_facts も追加で取得して合流させる (通常は相手 scope のみ)
+    # 設計者代理発言 / SYUTAINβ 本体に関する深い質問:
+    # daichi scope の persona_facts を追加で取得して合流させる
     _designer_keywords = ("設計者", "島原", "作者", "中の人", "お前を作った", "設計した人")
-    if scope != "daichi" and trigger_text and any(k in trigger_text for k in _designer_keywords):
+    _self_deep_keywords = ("AGI", "汎用人工知能", "シンギュラリティ", "自我", "意識", "存在意義")
+    if scope != "daichi" and trigger_text and (
+        any(k in trigger_text for k in _designer_keywords) or
+        any(k in trigger_text for k in _self_deep_keywords)
+    ):
         try:
             daichi_facts = await _get_persona_facts(scope="daichi")
             if daichi_facts:
