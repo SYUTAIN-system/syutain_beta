@@ -390,7 +390,11 @@ def _build_system_prompt(
             has_exclaim = any(c in t for c in "！!笑ｗwフハハコラ")
             has_question_mark = "？" in t or "?" in t
             is_short = len(t) < 30
-            has_serious_words = any(w in t for w in ("自我", "存在", "本質", "哲学", "人格", "意味", "価値", "死", "生"))
+            has_serious_words = any(w in t for w in (
+                "自我", "存在", "本質", "哲学", "人格", "意味", "価値", "死", "生",
+                "論拠", "ふざけず", "真面目に", "本気で", "AGI", "可能性", "証明",
+                "聞いていますか", "聞いてますか", "答えてください", "説明して",
+            ))
             has_casual_words = any(w in t for w in ("笑", "草", "ワロ", "盛って", "マジ", "やば", "ｗ"))
 
             if has_serious_words and not has_exclaim:
