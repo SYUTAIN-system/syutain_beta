@@ -58,19 +58,24 @@ class BrowserAgent:
         self._nats_client = None
 
     async def initialize(self) -> bool:
-        """エージェントを初期化（各レイヤーの疎通確認）"""
+        """エージェントを初期化（各レイヤーの疎通確認）
+
+        2026-04-12 P2-5: Layer 優先順位を Playwright → Stagehand → Lightpanda に変更。
+        Lightpanda は BRAVO で CDP エラーが出て動かない状態が続いているため、
+        Playwright をデフォルト (Layer 1) に昇格し、Lightpanda は experimental (Layer 3) に降格。
+        """
         layers_available = []
 
-        # Layer 1: Lightpanda
+        # Layer 1: Playwright（最も安定、BRAVO で動作実績あり）
         try:
-            from tools.lightpanda_tools import LightpandaClient
-            self._lightpanda = LightpandaClient()
-            if await self._lightpanda.connect():
-                layers_available.append("lightpanda")
+            from tools.playwright_tools import PlaywrightBrowser
+            self._playwright = PlaywrightBrowser()
+            if await self._playwright.launch():
+                layers_available.append("playwright")
             else:
-                self._lightpanda = None
+                self._playwright = None
         except Exception as e:
-            logger.warning(f"Lightpanda初期化スキップ: {e}")
+            logger.warning(f"Playwright初期化スキップ: {e}")
 
         # Layer 2: Stagehand
         try:
@@ -83,16 +88,16 @@ class BrowserAgent:
         except Exception as e:
             logger.warning(f"Stagehand初期化スキップ: {e}")
 
-        # Layer 3: Playwright（常に利用可能と想定）
+        # Layer 3: Lightpanda（experimental、BRAVO CDP 接続問題が解決するまで降格）
         try:
-            from tools.playwright_tools import PlaywrightBrowser
-            self._playwright = PlaywrightBrowser()
-            if await self._playwright.launch():
-                layers_available.append("playwright")
+            from tools.lightpanda_tools import LightpandaClient
+            self._lightpanda = LightpandaClient()
+            if await self._lightpanda.connect():
+                layers_available.append("lightpanda")
             else:
-                self._playwright = None
+                self._lightpanda = None
         except Exception as e:
-            logger.warning(f"Playwright初期化スキップ: {e}")
+            logger.debug(f"Lightpanda初期化スキップ (experimental): {e}")
 
         # Layer 4: Computer Use（APIキーがあれば利用可能）
         try:
@@ -147,14 +152,14 @@ class BrowserAgent:
             if self._stagehand:
                 return "stagehand"
 
-        # データ抽出 → Layer 1 (Lightpanda) が最速
+        # データ抽出 → 2026-04-12 P2-5: Playwright 優先に変更 (旧: Lightpanda 最速)
         if action_type in ("extract", "extract_text", "extract_links"):
-            if self._lightpanda:
-                return "lightpanda"
-            if self._stagehand:
-                return "stagehand"
             if self._playwright:
                 return "playwright"
+            if self._stagehand:
+                return "stagehand"
+            if self._lightpanda:
+                return "lightpanda"
 
         # AI駆動操作 → Layer 2 (Stagehand)
         if action_type in ("act", "observe", "smart_click", "smart_fill"):
@@ -163,13 +168,13 @@ class BrowserAgent:
             if self._playwright:
                 return "playwright"
 
-        # デフォルト: 利用可能な最上位レイヤー
-        if self._lightpanda:
-            return "lightpanda"
-        if self._stagehand:
-            return "stagehand"
+        # デフォルト: 利用可能な最上位レイヤー (Playwright → Stagehand → Lightpanda)
         if self._playwright:
             return "playwright"
+        if self._stagehand:
+            return "stagehand"
+        if self._lightpanda:
+            return "lightpanda"
         if self._computer_use:
             return "computer_use"
 
