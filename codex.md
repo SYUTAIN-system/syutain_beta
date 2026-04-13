@@ -77,19 +77,35 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-12 09:41 JST)
+## Auto Changelog (last 7 days, updated 2026-04-13 09:42 JST)
 
-### SNS Reply Engine (x-reply)
-- brain_alpha/x_reply_generator.py: kusositsureiに対して tone_match_respectful かつ関連過去ツイート存在時に80%確率で過去いじりモードを発動し、過去ツイートを言い回しに取り込む実装
-- brain_alpha/x_reply_generator.py: 受信者の Kansai 弁や語尾を理解には使うが SYUTAINβ の生成文体には絶対に反映させないようトーンマーカー漏洩を防止
-- brain_alpha/x_reply_generator.py: kusositsurei 限定で語調ミラーリングを許可し、設計者／アイツ／あのおっさん の呼び分けルールを実装
-- brain_alpha/x_reply_generator.py: kusositsurei の全ツイート2,568件に対する pgvector ベース意味類似検索を組み込み、返信ごとに上位6件を深層プロファイルに注入
-- brain_alpha/x_reply_generator.py: deep_profile に raw_tweet_samples（過去ツイート抜粋）を埋め込み、引用禁止・語彙継承のみで過去知識を自然に織り込むルールを追加
-- brain_alpha/x_reply_generator.py: X API から取得した kusositsurei のツイートを LLM で分析し、深層プロファイル JSON を persona_memory に保存してシステムプロンプトに反映
+### SNS Reply System
+*   brain_alpha/x_reply_generator.py: AGIに関する公式見解と設計者の意図を共通ルールに追加。
+*   brain_alpha/x_reply_generator.py: persona_factsの文字数制限を300字に拡張し、AGI哲学の記述を完全に収容。
+*   brain_alpha/x_reply_generator.py: AGIに関する深い質問時にdaichiペルソナを自動でロードするキーワードトリガーを追加。
+*   brain_alpha/x_reply_generator.py: 真面目なトーンを検出するキーワードリストを拡張し、「論拠」「ふざけず」などを追加して精度向上。
+*   brain_alpha/x_reply_generator.py: 返信のデフォルト文体を標準語に変更し、関西弁は相手のツイートが使用した場合にのみ適用。
+*   brain_alpha/x_reply_generator.py: 設計者への言及があった際に、daichiスコープのペルソナ記憶を自動ロードするように変更。
+*   brain_alpha/x_reply_generator.py: 「設計者代理発言ルール」を導入し、設計者の視点で一人称「僕」で応答する機能を実装。
+*   brain_alpha/x_reply_generator.py: 返信が設計者に承認されたアカウント限定である旨を開示する仕組みを追加。
+*   brain_alpha/x_reply_generator.py: 受信者に関する深い知識を示唆する、興味を引くような応答ルールを実装。
+*   brain_alpha/x_reply_generator.py: 特定ツイートのトーンをインラインで検出し、冷静な質問にはカジュアル表現を抑制。
+*   brain_alpha/x_reply_generator.py: 過去ツイート参照率を80%から90%に引き上げ、過去内容への言及頻度を増加。
+*   brain_alpha/x_reply_generator.py: 特定ユーザーに対し、過去ポスト内容を基に80%の確率で軽くからかう返信モードを導入。
 
-### Scheduler & Monitoring
-- scheduler.py: オフピーク時間帯に時間単位スロット（0‑10,20‑23時）を追加し、深夜を含む 24 時間 1 時間以内のメンション検知カバレッジを達成
-- tools/x_mention_monitor.py, scheduler.py: メンション最大経過時間を 60 分から 6 時間に緩和し、オフピークに 23 時スロットを追加して見逃し防止
+### Content Pipeline
+*   brain_alpha/content_pipeline.py: SNSエンゲージメントデータに基づき、note記事タイトル生成の効果的パターンとアンチパターンを追加。
+
+### Daily Goal Generation
+*   tools/daily_goal_generator.py: 日次目標生成のシステムプロンプトに、ユーザーが棚上げしたタスクを除外するリストを追加。
+
+### Tooling & Infrastructure
+*   scheduler.py, tools/fact_checker.py, tools/overseas_trend_detector.py: 存在しないTavily検索呼び出しを修正し、各機能のバグを解消。
+*   tools/budget_guard.py: Tavily利用ブロック時のDiscordアラートで、正確な残高予算が表示されるよう修正。
+*   tools/mcp_malware_verification.py: OpenAIキーの検出パターンを`sk-proj-`形式にも対応するよう正規表現を拡張。
+*   agents/browser_agent.py: ブラウザエージェントの優先度を変更し、PlaywrightをLayer 1に昇格、Lightpandaを降格。
+*   tools/mcp_malware_verification.py: MCPツール呼び出し前に、コマンドインジェクションなど5種の脅威を検証するセキュリティ機能を実装。
+*   tools/mcp_server.py, mcp_servers/syutain_tools/server.py: 悪性ツール引数検出時、MCPサーバーが実行をブロックまたは警告するゲートを追加。
 
 <!-- AUTO-CHANGELOG-END -->
 
