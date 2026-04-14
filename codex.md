@@ -77,35 +77,42 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-13 09:42 JST)
+## Auto Changelog (last 7 days, updated 2026-04-14 09:42 JST)
 
-### SNS Reply System
-*   brain_alpha/x_reply_generator.py: AGIに関する公式見解と設計者の意図を共通ルールに追加。
-*   brain_alpha/x_reply_generator.py: persona_factsの文字数制限を300字に拡張し、AGI哲学の記述を完全に収容。
-*   brain_alpha/x_reply_generator.py: AGIに関する深い質問時にdaichiペルソナを自動でロードするキーワードトリガーを追加。
-*   brain_alpha/x_reply_generator.py: 真面目なトーンを検出するキーワードリストを拡張し、「論拠」「ふざけず」などを追加して精度向上。
-*   brain_alpha/x_reply_generator.py: 返信のデフォルト文体を標準語に変更し、関西弁は相手のツイートが使用した場合にのみ適用。
-*   brain_alpha/x_reply_generator.py: 設計者への言及があった際に、daichiスコープのペルソナ記憶を自動ロードするように変更。
-*   brain_alpha/x_reply_generator.py: 「設計者代理発言ルール」を導入し、設計者の視点で一人称「僕」で応答する機能を実装。
-*   brain_alpha/x_reply_generator.py: 返信が設計者に承認されたアカウント限定である旨を開示する仕組みを追加。
-*   brain_alpha/x_reply_generator.py: 受信者に関する深い知識を示唆する、興味を引くような応答ルールを実装。
-*   brain_alpha/x_reply_generator.py: 特定ツイートのトーンをインラインで検出し、冷静な質問にはカジュアル表現を抑制。
-*   brain_alpha/x_reply_generator.py: 過去ツイート参照率を80%から90%に引き上げ、過去内容への言及頻度を増加。
-*   brain_alpha/x_reply_generator.py: 特定ユーザーに対し、過去ポスト内容を基に80%の確率で軽くからかう返信モードを導入。
+### X Reply Generation
+*   `brain_alpha/x_reply_generator.py`: AGIに関するSYUTAINβの公式見解ルールを追加し、設計者の意図を反映
+*   `brain_alpha/x_reply_generator.py`: ペルソナ事実の文字数制限を150から300に拡張し、AGI哲学記述の途切れを解消
+*   `brain_alpha/x_reply_generator.py`: AGIなど自己に関する深い質問時、設計者ペルソナ情報を自動読み込みするトリガーを追加
+*   `brain_alpha/x_reply_generator.py`: 真面目なトーンを検出するキーワードリストに「論拠」「ふざけず」などを追加
+*   `brain_alpha/x_reply_generator.py`: 返信時のデフォルト文体を標準語にし、相手のツイートが方言の場合のみ方言を使用するよう修正
+*   `brain_alpha/x_reply_generator.py`: 設計者言及時、設計者代理として「設計者ならこう言う」形式で返信するルールを追加
+*   `brain_alpha/x_reply_generator.py`: 設計者関連キーワードで、島原氏の哲学を含むペルソナ情報を自動ロードする機能を追加
+*   `brain_alpha/x_reply_generator.py`: 返信理由や知識の深さを問われた際、個別承認制や個別チューニングを明かす機能を追加
+*   `brain_alpha/x_reply_generator.py`: 相手が予想する以上に深い知識を持つことを示唆する「知りすぎ」シグナリングを追加
+*   `brain_alpha/x_reply_generator.py`: 返信ツイートごとのトーン検出を強化し、真面目な内容には冷静な文体を強制するよう修正
+*   `brain_alpha/x_reply_generator.py`: 過去ツイート参照率を80%から90%に引き上げ、会話の流れが自然な場合に適用
 
-### Content Pipeline
-*   brain_alpha/content_pipeline.py: SNSエンゲージメントデータに基づき、note記事タイトル生成の効果的パターンとアンチパターンを追加。
-
-### Daily Goal Generation
-*   tools/daily_goal_generator.py: 日次目標生成のシステムプロンプトに、ユーザーが棚上げしたタスクを除外するリストを追加。
+### Security & Malware Protection
+*   `tools/mcp_malware_verification.py`: OpenAIキーのパターンをsk-proj-形式に対応させ、検知精度を向上
+*   `tools/mcp_malware_verification.py`: MCPツール呼び出し前にマルウェア検証モジュールを新規追加し、5つの脅威ベクトルをスキャン
+*   `tools/mcp_server.py`, `mcp_servers/syutain_tools/server.py`: MCPツール呼び出し時にコマンドインジェクション、SSRF等の脅威を検出しブロックする機構を導入
 
 ### Tooling & Infrastructure
-*   scheduler.py, tools/fact_checker.py, tools/overseas_trend_detector.py: 存在しないTavily検索呼び出しを修正し、各機能のバグを解消。
-*   tools/budget_guard.py: Tavily利用ブロック時のDiscordアラートで、正確な残高予算が表示されるよう修正。
-*   tools/mcp_malware_verification.py: OpenAIキーの検出パターンを`sk-proj-`形式にも対応するよう正規表現を拡張。
-*   agents/browser_agent.py: ブラウザエージェントの優先度を変更し、PlaywrightをLayer 1に昇格、Lightpandaを降格。
-*   tools/mcp_malware_verification.py: MCPツール呼び出し前に、コマンドインジェクションなど5種の脅威を検証するセキュリティ機能を実装。
-*   tools/mcp_server.py, mcp_servers/syutain_tools/server.py: 悪性ツール引数検出時、MCPサーバーが実行をブロックまたは警告するゲートを追加。
+*   `scheduler.py`, `fact_checker.py`他: 存在しないTavily検索関数をTavilyClient.searchに置き換え、検索機能を修正
+*   `tools/budget_guard.py`: 予算ブロック時に残りのJPYを表示するよう変更し、Discordアラートの情報を改善
+
+### Agent Core & Browser
+*   `agents/browser_agent.py`: ブラウザエージェントの優先度をPlaywrightをLayer 1へ昇格させLightpandaを降格
+
+### Daily Goal Generation
+*   `tools/daily_goal_generator.py`: ユーザーが後回しにしたテーマを自動目標生成から除外するリストを追加
+*   `tools/daily_goal_generator.py`: 目標生成の優先領域をNote/Bluesky/Threads品質と知的パイプライン精度に更新
+
+### Content Pipeline
+*   `brain_alpha/content_pipeline.py`: エンゲージメントデータに基づき記事タイトルの効果的なパターンとアンチパターンを追加
+
+### Zenn Article
+*   `articles/5f42b256a059fc7b.md`: AIエージェント暴走防止「LoopGuard 9層の設計」に関する記事を追加
 
 <!-- AUTO-CHANGELOG-END -->
 
