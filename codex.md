@@ -77,9 +77,221 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-15 09:40 JST)
+## Auto Changelog (last 7 days, updated 2026-04-16 09:41 JST)
 
-We can reduce redundancy by moving the repetition of the keyword and its significance to a single sentence at the beginning or end of the paragraph and avoid mentioning it multiple times within the same paragraph.
+We need to generate Auto Changelog section from the provided git log, following rules.
+
+We must filter out:
+- merge commits, typo fix, AUTO-STATS updates, WIP commits.
+- Look for commits with messages like "Update codex.md auto-stats", "Update live stats", "chore(codex): auto-refresh codex.md changelog", etc. These should be excluded.
+
+We need to group by functional categories (like SNS Pipeline, Monitoring) and produce bullet entries: "ファイル名: 何をどう変えたか" (File name: what changed). Each entry one line 80-140 characters (Japanese). No commit hash, no date. No numbers about LLM calls.
+
+We must limit to <=60 lines total.
+
+We need to parse commits from newest to oldest (already given in order: newest first). We'll pick meaningful commits.
+
+Let's list commits with messages and changed files:
+
+We'll go through each block.
+
+Commit: 323abf9 - Update codex.md auto-stats (2026-04-16) -> codex.md -> exclude (auto-stats)
+
+70f9992 - Update live stats (2026-04-16) -> README.md -> exclude (live stats)
+
+9442f4a - chore(codex): auto-refresh codex.md changelog (2026-04-15) -> codex.md -> exclude (codex changelog refresh)
+
+80d812a - Update codex.md auto-stats (2026-04-15) -> codex.md -> exclude
+
+75a2d74 - Update live stats (2026-04-15) -> README.md -> exclude
+
+11c579f - chore(codex): auto-refresh codex.md changelog (2026-04-14) -> codex.md -> exclude
+
+af981eb - Update codex.md auto-stats (2026-04-14) -> codex.md -> exclude
+
+cd743f4 - Update live stats (2026-04-14) -> README.md -> exclude
+
+a6d63a5 - Zenn: AIエージェントの暴走防止: LoopGuard 9層の設計と「なぜ9層も必要だったか」 -> articles/5f42b256a059fc7b.md -> This is a documentation/article. Might be relevant to "Documentation" category. Should we include? It's not code but content. The instruction: Auto Changelog for Codex? Usually includes changes to code. But could include docs. Not explicitly excluded. We'll consider maybe include under "Documentation". However it's a Zenn article, not code. Might be okay but maybe they'd want only code changes. We'll see later.
+
+0befc20 - chore(codex): auto-refresh codex.md changelog (2026-04-13) -> codex.md -> exclude
+
+c713c39 - Update codex.md auto-stats (2026-04-13) -> codex.md -> exclude
+
+43ea331 - Update live stats (2026-04-13) -> README.md -> exclude
+
+8d1350c - feat(note): title generation patterns from engagement data + goal exclusions
+- brain_alpha/content_pipeline.py: added effective title patterns and anti-patterns to the title generation system prompt. Based on actual engagement data (X/Bluesky/Threads announce post performance): Good: concrete numbers, failure stories, conversation quotes, cost figures; Bad: 日報 numbers, internal terms, abstract AI essays, poetic openers. note.com doesn't expose engagement API, so we use the SNS announce post engagement as a proxy for title effectiveness.
+- Also note about tools/daily_goal_generator.py: exclusion list already committed separately. (But the commit only changed brain_alpha/content_pipeline.py? Actually only that file shown after ---. So we only have that file.)
+We should include entry: brain_alpha/content_pipeline.py: タイトル生成プロンプトにエンゲージメントデータから導出した効果的パターンとアンチパターンを追加
+
+7d4bda9 - chore(daily-goal): add exclusion list for user-deferred topics
+- tools/daily_goal_generator.py: Added to _GOAL_GENERATION_SYSTEM prompt as "除外テーマ" block. Updated "優先したい領域" to focus on note/Bluesky/Threads quality, intel pipeline accuracy, and unresolved carry-over tasks.
+We'll include: tools/daily_goal_generator.py: ユーザー延期トピックの除外リストを追加し、優先領域をnote/Bluesky/Threads品質等に絞り込み
+
+bc1e58b - feat(x-reply): AGI official stance + expanded persona_facts to 300 chars + self-deep keyword trigger
+- brain_alpha/x_reply_generator.py: added AGI policy to _COMMON_RULES, expanded persona_facts limit 150→300 chars, added self-deep keywords, saved designer's AGI view as persona_memory.
+We'll need possibly split into multiple bullets if multiple aspects. But rule: same commit even if multiple points can be split if they are distinct. We could produce maybe two bullets: one for AGI stance, one for persona_facts expansion, one for self-deep trigger. However each bullet line length limited; we can combine but maybe separate.
+
+964b9b4 - fix(x-reply): expand serious-tone keyword list (AGI, 論拠, ふざけず, etc)
+- brain_alpha/x_reply_generator.py: added keywords: 論拠, ふざけず, 真面目に, 本気で, AGI, 可能性, 証明, 聞いていますか, 聞いてますか, 答えてください, 説明して
+We'll include: brain_alpha/x_reply_generator.py: 真面目トリガー キーワードリストを拡張（論拠、ふざけず等）してシリアスな質問への応答を標準日本語に
+
+e70898c - fix(x-reply): default to standard Japanese, use dialect only when recipient does
+- brain_alpha/x_reply_generator.py: changed tone_match_respectful rule: default standard Japanese, Kansai only when recipient tweet uses it.
+We'll include: brain_alpha/x_reply_generator.py: トーンマッチングを標準日本語デフォルトに変更、受信者のツイートが関西弁の時のみ方言使用
+
+74ea189 - feat(x-reply): designer proxy voice + auto-load daichi persona on trigger
+- brain_alpha/x_reply_generator.py: when asked about designer, auto-load daichi persona_memory and use proxy voice rule.
+We'll include: brain_alpha/x_reply_generator.py: 設計者代理発言ルールを追加し、設計者に関する質問時にdaichi personaを自動ロード
+
+1e63d5e - feat(x-reply): reply mechanism disclosure + deep knowledge signaling
+- brain_alpha/x_reply_generator.py: added disclosure of selective reply mechanism and deep knowledge hint.
+We'll include: brain_alpha/x_reply_generator.py: 返信メカニズムの開示と「知りすぎ」シグナリングルールを追加
+
+aaee68d - fix(x-reply): per-tweet tone detection + 90% past-reference rate
+- brain_alpha/x_reply_generator.py: inline tone detection, override for serious tweets, past-reference rate raised to 90%.
+We'll include: brain_alpha/x_reply_generator.py: ツイート単位のトーン検出を実装し、真面目な質問ではカジュアルマーカーをブロック、過去参照率を90%に上昇
+
+9ce8bc4 - fix(tavily): replace non-existent search_tavily with TavilyClient.search
+- scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py: replaced import/call.
+We'll need to group maybe under "Tavily integration fix" or "External API". Could create category "External Tools". For each file we could list but maybe combine: "Tavily関連モジュール: search_tavily を TavilyClient.search に置換し、ImportError を解消". That's one bullet covering multiple files.
+
+cfca3cb - fix(mcp): extend OpenAI key pattern to match sk-proj- format
+- tools/mcp_malware_verification.py: updated regex.
+We'll include: tools/mcp_malware_verification.py: OpenAIキー検出正規表現をsk-proj-形式にも対応させる
+
+8e0a6d7 - refactor(browser): P2-5 promote Playwright to Layer 1, demote Lightpanda
+- agents/browser_agent.py: reordered layer priority.
+We'll include: agents/browser_agent.py: ブラウザーエージェントでPlaywrightをレイヤー1に昇格、Lightpandaを3に降格
+
+f618fbc - feat(mcp): P2-4 malware verification for MCP tool calls
+- tools/mcp_malware_verification.py: new module scanning arguments before execution.
+We'll include: tools/mcp_malware_verification.py: MCPツール引数にマルウェア検証を追加（コマンドインジェクション、SSRF等5つの脅威ベクトル）
+
+Now also we have the Zenn article commit a6d63a5. Might be considered documentation. Could add under "Documentation": articles/5f42b256a059fc7b.md: Zenn記事「AIエージェントの暴走防止: LoopGuard 9層の設計」を追加
+
+Now we need to group by categories.
+
+Potential categories:
+- SNS Pipeline (title generation, x-reply etc)
+- Daily Goal Generator
+- MCP / Malware verification
+- Browser Agent
+- Tavily / External API
+- Documentation
+- Maybe Monitoring? but we excluded live stats.
+
+Let's list all meaningful commits with categorization.
+
+We'll produce bullet lines.
+
+We must ensure total lines <=60. We'll have maybe ~15-20 bullets.
+
+Now craft bullet lines in Japanese, file name colon description.
+
+Check length 80-140 characters. We'll aim ~100 chars.
+
+Let's draft.
+
+1. SNS Pipeline:
+- brain_alpha/content_pipeline.py: タイトル生成プロンプトにエンゲージメントデータから導出した効果的パターンとアンチパターンを追加
+Count characters? Let's approximate: "脳_alpha/content_pipeline.py:" (maybe 24) + rest... Should be okay.
+
+- brain_alpha/x_reply_generator.py: AGIに関する公式スタンスを_COMMON_RULESに追加し、persona_facts上限を150→300文字に拡張
+But we may split.
+
+Better to produce multiple bullets for each facet.
+
+Let's list all x-reply related commits and split.
+
+From bc1e58b:
+- brain_alpha/x_reply_generator.py: AGIに関する設計者の見解を persona_memory に保存し、_COMMON_RULES にAGI公式スタンスを追加
+- brain_alpha/x_reply_generator.py: persona_facts の文字数上限を 150 → 300 に拡張し、AGI哲学記載が truncate されないように
+- brain_alpha/x_reply_generator.py: 自己深掘りキーワード（AGI、汎用人工知能等）を追加し、該当質問時に daichi persona_facts を自動ロード
+
+From 964b9b4:
+- brain_alpha/x_reply_generator.py: 真面目トリガー キーワードリストに 「論拠」「ふざけず」「真面目に」等を追加し、シリアスな質問での方言混入を防止
+
+From e70898c:
+- brain_alpha/x_reply_generator.py: トーンマッチングを標準日本語デフォルトに変更、受信者ツイートが関西弁の時のみ方言を使用
+
+From 74ea189:
+- brain_alpha/x_reply_generator.py: 「設計者ならこう言うと思う」 Proxy Voice ルールを追加し、設計者に関する質問時に daichi persona を自動ロード
+
+From 1e63d5e:
+- brain_alpha/x_reply_generator.py: 選択的返信メカニズムの開示と「知りすぎ」シグナリングルールを追加し、返信理由を説明
+
+From aaee68d:
+- brain_alpha/x_reply_generator.py: ツイート単位のトーン検出をインライン実装し、真面目な質問ではカジュアルマーカーをブロック、過去参照率を 80% → 90% に上昇
+
+Now also note: there may be overlapping; we might combine some to reduce lines.
+
+But we need to keep lines <=60; splitting is okay.
+
+Now other categories:
+
+Daily Goal Generator:
+- tools/daily_goal_generator.py: ユーザーが延期したトピック（死コード掃除、テスト追加等）を除外リストに追加し、優先領域を note/Bluesky/Threads 品質等に絞り込み
+
+MCP Malware Verification:
+- tools/mcp_malware_verification.py: OpenAI キー検出正規表現を sk-proj- 形式にも対応させる (cfca3cb)
+- tools/mcp_malware_verification.py: MCPツール引数にマルウェア検証を追加（コマンドインジェクション、SSRF、パストラバーサル、秘密漏洩、 oversized 引数の5脅威ベクトル） (f618fbc)
+
+Browser Agent:
+- agents/browser_agent.py: ブラウザーエージェントで Playwright をレイヤー1に昇格、Lightpanda をレイヤー3に降格し、抽出処理の優先順位を変更
+
+Tavily fix:
+- scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py: Tavily 関連モジュールで 未定義の search_tavily 呼び出しを TavilyClient().search() に置換し、ImportError を解消
+
+Documentation:
+- articles/5f42b256a059fc7b.md: Zenn記事「AIエージェントの暴走防止: LoopGuard 9層の設計となぜ9層も必要だったか」を追加
+
+Now we need to group under headings.
+
+Potential headings:
+### SNS Pipeline (タイトル生成・返信)
+### Daily Goal Generator
+### MCP / セキュリティ
+### ブラウザーエージェント
+### 外部API連携 (Tavily)
+### ドキュメント
+
+Now produce bullet list under each.
+
+We need to ensure each bullet line 80-140 characters. Let's craft each line and count roughly.
+
+We'll produce maybe around 20 bullets.
+
+Let's draft each bullet.
+
+I'll write them in Japanese.
+
+1. SNS Pipeline:
+- brain_alpha/content_pipeline.py: タイトル生成プロンプトにエンゲージメントデータから導出した効果的パターン（「具体的数値」「失敗談」）とアンチパターン（「日報番号」「抽象的AI論文」）を追加
+Count: Let's approximate characters: "脳_alpha/content_pipeline.py:" (maybe 24) + rest... Should be >80. Let's trust.
+
+But we need to ensure each bullet is one line.
+
+We'll produce.
+
+Let's enumerate:
+
+Under ### SNS Pipeline
+- brain_alpha/content_pipeline.py: タイトル生成プロンプトにエンゲージメントデータから導出した効果的パターン（「具体的数値」「失敗談」「会話引用」「コスト」）とアンチパターン（「日報番号」「内部用語」「抽象的AIエッセイ」「詩的オープナー」）を追加
+
+- brain_alpha/x_reply_generator.py: AGIに関する設計者の見解を persona_memory に保存し、_COMMON_RULES に「現行では低い／目指している／到達時に設計者はいない」旨の公式スタンスを追加
+
+- brain_alpha/x_reply_generator.py: persona_facts の文字数上限を 150 → 300 に拡張し、AGI哲学の重要文言が truncate されないように調整
+
+- brain_alpha/x_reply_generator.py: 自己深掘りキーワード（AGI、汎用人工知能、シンギュラリティ、自我、意識、存在意義）を追加し、該当質問時に daichi persona_facts を自動ロード
+
+- brain_alpha/x_reply_generator.py: 真面目トリガー キーワードリストに 「論拠」「ふざけず」「真面目に」「本気で」「AGI」「可能性」「証明」「聞いていますか」等を追加し、シリアスな質問では標準日本語を強制
+
+- brain_alpha/x_reply_generator.py: トーンマッチングを標準日本語デフォルトに変更し、受信者ツイートが関西弁や「コラ」「フハハ」等を使う時のみ方言を使用、それ以外はです／ます調
+
+- brain_alpha/x_reply_generator.py: 「設計者ならこう言うと思う」 Proxy Voice ルールを追加し、設計者に関する質問時に daichi persona を自動ロードし、島原の第一人称「僕」で回答
+
+-
 
 <!-- AUTO-CHANGELOG-END -->
 
