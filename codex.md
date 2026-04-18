@@ -77,146 +77,32 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-17 09:41 JST)
+## Auto Changelog (last 7 days, updated 2026-04-18 09:41 JST)
 
-We need to output Markdown only, no extra text. The answer must be the Markdown section. We need to produce a Markdown section with headings and bullets based on the git log. Must obey the rules: no merge commits, typo fixes, auto-stats, WIP etc. Filter out commits that are just updating codex.md auto-stats, live stats, auto-refresh codex.md changelog etc. So we keep only meaningful commits: those with actual feature/fix.
+### Content & Documentation
+- articles/5f42b256a059fc7b.md: Zenn記事『AIエージェントの暴走防止: LoopGuard 9層の設計』を追加し、暴走防止策の詳細を公開  
 
-From log, meaningful commits:
+### Note Pipeline
+- brain_alpha/content_pipeline.py: エンゲージメントデータから導出したタイトル生成パターンとアンチパターンをシステムプロンプトに追加  
+- tools/daily_goal_generator.py: ユーザー延期テーマの除外リストを追加し、優先領域をnote/Bluesky/Threads品質等に焦点化  
 
-- a6d63a5: Zenn article (article file) - maybe not game mechanic? It's an article, maybe ignore? Probably exclude as not gameplay.
+### X Reply Engine
+- brain_alpha/x_reply_generator.py: AGI公式見解をルールに追加、persona_factsを300字に拡張、自己深掘りキーワードトリガーを実装  
+- brain_alpha/x_reply_generator.py: 真剣トリガー語リストに『論拠』『ふざけず』等を追加し、真面目な質問での方言漏れを防止  
+- brain_alpha/x_reply_generator.py: トーンマッチングをデフォルト標準日本語に変更、受信者のツイートが方言時のみ関西弁を使用  
+- brain_alpha/x_reply_generator.py: 設計者参照トリガーでdaichi personaを自動ロードし、『設計者ならこう言う』プロキシ発言ルールを追加  
+- brain_alpha/x_reply_generator.py: 個別承認アカウントへの返信メカニズムを開示し、『知りすぎ』サインを追加  
+- brain_alpha/x_reply_generator.py: ツイートごとのトーン検出を実装し、真剣質問時はカジュアルマーカーをブロック、過去参照率を90%に引き上げ  
 
-- First, I need to process the git log input provided by the user.
-- The task is to generate an "Auto Changelog" section in Markdown for Codex.
-- Rules:
-  1. Use ### headings for feature categories (e.g., "### SNS Pipeline", "### Monitoring").
-  2. Each entry: one line bullet, 80-140 characters, format "filename: what changed".
-  3. Split commits with multiple points into separate bullets.
-  4. Exclude: meaningless merges, typo fixes, AUTO-STATS updates, WIP commits.
-  5. Don't include LLM call counts or specific numbers (those are for AUTO-STATS).
-  6. No commit hashes or timestamps.
-  7. Total output <= 60 lines.
-  8. Output only Markdown, no preface.
+### Tavily Integration
+- scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py: TavilyClient.searchへの呼び出しに修正し、ImportErrorを解消、budget_guardの残り予算表示も改善  
 
-- I must group commits into logical categories. Looking at the changes, I can categorize by:
-  - SNS Pipeline (related to X/Twitter replies, title generation, etc.)
-  - Monitoring/Stats (but AUTO-STATS is excluded, so maybe just README updates for stats? But rule 5 says don't write LLM calls or specific numbers, and rule 4 excludes AUTO-STATS updates. However, README updates for live stats might be okay if not AUTO-STATS? But rule 4 says "AUTO-STATS更新" is excluded. The log shows "Update live stats" on README.md. Rule 4 says "AUTO-STATS更新" is excluded, but "live stats" might be different. However, rule 5 says "LLM呼び出し数や具体数値は書かない (AUTO-STATSで別管理)", so perhaps live stats updates are about AUTO-STATS? To be safe, I'll exclude any commit that mentions "live stats" or "auto-stats" as they likely relate to AUTO-STATS.
-  - But let's check: the user says in rule 4: "意味のない merge commit、typo fix、AUTO-STATS更新、WIPコミットは除外". So "Update live stats" might be considered AUTO-STATS更新? Possibly. However, in the log, "Update live stats" is on README.md, while "Update codex.md auto-stats" is on codex.md. Rule 4 says "AUTO-STATS更新" is excluded, so both should be excluded. Similarly, "Update live stats" on README.md is likely part of the same system.
+### MCP Security
+- tools/mcp_malware_verification.py: OpenAIキー正規表現をsk-proj-*形式にもマッチさせ、アンダースコア・ハイフンも許容  
+- tools/mcp_malware_verification.py: MCPツール引数のマルウェア検証モジュールを新設、5つの脅威ベクトルに対して安全・疑わしい・ブロック判定を実装  
 
-  Let's list all commits and decide:
-
-  Commits to exclude (per rule 4):
-  - Any commit with "auto-stats" in message: b5fb7ce, 323abf9, 80d812a, af981eb, c713c39, etc. (all "Update codex.md auto-stats")
-  - Any commit with "live stats": 7def591, 70f9992, 75a2d74, cd743f4, 43ea331, etc.
-  - Commits with "chore(codex): auto-refresh codex.md changelog": 0d1e8e3, 9442f4a, 11c579f, 0befc20, etc. (these are chores for codex, likely excluded as chores? But rule 4 doesn't explicitly exclude chore, but rule 4 says "意味のない merge commit、typo fix、AUTO-STATS更新、WIPコミットは除外". Chore might be considered meaningful if it's not those. However, "chore(codex): auto-refresh codex.md changelog" is likely a routine update that might be considered meaningless for changelog? But rule 4 doesn't say to exclude chore. However, in the context of generating a changelog for Codex, updating the changelog itself might be meta and excluded? But the user didn't say to exclude chore. However, looking at the examples in the log, many are chores for codex, and if we include them, the changelog would be full of self-referential updates. But the user didn't specify to exclude chore. However, rule 4 says "意味のない" (meaningless) commits, and auto-refresh of changelog might be considered meaningless for the changelog itself. To be safe, I'll exclude any commit that is about updating the changelog or stats, as they are likely not meaningful for the changelog we're generating.
-
-  Let's think from the perspective of what Codex would care about: changes to the system's functionality, not maintenance of its own documentation or stats.
-
-  So I'll exclude:
-  - All commits that modify only codex.md and README.md for stats/changelog updates.
-  - Specifically:
-    - Commits modifying codex.md with messages: "Update codex.md auto-stats", "chore(codex): auto-refresh codex.md changelog"
-    - Commits modifying README.md with "Update live stats"
-    - Commits that are only about stats/changelog maintenance.
-
-  Now, let's list all commits and see what remains.
-
-  First, list all commits from the log (newest first):
-
-  1. b5fb7ce 2026-04-17: Update codex.md auto-stats (2026-04-17) → codex.md → EXCLUDE (auto-stats)
-  2. 7def591: Update live stats (2026-04-17) → README.md → EXCLUDE (live stats)
-  3. 0d1e8e3: chore(codex): auto-refresh codex.md changelog (2026-04-16) → codex.md → EXCLUDE (chore for changelog)
-  4. 323abf9: Update codex.md auto-stats (2026-04-16) → codex.md → EXCLUDE
-  5. 70f9992: Update live stats (2026-04-16) → README.md → EXCLUDE
-  6. 9442f4a: chore(codex): auto-refresh codex.md changelog (2026-04-15) → codex.md → EXCLUDE
-  - 80d812a: Update codex.md auto-stats (2026-04-15) → codex.md → EXCLUDE
-  - 75a2d74: Update live stats (2026-04-15) → README.md → EXCLUDE
-  - 11c579f: chore(codex): auto-refresh codex.md changelog (2026-04-14) → codex.md → EXCLUDE
-  - af981eb: Update codex.md auto-stats (2026-04-14) → codex.md → EXCLUDE
-  - cd743f4: Update live stats (2026-04-14) → README.md → EXCLUDE
-  - a6d63a5: Zenn: AIエージェントの暴走防止: LoopGuard 9層の設計と「なぜ9層も必要だったか」 → articles/5f42b256a059fc7b.md → This is adding an article. Should we include? It's a content addition. But rule doesn't exclude articles. However, for Codex changelog, it might be relevant if Codex manages content. But let's see category.
-  - 0befc20: chore(codex): auto-refresh codex.md changelog (2026-04-13) → codex.md → EXCLUDE
-  - c713c39: Update codex.md auto-stats (2026-04-13) → codex.md → EXCLUDE
-  - 43ea331: Update live stats (2026-04-13) → README.md → EXCLUDE
-  - 8d1350c: feat(note): title generation patterns from engagement data + goal exclusions → brain_alpha/content_pipeline.py → KEEP (feat)
-  - 7d4bda9: chore(daily-goal): add exclusion list for user-deferred topics → tools/daily_goal_generator.py → KEEP? chore but meaningful? Rule 4 doesn't exclude chore if not meaningless. This seems meaningful.
-  - bc1e58b: feat(x-reply): AGI official stance + expanded persona_facts to 300 chars + self-deep keyword trigger → brain_alpha/x_reply_generator.py → KEEP
-  - 964b9b4: fix(x-reply): expand serious-tone keyword list (AGI, 論拠, ふざけず, etc) → brain_alpha/x_reply_generator.py → KEEP
-  - e70898c: fix(x-reply): default to standard Japanese, use dialect only when recipient does → brain_alpha/x_reply_generator.py → KEEP
-  - 74ea189: feat(x-reply): designer proxy voice + auto-load daichi persona on trigger → brain_alpha/x_reply_generator.py → KEEP
-  - 1e63d5e: feat(x-reply): reply mechanism disclosure + deep knowledge signaling → brain_alpha/x_reply_generator.py → KEEP
-  - aaee68d: fix(x-reply): per-tweet tone detection + 90% past-reference rate → brain_alpha/x_reply_generator.py → KEEP
-  - 9ce8bc4: fix(tavily): replace non-existent search_tavily with TavilyClient.search → scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py → KEEP (fix)
-  - cfca3cb: fix(mcp): extend OpenAI key pattern to match sk-proj- format → tools/mcp_malware_verification.py → KEEP
-  - 8e0a6d7: refactor(browser): P2-5 promote Playwright to Layer 1, demote Lightpanda → agents/browser_agent.py → KEEP (refactor)
-  - f618fbc: feat(mcp): P2-4 malware verification for MCP tool calls → tools/mcp_malware_verification.py → KEEP (feat)
-
-  Also, there is 7d4bda9 which is a chore but seems meaningful.
-
-  Now, let's list all commits to keep:
-
-  1. a6d63a5 2026-04-13: Zenn: AIエージェントの暴走防止: LoopGuard 9層の設計と「なぜ9層も必要だったか」 → articles/5f42b256a059fc7b.md
-  2. 8d1350c 2026-04-12: feat(note): title generation patterns from engagement data + goal exclusions → brain_alpha/content_pipeline.py
-  3. 7d4bda9 2026-04-12: chore(daily-goal): add exclusion list for user-deferred topics → tools/daily_goal_generator.py
-  4. bc1e58b 2026-04-12: feat(x-reply): AGI official stance + expanded persona_facts to 300 chars + self-deep keyword trigger → brain_alpha/x_reply_generator.py
-  5. 964b9b4 2026-04-12: fix(x-reply): expand serious-tone keyword list (AGI, 論拠, ふざけず, etc) → brain_alpha/x_reply_generator.py
-  6. e70898c 2026-04-12: fix(x-reply): default to standard Japanese, use dialect only when recipient does → brain_alpha/x_reply_generator.py
-  7. 74ea189 2026-04-12: feat(x-reply): designer proxy voice + auto-load daichi persona on trigger → brain_alpha/x_reply_generator.py
-  8. 1e63d5e 2026-04-12: feat(x-reply): reply mechanism disclosure + deep knowledge signaling → brain_alpha/x_reply_generator.py
-  9. aaee68d 2026-04-12: fix(x-reply): per-tweet tone detection + 90% past-reference rate → brain_alpha/x_reply_generator.py
-  10. 9ce8bc4 2026-04-12: fix(tavily): replace non-existent search_tavily with TavilyClient.search → scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py
-  11. cfca3cb 2026-04-12: fix(mcp): extend OpenAI key pattern to match sk-proj- format → tools/mcp_malware_verification.py
-  12. 8e0a6d7 2026-04-12: refactor(browser): P2-5 promote Playwright to Layer 1, demote Lightpanda → agents/browser_agent.py
-  13. f618fbc 2026-04-12: feat(mcp): P2-4 malware verification for MCP tool calls → tools/mcp_malware_verification.py
-
-  Now, I need to group these into categories.
-
-  Looking at the files:
-  - brain_alpha/content_pipeline.py → related to note title generation → could be "Content Pipeline" or "SNS Pipeline" (since it uses engagement data from SNS)
-  - tools/daily_goal_generator.py → daily goal generation → could be "Goal Generation" or "Planning"
-  - brain_alpha/x_reply_generator.py → multiple commits → all related to X (Twitter) reply generation → clearly "SNS Pipeline" or "X Reply System"
-  - scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py → related to Tavily fix → could be "External Services" or "Tavily Integration"
-  - tools/mcp_malware_verification.py → two commits: one fix, one feat → related to MCP malware verification → could be "MCP Security" or "Tool Safety"
-  - agents/browser_agent.py → browser agent refactor → could be "Browser Automation" or "Agent Tools"
-
-  Also, the article commit: a6d63a5 → articles/... → could be "Documentation" or "Content", but since it's an article, maybe not core system. However, the user didn't specify to exclude articles. But for Codex changelog, it might be relevant if Codex manages content. However, looking at the categories, perhaps we can have a "Content" category.
-
-  But let's see the user's example: "### SNS Pipeline", "### Monitoring". So they expect categories like that.
-
-  Let's group:
-
-  1. SNS Pipeline (for X/Twitter related changes):
-     - brain_alpha/x_reply_generator.py: multiple commits (bc1e58b, 964b9b4, e70898c, 74ea189, 1e63d5e, aaee68d)
-     - brain_alpha/content_pipeline.py: 8d1350c (title generation patterns from engagement data) → this uses SNS engagement data, so related.
-
-  2. Goal Generation / Planning:
-     - tools/daily_goal_generator.py: 7d4bda9 (chore but meaningful)
-
-  3. External Services / Tavily:
-     - scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py: 9ce8bc4
-
-  4. MCP Security:
-     - tools/mcp_malware_verification.py: cfca3cb, f618fbc
-
-  5. Browser Automation:
-     - agents/browser_agent.py: 8e0a6d7
-
-  6. Content / Documentation:
-     - a6d63a5: articles/... (Zenn article)
-
-  However, the article commit might be considered content addition, but for Codex changelog, it might be relevant if Codex is used for content management. But let's see if we can include it under a "Content" category.
-
-  Now, for each commit, I need to create bullet points. If a commit has multiple points (like bc1e58b has three points), I need to split them.
-
-  Let's go through each kept commit and split if necessary.
-
-  1. a6d63a5: 
-     - Message: "Zenn: AIエージェントの暴走防止: LoopGuard 9層の設計と「なぜ9層も必要だったか」"
-     - File: articles/5f42b256a059fc7b.md
-     - This is a single point: added an article. So one bullet: "articles/5f42b256a059fc7b.md: Added Zenn article on LoopGuard 9-layer design for AI agent runaway prevention"
-
-  2. 8d1350c:
-     - Message: "feat(note): title generation patterns from engagement data + goal exclusions"
-     -
+### Browser Agent
+- agents/browser_agent.py: ブラウザーエージェントのレイヤー優先度をPlaywright→Stagehand→Lightpandaに変更、初期化順序とディスパッチを更新
 
 <!-- AUTO-CHANGELOG-END -->
 
