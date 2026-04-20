@@ -77,34 +77,10 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-19 09:41 JST)
-
-### SNS Pipeline
-- brain_alpha/content_pipeline.py: added title generation patterns from engagement data and anti‑patterns; integrated goal exclusions for note.com proxy.
-
-### Daily Goal Generator
-- tools/daily_goal_generator.py: added exclusion list for user‑deferred topics (dead code, tests, types, X API, image/video) and updated priority areas.
-
-### X Reply System
-- brain_alpha/x_reply_generator.py: added AGI official stance, expanded persona_facts to 300 chars, and introduced self‑deep keyword trigger for AGI‑related questions.
-- brain_alpha/x_reply_generator.py: expanded serious‑tone keyword list (論拠, ふざけず, 真面目に, etc) to improve detection of genuinely serious queries.
-- brain_alpha/x_reply_generator.py: changed tone matching to default standard Japanese; Kansai dialect activates only when recipient's tweet uses it.
-- brain_alpha/x_reply_generator.py: implemented designer proxy voice – auto‑loads daichi persona when asked about designer/creator, quoting with 僕 instead of 私.
-- brain_alpha/x_reply_generator.py: added reply‑mechanism disclosure and deep‑knowledge signaling for “why replying” and “know too much” inquiries.
-- brain_alpha/x_reply_generator.py: introduced per‑tweet tone detection and raised past‑reference rate to 90% for more natural, context‑aware replies.
-
-### Tavily Integration
-- scheduler.py, tools/budget_guard.py, tools/fact_checker.py, tools/overseas_trend_detector.py: replaced missing search_tavily with TavilyClient.search, fixed ImportError and budget‑guard remaining‑JPY display.
-
-### MCP Security
-- tools/mcp_malware_verification.py: extended OpenAI API key regex to match sk‑proj‑* format in addition to legacy sk‑* keys.
-- tools/mcp_malware_verification.py: added malware verification layer scanning MCP tool args for command injection, SSRF, path traversal, and secret‑leak threats.
-
-### Browser Agent
-- agents/browser_agent.py: promoted Playwright to Layer 1, demoted Lightpanda to Layer 3, adjusted init order and extract‑action dispatch accordingly.
+## Auto Changelog (last 7 days, updated 2026-04-20 09:40 JST)
 
 ### Documentation
-- articles/5f42b256a059fc7b.md: added Zenn article “AIエージェントの暴走防止: LoopGuard 9層の設計と『なぜ9層も必要だったか』”.
+- articles/5f42b256a059fc7b.md: Zenn記事追加 – AIエージェントの暴走防止 LoopGuard 9層の設計とその必要性について解説
 
 <!-- AUTO-CHANGELOG-END -->
 
