@@ -214,21 +214,21 @@ Codexが自律改善を行う際、以下の指標を基準に判断すること
 <!-- AUTO-STATS-START -->
 <!-- このセクションは scheduler.py:update_codex_stats によって毎日09:35 JSTに自動更新されます。手動編集禁止。 -->
 
-## Live Auto-Stats (updated 2026-04-24 09:35 JST)
+## Live Auto-Stats (updated 2026-04-25 09:35 JST)
 
 ### System Metrics (PostgreSQL live query)
-- LLM Calls Total: **22,873**
-- LLM Cost Cumulative: **¥4,607**
-- Event Log Entries: **95,323**
-- SNS Posts Posted: **1,109**
-- note Published: **38**
-- intel_items: **2,759**
+- LLM Calls Total: **23,444**
+- LLM Cost Cumulative: **¥4,803**
+- Event Log Entries: **98,171**
+- SNS Posts Posted: **1,125**
+- note Published: **40**
+- intel_items: **2,838**
 - persona_memory: **718**
-- Goal Packets: **2 active / 127 completed**
+- Goal Packets: **2 active / 132 completed**
 - LoopGuard Events: **54**
 
 ### Code Metrics
-- scheduler.py: **6940** lines
+- scheduler.py: **6911** lines
 - brain_alpha/sns_batch.py: **3102** lines
 - brain_alpha/content_pipeline.py: **1875** lines
 - brain_alpha/note_quality_checker.py: **1457** lines
