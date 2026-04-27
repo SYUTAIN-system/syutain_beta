@@ -214,17 +214,17 @@ Codexが自律改善を行う際、以下の指標を基準に判断すること
 <!-- AUTO-STATS-START -->
 <!-- このセクションは scheduler.py:update_codex_stats によって毎日09:35 JSTに自動更新されます。手動編集禁止。 -->
 
-## Live Auto-Stats (updated 2026-04-26 09:35 JST)
+## Live Auto-Stats (updated 2026-04-27 09:35 JST)
 
 ### System Metrics (PostgreSQL live query)
-- LLM Calls Total: **24,023**
-- LLM Cost Cumulative: **¥5,012**
-- Event Log Entries: **100,961**
-- SNS Posts Posted: **1,144**
-- note Published: **41**
-- intel_items: **2,900**
+- LLM Calls Total: **24,682**
+- LLM Cost Cumulative: **¥5,223**
+- Event Log Entries: **103,884**
+- SNS Posts Posted: **1,163**
+- note Published: **43**
+- intel_items: **2,974**
 - persona_memory: **718**
-- Goal Packets: **2 active / 136 completed**
+- Goal Packets: **3 active / 142 completed**
 - LoopGuard Events: **54**
 
 ### Code Metrics
