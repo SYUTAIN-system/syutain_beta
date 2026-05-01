@@ -77,15 +77,10 @@ SYUTAINβ is shimahara's digital twin aspirant but a completely separate entity/
 <!-- AUTO-CHANGELOG-START -->
 <!-- このセクションは tools/codex_auto_reflector.py によって毎日09:40 JSTに自動更新されます。手動編集禁止。 -->
 
-## Auto Changelog (last 7 days, updated 2026-04-29 09:40 JST)
+## Auto Changelog (last 7 days, updated 2026-05-01 09:40 JST)
 
-### Content Generation
-- articles/fac2d1f8c8d62125.md: Zenn 記事「AI が書いた記事の捏造をどう防ぐか」の虚偽フィルター設計思想と運用を記述
-
-### System Maintenance
-- codex.md: 自動統計情報の更新処理を適用
-- README.md: リードミーのライブ統計情報を最新状態に更新
-- codex.md: Changelog の自動リフレッシュ処理を実行
+### Documentation
+- articles/fac2d1f8c8d62125.md: Added article on preventing AI-generated article fabrication, describing false filter design and operation
 
 <!-- AUTO-CHANGELOG-END -->
 
