@@ -220,21 +220,21 @@ Codexが自律改善を行う際、以下の指標を基準に判断すること
 <!-- AUTO-STATS-START -->
 <!-- このセクションは scheduler.py:update_codex_stats によって毎日09:35 JSTに自動更新されます。手動編集禁止。 -->
 
-## Live Auto-Stats (updated 2026-04-30 09:35 JST)
+## Live Auto-Stats (updated 2026-05-01 09:35 JST)
 
 ### System Metrics (PostgreSQL live query)
-- LLM Calls Total: **25,026**
-- LLM Cost Cumulative: **¥5,299**
-- Event Log Entries: **89,303**
-- SNS Posts Posted: **1,192**
+- LLM Calls Total: **25,370**
+- LLM Cost Cumulative: **¥5,443**
+- Event Log Entries: **91,655**
+- SNS Posts Posted: **1,194**
 - note Published: **46**
-- intel_items: **3,113**
+- intel_items: **3,131**
 - persona_memory: **718**
-- Goal Packets: **3 active / 148 completed**
+- Goal Packets: **3 active / 150 completed**
 - LoopGuard Events: **54**
 
 ### Code Metrics
-- scheduler.py: **6941** lines
+- scheduler.py: **6911** lines
 - brain_alpha/sns_batch.py: **3102** lines
 - brain_alpha/content_pipeline.py: **1875** lines
 - brain_alpha/note_quality_checker.py: **1457** lines
@@ -244,7 +244,7 @@ Codexが自律改善を行う際、以下の指標を基準に判断すること
 
 ### X Monetization Progress (TOP PRIORITY)
 - Verified Followers: **1,757** / 2,000 target (gap: 243)
-- 90-day Impressions: **95,026** / 5,000,000 target (1.90%)
+- 90-day Impressions: **80,351** / 5,000,000 target (1.61%)
 
 **Note for Codex**: これらの値は毎日09:35 JSTに最新化されます。これより前の手動記載数値(Recent Changesセクション等)は、記録時点のスナップショットです。現在値を参照したい場合は必ずこのセクションを見ること。
 
